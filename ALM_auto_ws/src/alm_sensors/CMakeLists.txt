@@ -14,8 +14,8 @@ find_package(tf2_ros REQUIRED)
 
 install(
   PROGRAMS
-    scripts/ebimu_publisher.sh
-    scripts/ebimu_subscriber.sh
+    scripts/ebimu_publisher.py
+    scripts/ebimu_subscriber.py
     tools/livox_udp_pointcloud2.py
   DESTINATION lib/${PROJECT_NAME}
 )
