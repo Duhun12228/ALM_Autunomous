@@ -13,6 +13,14 @@ find_package(geometry_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
 
 install(
+  PROGRAMS
+    scripts/ebimu_publisher.sh
+    scripts/ebimu_subscriber.sh
+    tools/livox_udp_pointcloud2.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+install(
   DIRECTORY calibration config launch
   DESTINATION share/${PROJECT_NAME}
 )
