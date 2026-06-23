@@ -58,6 +58,7 @@ ros2 launch alm_sensors sensors.launch.py
 
 ## 오류 발생 시
 ebimu 포트나 baudrate가 다른 경우 :
+
 ros2 launch alm_sensors sensors.launch.py ebimu_port:=/dev/ttyUSB0 ebimu_baudrate:=115200
 
 권한 에러가 나는경우 :
