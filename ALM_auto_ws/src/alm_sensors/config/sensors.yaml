@@ -1,0 +1,10 @@
+lidar:
+  ros__parameters:
+    frame_id: lidar_link
+    pointcloud_topic: /points
+
+imu:
+  ros__parameters:
+    frame_id: imu_link
+    imu_topic: /imu/data
+
