@@ -53,11 +53,11 @@ cd ~/ALM_Autunomous/ALM_auto_ws
 colcon build --packages-select alm_sensors
 ```
 
-## Source workspace
+## Launch LiDAR + EBIMU + pointcloud_to_scan
+```bash
 source install/setup.bash
-
-## Launch LiDAR + EBIMU
 ros2 launch alm_sensors sensors.launch.py
+```
 
 ## 오류 발생 시
 ebimu 포트나 baudrate가 다른 경우 :
