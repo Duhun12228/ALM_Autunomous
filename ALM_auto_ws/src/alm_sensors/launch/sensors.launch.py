@@ -21,6 +21,11 @@ def generate_launch_description():
                 output="screen",
             ),
             ExecuteProcess(
+                cmd=[executable_path("pointcloud_to_scan.py")],
+                name="pointcloud_to_scan",
+                output="screen",
+            ),
+            ExecuteProcess(
                 cmd=[
                     executable_path("ebimu_publisher.py"),
                     "--port",

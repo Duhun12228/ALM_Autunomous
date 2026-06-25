@@ -17,6 +17,7 @@ install(
     scripts/ebimu_publisher.py
     scripts/ebimu_subscriber.py
     tools/livox_udp_pointcloud2.py
+    tools/pointcloud_to_scan.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
