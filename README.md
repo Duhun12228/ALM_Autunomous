@@ -46,7 +46,7 @@ alm_mcu_interface
 Jetson은 3D LiDAR와 IMU를 받아 SLAM, localization, Nav2를 실행하고, `geometry_msgs/Twist` 기반 상위 명령과 안전 상태를 MCU로 보냅니다. MCU는 4륜 독립조향 운동학, 모터 PID, 엔코더 처리, 통신 timeout 정지를 담당합니다.
 
 
-## Workspace build
+## Workspace build(alm_sensors)
 
 ```bash
 cd ~/ALM_Autunomous/ALM_auto_ws
