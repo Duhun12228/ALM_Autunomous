@@ -47,8 +47,9 @@ Jetson은 3D LiDAR와 IMU를 받아 SLAM, localization, Nav2를 실행하고, `g
 
 
 ## Workspace build
-cd ~/ALM_Autunomous/ALM_auto_ws
 
+```bash
+cd ~/ALM_Autunomous/ALM_auto_ws
 colcon build --packages-select alm_sensors
 
 ## Source workspace
