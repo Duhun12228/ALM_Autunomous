@@ -19,7 +19,7 @@ source install/setup.bash
 - `alm_navigation`: SLAM, localization, Nav2 설정과 map
 - `alm_sensors`: 3D LiDAR, IMU 드라이버 bringup, calibration, 센서 설정
 - `alm_base_control`: `/cmd_vel` 안전 처리, 속도 제한, drive mode 관리
-- `alm_mcu_interface`: Jetson과 MCU 사이 serial/CAN/UART 통신 인터페이스
+- `alm_mcu_interface`: Jetson과 MCU 사이 UART 통신 인터페이스
 - `alm_msgs`: Jetson-MCU 통신용 커스텀 메시지
 
 ## Architecture
