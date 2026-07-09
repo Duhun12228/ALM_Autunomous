@@ -1,23 +1,31 @@
-# Jetson 설치 & 실행 가이드 (처음부터)
+# Jetson 설치 & 실행 가이드
 
-새 Jetson에서 이 워크스페이스를 받아 자율주행까지 올리는 전체 단계입니다.
-복사-붙여넣기로 진행할 수 있게 정리했습니다.
+새 Jetson에서 현재 워크스페이스를 받아 FAST-LIO 기반 자율주행까지 올리는 절차입니다.
 
-- 대상: **Jetson (Orin 등) + Ubuntu 22.04 (JetPack 6.x) + ROS 2 Humble**
-- 센서: Livox MID-360 (3D LiDAR + 내장 6축 IMU), 이더넷 연결
-- 제어: STM32 (UART `/dev/ttyTHS1`)
-
----
+- 대상: Jetson Orin 계열, Ubuntu 22.04, JetPack 6.x, ROS 2 Humble
+- 센서: Livox MID-360, 이더넷 UDP 직접 수신
+- 제어: STM32, UART `/dev/ttyTHS1`
+- 현행 런타임 구조: livox_ros_driver2 노드 대신 `alm_sensors`의 UDP 직접 파서 사용
 
 ## 0. 사전 확인
+
 ```bash
-lsb_release -a          # Ubuntu 22.04 여야 함 (Humble)
-uname -m                # aarch64
+lsb_release -a
+uname -m
 ```
 
-## 1. ROS 2 Humble 설치 (이미 있으면 건너뛰기)
+기대값:
+
+- Ubuntu 22.04
+- `aarch64`
+
+## 1. ROS 2 Humble 설치
+
+이미 설치되어 있으면 건너뜁니다.
+
 ```bash
-sudo apt update && sudo apt install -y curl gnupg lsb-release software-properties-common
+sudo apt update
+sudo apt install -y curl gnupg lsb-release software-properties-common
 sudo add-apt-repository universe -y
 sudo curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
   -o /usr/share/keyrings/ros-archive-keyring.gpg
@@ -30,128 +38,255 @@ echo "source /opt/ros/humble/setup.bash" >> ~/.bashrc
 source /opt/ros/humble/setup.bash
 ```
 
-## 2. 빌드 도구 & ROS 의존 패키지
-```bash
-sudo apt install -y python3-colcon-common-extensions python3-rosdep git build-essential cmake
-sudo rosdep init 2>/dev/null; rosdep update
+## 2. 의존 패키지 설치
 
-# 우리 스택이 쓰는 ROS 패키지
+```bash
 sudo apt install -y \
+  git build-essential cmake \
+  python3-colcon-common-extensions python3-rosdep \
+  python3-serial python3-numpy python3-yaml python3-pil \
   ros-humble-robot-localization \
-  ros-humble-slam-toolbox \
   ros-humble-navigation2 ros-humble-nav2-bringup \
-  ros-humble-pointcloud-to-laserscan \
+  ros-humble-nav2-map-server ros-humble-nav2-lifecycle-manager \
+  ros-humble-pcl-ros pcl-tools \
+  ros-humble-xacro ros-humble-robot-state-publisher \
   ros-humble-joint-state-publisher-gui \
-  ros-humble-xacro ros-humble-tf2-tools \
-  python3-serial
+  ros-humble-tf2-tools rviz2
 ```
 
-## 3. Livox-SDK2 설치 (드라이버 전제)
+rosdep 초기화:
+
+```bash
+sudo rosdep init 2>/dev/null || true
+rosdep update
+```
+
+> 런타임에서는 livox_ros_driver2 노드를 실행하지 않습니다. 다만 vendored FAST-LIO/ICP 코드가
+> `livox_ros_driver2` 메시지 헤더를 빌드 의존성으로 갖고 있어, 전체 colcon build에는
+> Livox-SDK2가 필요할 수 있습니다.
+
+## 3. Livox-SDK2 설치
+
+현재 센서 수신은 UDP 직접 파서가 담당하지만, `src/thirdparty/livox_ros_driver2` 패키지를
+전체 워크스페이스와 함께 빌드하려면 SDK 라이브러리가 필요합니다.
+
 ```bash
 cd ~
 git clone https://github.com/Livox-SDK/Livox-SDK2.git
-cd Livox-SDK2 && mkdir -p build && cd build
-cmake .. && make -j$(nproc) && sudo make install
+cd Livox-SDK2
+mkdir -p build
+cd build
+cmake ..
+make -j$(nproc)
+sudo make install
 sudo ldconfig
 ```
 
-## 4. livox_ros_driver2 빌드 (별도 워크스페이스)
-```bash
-mkdir -p ~/ws_livox/src && cd ~/ws_livox/src
-git clone https://github.com/Livox-SDK/livox_ros_driver2.git
-cd ~/ws_livox/src/livox_ros_driver2
-source /opt/ros/humble/setup.bash
-./build.sh humble          # 이 스크립트가 Humble용으로 빌드해줌
-echo "source ~/ws_livox/install/setup.bash" >> ~/.bashrc
-source ~/ws_livox/install/setup.bash
-```
+## 4. 워크스페이스 받기
 
-## 5. 이 워크스페이스 받아서 빌드
 ```bash
 cd ~
-git clone <이_리포_URL> ALM_Autunomous      # 이미 있으면 git pull
+git clone <이_리포_URL> ALM_Autunomous
 cd ~/ALM_Autunomous/ALM_auto_ws
-
-# package.xml 의존성 자동 설치 (livox 는 위에서 소스빌드했으니 skip)
 source /opt/ros/humble/setup.bash
-source ~/ws_livox/install/setup.bash
-rosdep install --from-paths src --ignore-src -r -y --skip-keys livox_ros_driver2
-
-colcon build --cmake-args -DBUILD_TESTING=OFF
-echo "source ~/ALM_Autunomous/ALM_auto_ws/install/setup.bash" >> ~/.bashrc
-source install/setup.bash
 ```
 
-> 매번 새 터미널에서는: `source /opt/ros/humble/setup.bash && source ~/ws_livox/install/setup.bash && source ~/ALM_Autunomous/ALM_auto_ws/install/setup.bash`
-> (.bashrc 에 넣어놨으면 자동)
+이미 받은 저장소라면:
 
----
+```bash
+cd ~/ALM_Autunomous
+git pull
+cd ALM_auto_ws
+```
 
-## 6. 하드웨어 연결 설정
+## 5. rosdep 및 빌드
 
-### 6-1. STM32 UART 포트 (`/dev/ttyTHS1`)
-Jetson 은 ttyTHS1 을 시리얼 콘솔(nvgetty)이 점유할 수 있으니 해제:
+`livox_ros_driver2`는 소스가 `src/thirdparty`에 vendoring 되어 있습니다.
+rosdep 키가 환경에 따라 해결되지 않을 수 있으므로 skip합니다.
+
+```bash
+rosdep install --from-paths src --ignore-src -r -y --skip-keys livox_ros_driver2
+colcon build --cmake-args -DBUILD_TESTING=OFF
+source install/setup.bash
+echo "source ~/ALM_Autunomous/ALM_auto_ws/install/setup.bash" >> ~/.bashrc
+```
+
+새 터미널 기본 source:
+
+```bash
+source /opt/ros/humble/setup.bash
+source ~/ALM_Autunomous/ALM_auto_ws/install/setup.bash
+```
+
+## 6. 하드웨어 연결
+
+### 6-1. STM32 UART
+
+Jetson의 `/dev/ttyTHS1`을 시리얼 콘솔이 잡고 있으면 해제합니다.
+
 ```bash
 sudo systemctl stop nvgetty
 sudo systemctl disable nvgetty
-sudo usermod -aG dialout $USER      # 재로그인 후 적용
-# 임시 권한:  sudo chmod 666 /dev/ttyTHS1
+sudo usermod -aG dialout $USER
 ```
 
-### 6-2. Livox MID-360 네트워크 (이더넷)
-MID-360 은 고정 IP 라 Jetson 쪽도 같은 대역으로 맞춰야 합니다.
-- Jetson 이더넷 IP 를 `192.168.1.5` 로 설정 (config 의 host ip 와 일치)
-- LiDAR IP 확인 후 `src/alm_sensors/config/MID360_config.json` 의 `lidar_configs[0].ip` 수정
-  (MID-360 기본 IP 는 `192.168.1.1XX` 형식, XX=시리얼 끝 2자리)
+그룹 권한은 재로그인 후 적용됩니다. 임시 확인용:
+
 ```bash
-# 예: 이더넷 인터페이스가 eth0 인 경우
+sudo chmod 666 /dev/ttyTHS1
+```
+
+설정 파일:
+
+```text
+ALM_auto_ws/src/alm_mcu_interface/config/mcu_interface.yaml
+```
+
+기본값:
+
+- port: `/dev/ttyTHS1`
+- baudrate: `115200`
+
+### 6-2. Livox MID-360 네트워크
+
+현재 설정:
+
+- Jetson host IP: `192.168.1.5`
+- LiDAR IP: `192.168.1.147`
+- point host port: `56301`
+- IMU host port: `56401`
+
+Jetson 이더넷 IP 예시:
+
+```bash
 sudo ip addr add 192.168.1.5/24 dev eth0
 sudo ip link set eth0 up
-ping 192.168.1.12       # LiDAR IP 로 응답 오면 OK
+ping 192.168.1.147
 ```
-> 영구 설정은 netplan 또는 NetworkManager 로.
 
----
+영구 설정은 NetworkManager 또는 netplan으로 구성합니다.
 
-## 7. 실행
+주의:
 
-### 7-1. 센서/TF 먼저 확인 (하드웨어 붙인 직후)
+- `alm_sensors/config/MID360_config.json`의 host/LiDAR IP를 실제 장비에 맞춥니다.
+- `livox_udp_pointcloud2.py`는 현재 `HOST_IP=192.168.1.5`, `POINT_PORT=56301`이
+  상수입니다. 네트워크 변경 시 이 파일도 확인합니다.
+
+## 7. 첫 실행 확인
+
 ```bash
+cd ~/ALM_Autunomous/ALM_auto_ws
+source install/setup.bash
 ros2 launch alm_bringup robot.launch.py
-# 다른 터미널
-ros2 topic hz /scan               # 2D 스캔 나오나
-ros2 topic hz /imu/data           # IMU 나오나
-ros2 topic echo /odometry/filtered --once   # EKF odom (STM32 연결돼야 정상)
-ros2 run tf2_tools view_frames    # map↔odom↔base_link↔livox_frame 확인
 ```
 
-### 7-2. 맵 만들기 (조이스틱으로 방 전체 주행)
+다른 터미널:
+
 ```bash
-ros2 launch alm_bringup slam.launch.py
-# 다른 터미널에서 RViz
-rviz2 -d ~/ALM_Autunomous/ALM_auto_ws/src/alm_description/rviz/alm.rviz
-# 방 다 돌았으면 저장
-mkdir -p ~/ALM_Autunomous/maps
-ros2 run nav2_map_server map_saver_cli -f ~/ALM_Autunomous/maps/my_map
+ros2 topic hz /livox/lidar
+ros2 topic hz /livox/imu
+ros2 topic hz /scan
+ros2 topic hz /mcu/state
+ros2 topic hz /wheel_odom
+ros2 run tf2_tools view_frames
 ```
 
-### 7-3. 자율주행
+STM32가 아직 없으면 `/mcu/state`, `/wheel_odom`은 나오지 않는 것이 정상입니다.
+
+## 8. 3D 매핑
+
 ```bash
-ros2 launch alm_bringup navigation.launch.py map:=~/ALM_Autunomous/maps/my_map.yaml
-# RViz: "2D Pose Estimate" 로 초기위치 → "Nav2 Goal" 로 목표 지정
-# 기본 drive_mode=auto → 회전 필요구간 spin, 직진 normal 자동 전환
+WS=~/ALM_Autunomous/ALM_auto_ws
+MAPS=$WS/src/alm_navigation/maps
+
+ros2 launch alm_sensors lidar.launch.py
+ros2 launch alm_navigation slam.launch.py rviz:=true
 ```
 
-자세한 운영/튜닝은 `docs/OPERATION_GUIDE.md`, 확인값은 `SETUP_CHECKLIST.md` 참고.
+공간을 천천히 훑은 뒤:
 
----
+```bash
+ros2 service call /map_save std_srvs/srv/Trigger
+```
 
-## 8. 자주 겪는 문제
+기본 PCD:
+
+```text
+$MAPS/alm_3d_map.pcd
+```
+
+## 9. 2D 맵 생성
+
+```bash
+ros2 run alm_navigation pcd2pgm.py \
+  --pcd $MAPS/alm_3d_map.pcd \
+  --out $MAPS/alm_map \
+  --resolution 0.05 \
+  --z-min 0.3 \
+  --z-max 0.8
+```
+
+출력:
+
+```text
+$MAPS/alm_map.pgm
+$MAPS/alm_map.yaml
+```
+
+## 10. 측위 검증
+
+```bash
+ros2 launch alm_sensors lidar.launch.py
+ros2 launch alm_navigation localization.launch.py map_pcd:=$MAPS/alm_3d_map.pcd
+```
+
+RViz 확인:
+
+```bash
+ros2 run alm_navigation map_publisher.py --ros-args -p yaml:=$MAPS/alm_map.yaml
+rviz2 -d $WS/install/alm_navigation/share/alm_navigation/rviz/localization.rviz
+```
+
+필요하면 RViz의 **2D Pose Estimate**로 초기 위치를 지정합니다.
+
+## 11. 자율주행
+
+```bash
+ros2 launch alm_bringup navigation.launch.py \
+  map:=$MAPS/alm_map.yaml \
+  map_pcd:=$MAPS/alm_3d_map.pcd
+```
+
+RViz에서 **2D Pose Estimate** 후 **Nav2 Goal**을 지정합니다.
+
+주행 모드 확인:
+
+```bash
+ros2 topic echo /drive_mode/effective
+```
+
+auto 모드 설정:
+
+```bash
+ros2 topic pub /drive_mode std_msgs/msg/String "{data: 'auto'}" -1
+```
+
+## 12. 문제 해결
+
 | 증상 | 확인 |
 |---|---|
-| `/scan` 안 나옴 | LiDAR ping 되나, MID360_config.json IP, `lidar.launch` 의 min/max_height |
-| `livox_ros_driver2` 못 찾음 | `source ~/ws_livox/install/setup.bash` 했나 |
-| `/dev/ttyTHS1` permission denied | dialout 그룹/재로그인, nvgetty 해제, chmod 666 |
-| odom 이상/AMCL 흔들림 | STM32 `/wheel_odom` 들어오나(`ros2 topic hz /wheel_odom`) |
-| TF map→odom 없음 | 매핑은 slam.launch, 자율주행은 navigation.launch (둘 중 하나만) |
-| 로봇 안 움직임 | `/cmd_vel`→`/mcu/command` 나오나, `enable_motors:true`인가, e-stop/estop 상태 |
+| `/livox/lidar` 없음 | Jetson IP, LiDAR IP, UDP port, 방화벽/인터페이스 |
+| `/livox/imu` 없음 | IMU host port `56401`, LiDAR 설정 |
+| `/scan` 비어 있음 | LiDAR 장착 높이, `pointcloud_to_scan` 높이 필터 |
+| `FAST-LIO` 초기화 안 됨 | IMU 방향/가속도, per-point time 필드, 정지 초기화 |
+| ICP 수렴 안 됨 | 초기 위치, `map_pcd`, voxel leaf size, prior map 품질 |
+| Nav2 odom 에러 | `/Odometry` 토픽, TF `map->odom->base_link` |
+| 로봇 안 움직임 | `/cmd_vel`, `/mcu/command`, `/mcu/state`, e-stop, fault |
+| UART permission denied | dialout 그룹, 재로그인, `nvgetty` 해제 |
+
+## 13. 현재 TODO와 연결되는 항목
+
+- ICP `map_voxel_leaf_size` 0.5 -> 0.2 튜닝 검토
+- Python UDP point parser의 CPU 부하 개선
+- `map_pcd` launch 인자와 FAST-LIO `prior_map_path` 동기화
+- 실차 본체 연결 상태에서 Nav2 goal 주행 검증

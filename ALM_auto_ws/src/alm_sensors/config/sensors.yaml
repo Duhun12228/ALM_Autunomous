@@ -1,6 +1,6 @@
 # 센서 토픽/프레임 요약 (실제 파라미터는 각 launch 에서 주입)
 lidar:
-  driver: livox_ros_driver2      # 공식 드라이버 (Livox MID-360)
+  driver: udp_direct_parser      # alm_sensors 의 UDP 직접 파서 (livox_ros_driver2 노드 미실행)
   frame_id: livox_frame
   pointcloud_topic: /livox/lidar
   scan_topic: /scan              # pointcloud_to_scan 변환 결과

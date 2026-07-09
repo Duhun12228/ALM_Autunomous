@@ -1,9 +1,10 @@
-"""매핑 모드: 로봇 상시 스택 + slam_toolbox.
+"""매핑 모드: 로봇 상시 스택 + FAST-LIO2 3D 매핑.
 
     ros2 launch alm_bringup slam.launch.py
 
 맵 저장:
-    ros2 run nav2_map_server map_saver_cli -f <ws>/src/alm_navigation/maps/my_map
+    ros2 service call /map_save std_srvs/srv/Trigger
+  -> <ws>/src/alm_navigation/maps/alm_3d_map.pcd
 """
 
 from launch import LaunchDescription

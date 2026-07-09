@@ -1,92 +1,141 @@
-# 작업 내역 정리 — 빈 워크스페이스 → 자율주행 스택
+# 작업 내역 정리
 
-원래 상태: 7개 패키지의 **뼈대(package.xml / CMakeLists / 빈 폴더)** 와 커스텀 메시지 2개,
-그리고 `alm_sensors` 일부(Livox UDP 파서·EBIMU IMU·pointcloud_to_scan)만 있었습니다.
-아래는 그 위에 **추가(＋)** 하거나 **수정(✎)** 한 전체 내역입니다.
+이 문서는 현재 워크스페이스 상태를 기준으로 정리한 변경 내역입니다.
+초기에는 ROS 2 패키지 뼈대와 일부 센서 스크립트가 있었고, 이후 4WIS 실차 주행을
+목표로 센서, 측위, Nav2, MCU 통신 계층이 추가되었습니다.
 
-범례: ＋ 새 파일 / ✎ 기존 파일 수정
+## 현재 아키텍처 요약
 
----
+```text
+Livox MID-360 UDP 직접 파싱
+  -> FAST-LIO2 3D 매핑
+  -> FAST-LIO-Localization 측위
+  -> Nav2 경로계획/제어
+  -> command_manager 안전 게이팅
+  -> mcu_bridge UART
+  -> STM32 2축 조향 + 4구동 제어
+```
 
-## alm_msgs (Jetson↔STM32 메시지)
-- ✎ `msg/McuState.msg` — STM32 업링크에 **per-wheel 엔코더 피드백** 추가
-  - `float32[2] steer_angle` (앞축/뒤축 조향각), `float32[4] wheel_speed` (4구동 각속도)
-  - (McuCommand는 기존 그대로: cmd_vel + drive_mode + enable_motors + emergency_stop)
+기존 2D `slam_toolbox + AMCL + EKF` 중심 구조는 현행 주행 경로가 아닙니다.
+`slam_toolbox.yaml`, AMCL 파라미터 등 일부 잔여 설정은 남아 있지만,
+운영 기준은 README와 이 문서의 FAST-LIO 경로입니다.
 
-## alm_description (URDF/TF)
-- ＋ `urdf/alm_robot.urdf.xacro` — **4WIS 로봇 URDF**. CAD 실측(바퀴반지름 0.103, 앞축 x+0.611/뒤축 x−0.301, 트랙 ±0.5, 차체 1.2×0.9872×0.45, 80kg). base_link + 4×(조향링크+바퀴링크). 라이다 프레임은 위치 미확정이라 제외
-- ＋ `launch/description.launch.py` — robot_state_publisher(URDF→TF). `standalone:=true`면 joint_state_publisher_gui, `rviz:=true`면 RViz
-- ＋ `rviz/alm.rviz` — RViz 기본 설정(로봇/TF/scan/map/plan)
-- ✎ `CMakeLists.txt` — 설치 대상 `meshes`(없음) → `launch` 로 교체
-- ✎ `package.xml` — xacro, robot_state_publisher, joint_state_publisher_gui, rviz2 의존성 추가
+## alm_msgs
 
-## alm_sensors (센서 — 공식 Livox 드라이버로 전환)
-- ＋ `config/MID360_config.json` — Livox MID-360 네트워크 설정(호스트/라이다 IP, 포트)
-- ＋ `scripts/imu_relay.py` — **내장 6축 IMU** `/livox/imu` → `/imu/data` 재발행. orientation 무효화(EKF가 가짜 방향 융합 방지)
-- ✎ `launch/lidar.launch.py` — 기존 UDP 파서 → **공식 livox_ros_driver2** 노드로 교체. + pointcloud_to_scan(/scan) + base_link→livox_frame static TF(라이다 위치 파라미터)
-- ✎ `launch/imu.launch.py` — 기존 EBIMU 퍼블리셔 → imu_relay 실행으로 교체
-- ✎ `config/sensors.yaml` — 토픽/프레임을 Livox 기준으로 갱신
-- ✎ `CMakeLists.txt` — imu_relay.py 설치 추가
-- ✎ `package.xml` — livox_ros_driver2, launch_ros 의존성 추가
-- (기존 `livox_udp_pointcloud2.py`, `imu_publisher.py`, `pointcloud_to_scan.py`는 유지. 앞 2개는 미사용)
+- `McuCommand.msg`
+  - Jetson -> STM32 상위 명령.
+  - `Twist`, `drive_mode`, `enable_motors`, `emergency_stop`, `sequence`.
+- `McuState.msg`
+  - STM32 -> Jetson 피드백.
+  - 2축 조향각 `[front, rear]`, 4구동 휠 속도, odom pose, 배터리, fault 상태.
 
-## alm_navigation (EKF / SLAM / AMCL·Nav2) — 전부 신규
-- ＋ `config/ekf.yaml` — robot_localization EKF. `/wheel_odom` + `/imu/data` 융합 → `/odometry/filtered`, TF odom→base_link (2D 모드)
-- ＋ `config/slam_toolbox.yaml` — slam_toolbox 매핑. 입력 **2D /scan**, base_frame base_link, use_sim_time false
-- ＋ `config/nav2.yaml` — Nav2 전체. AMCL / planner(A*) / controller(DWB) / costmap. **footprint 실측 사각형**, 회피 소스 **2D /scan + 3D /livox/lidar 둘 다**, use_sim_time false
-- ＋ `launch/ekf.launch.py` — EKF 노드 실행
-- ＋ `launch/slam.launch.py` — slam_toolbox 실행
-- ＋ `launch/navigation.launch.py` — nav2_bringup(AMCL+Nav2)을 우리 파라미터로 실행
-- ＋ `maps/.gitkeep` — 맵 저장 폴더
-- ✎ `package.xml` — robot_localization, slam_toolbox, nav2_bringup 등 의존성 추가
+## alm_description
 
-## alm_base_control (모드 선택 + 안전 게이팅) — 전부 신규
-- ＋ `scripts/command_manager.py` — **핵심 노드**. `/cmd_vel`+`/drive_mode`+`/emergency_stop` → auto의 **normal/spin/crab 자동선택**(참고 레포 로직 포팅) + 속도/가속 제한 + timeout/e-stop → `/mcu/command`
-- ＋ `config/base_control.yaml` — 속도한계, auto 모드 임계값(spin 진입 |wz|≥0.35 등)
-- ＋ `launch/base_control.launch.py`
-- ✎ `CMakeLists.txt` — command_manager.py 설치 추가
-- ✎ `package.xml` — rclpy 등 추가
+- 4WIS 로봇 URDF 추가.
+- CAD 실측 기반 주요 값:
+  - wheel radius `0.103`
+  - wheel width `0.0488`
+  - front_x `+0.6106`
+  - rear_x `-0.3010`
+  - half_track `0.500`
+  - body `1.200 x 0.9872 x 0.450`
+- `description.launch.py`, RViz 설정 추가.
+- LiDAR 장착 위치는 URDF에 고정하지 않고 `lidar.launch.py`의 static TF 인자로 관리.
 
-## alm_mcu_interface (Jetson↔STM32 UART 브리지) — 전부 신규
-- ＋ `scripts/mcu_bridge.py` — UART 송수신(CRC16 프레이밍). `/mcu/command`→STM32, STM32→`/mcu/state`+`/wheel_odom`+`/joint_states`. **기구학은 안 함**(STM32 담당)
-- ＋ `config/mcu_interface.yaml` — 포트(/dev/ttyTHS1), baud, 토픽/프레임
-- ＋ `docs/uart_protocol.md` — **STM32 팀용 프로토콜 규격서**(프레임/CRC/바이트 레이아웃/역·정기구학 가이드)
-- ＋ `launch/mcu_interface.launch.py`
-- ✎ `CMakeLists.txt` — mcu_bridge.py + docs 설치 추가
-- ✎ `package.xml` — rclpy, python3-serial 추가
+## alm_sensors
 
-## alm_bringup (최상위 통합 launch) — 전부 신규
-- ＋ `launch/robot.launch.py` — 상시 스택(description+sensors+ekf+base_control+mcu_interface)
-- ＋ `launch/slam.launch.py` — robot + slam_toolbox (매핑)
-- ＋ `launch/navigation.launch.py` — robot + AMCL + Nav2 (자율주행)
-- ＋ `config/.gitkeep`
-- ✎ `package.xml` — alm_* 하위 패키지 의존성 추가
+- Livox MID-360 UDP 직접 파싱 방식으로 전환.
+- `livox_udp_pointcloud2.py`
+  - UDP point packet 수신.
+  - `/livox/lidar` PointCloud2 발행.
+  - FAST-LIO용 per-point `time` 필드 포함.
+- `livox_udp_imu.py`
+  - MID-360 내장 6축 IMU UDP 수신.
+  - `/livox/imu` 발행.
+- `imu_relay.py`
+  - `/livox/imu` -> `/imu/data`.
+  - orientation covariance를 `-1`로 설정해 EKF가 가짜 orientation을 융합하지 않게 함.
+- `pointcloud_to_scan.py`
+  - `/livox/lidar` -> `/scan`.
+  - Nav2 costmap/시각화용 2D scan 생성.
+- `lidar.launch.py`
+  - livox_ros_driver2 런타임 드라이버 노드 없이 위 노드들을 통합 실행.
+  - 단 FAST-LIO/ICP 빌드에는 vendored livox_ros_driver2 메시지 헤더 의존성이 남아 있음.
+  - `base_link -> livox_frame` static TF 발행.
 
-## 문서 (리포 루트)
-- ✎ `README.md` — 파이프라인/패키지/설치/실행/모드 설명으로 대폭 갱신
-- ＋ `SETUP_CHECKLIST.md` — 실차 전 확인/수정할 값(지오메트리, 라이다 위치, STM32 등)
-- ＋ `docs/OPERATION_GUIDE.md` — 매핑→저장→자율주행 운영 순서
-- ＋ `docs/CHANGES.md` — (이 문서)
+## alm_navigation
 
----
+- FAST-LIO2 매핑 launch 추가.
+  - `slam.launch.py`
+  - `/map_save` 서비스로 `maps/alm_3d_map.pcd` 저장.
+- FAST-LIO-Localization launch 추가.
+  - `localization.launch.py`
+  - `icp_node`: 현재 scan과 prior PCD ICP 정합.
+  - `transform_publisher`: `/icp_result` 기반 `map->odom` TF.
+  - `fastlio_localization`: `odom->base_link`, `/Odometry`.
+- Nav2 launch 재구성.
+  - `navigation.launch.py`
+  - `map_server`는 pcd2pgm 결과인 2D YAML/PGM 사용.
+  - Nav2 odom topic은 `/Odometry`.
+- `pcd2pgm.py`
+  - FAST-LIO PCD를 Nav2용 2D occupancy map으로 변환.
+- `map_publisher.py`
+  - Nav2 없이 2D 맵을 `/map`으로 띄워 RViz 검증.
+- `localization.rviz`, `fastlio_mapping.rviz` 추가.
 
-## 검증 완료
-- `colcon build` 7개 패키지 전부 통과
-- xacro 파싱 OK(9 links / 8 joints), McuState 배열 필드 정상
-- UART payload 크기 18/63 bytes = 프로토콜 문서와 일치
-- command_manager 실행 → auto에서 회전 시 spin, 전진 시 normal 전환 확인
+## alm_base_control
 
-## 리뷰 후 개선 (2026-07-09)
-- **[1] `/scan` 변환을 C++ 표준으로 교체**: `lidar.launch.py` 가 파이썬 `pointcloud_to_scan` 대신
-  `pointcloud_to_laserscan`(C++) 노드 사용. `target_frame=base_link` 라 높이필터가 '지면 기준' →
-  바닥 오탐↓, Jetson 부하↓. (`sudo apt install ros-humble-pointcloud-to-laserscan`)
-- **[7] MCU fault 반영**: command_manager 가 `/mcu/state` 구독, fault/estop 보고 시 즉시 정지.
-- **[8] 오도메트리 워치독**: 주행 중 `/odometry/filtered` 가 `odom_watchdog_sec`(0.5s) 넘게 끊기면 정지.
-  (odom 을 한 번 받은 뒤 끊기는 경우만 → 부팅 시 오탐 방지)
-- **[9] rate-limit 옵션화**: `enable_rate_limit`(기본 true). velocity_smoother 와 이중이면 false 가능.
-- 검증: MCU fault→정지(enable_motors=false, emergency_stop=true) 실동작 확인.
+- `command_manager.py` 추가.
+  - `/cmd_vel`, `/drive_mode`, `/emergency_stop`, `/mcu/state` 구독.
+  - auto 모드에서 normal/spin/crab 선택.
+  - 속도/가속 제한.
+  - cmd timeout, e-stop, MCU fault, odom watchdog 반영.
+  - `/mcu/command` 발행.
+- `base_control.yaml`에 속도 제한과 안전 파라미터 정리.
 
-## 내가 만들지 않은 것 (기존 패키지 재사용)
-SLAM(slam_toolbox), AMCL·planner·controller(nav2), EKF(robot_localization),
-LiDAR 드라이버(livox_ros_driver2) — 이들은 **직접 코딩이 아니라 설정+launch로 구동**.
-우리 코드는 그 사이 접착제(센서 relay, EKF 설정, 모드 매니저, UART 브리지)입니다.
+## alm_mcu_interface
+
+- `mcu_bridge.py` 추가.
+  - UART frame 송수신.
+  - `/mcu/command` -> STM32.
+  - STM32 state -> `/mcu/state`, `/wheel_odom`, `/joint_states`.
+  - 기구학은 STM32 담당, Jetson은 전송 계층과 ROS topic 변환 담당.
+- `docs/uart_protocol.md` 추가.
+  - frame sync, CRC16-CCITT, Command 18 bytes, State 63 bytes.
+  - STM32 역기구학/정기구학 구현 가이드 포함.
+
+## alm_bringup
+
+- `robot.launch.py`
+  - description, sensors, EKF, base_control, MCU bridge 통합.
+  - `use_ekf` 인자로 EKF on/off 가능.
+- `slam.launch.py`
+  - robot stack 위에 FAST-LIO2 매핑 launch 포함.
+- `navigation.launch.py`
+  - robot stack을 `use_ekf:=false`로 실행.
+  - FAST-LIO-Localization + Nav2 실행.
+
+## 문서
+
+- README를 FAST-LIO 기반 현행 구조로 갱신.
+- `OPERATION_GUIDE.md`를 매핑 -> pcd2pgm -> 측위 검증 -> Nav2 주행 순서로 갱신.
+- `JETSON_SETUP.md`를 UDP 직접 파싱 기준 설치 절차로 갱신.
+- `SETUP_CHECKLIST.md`를 실차 확인값 중심으로 갱신.
+- `TODO.md`에 2026-07-10 기준 남은 작업 정리.
+
+## 검증/실험 기록
+
+- `colcon build --cmake-args -DBUILD_TESTING=OFF` 통과 기록 있음.
+- FAST-LIO2 매핑으로 `alm_3d_map.pcd` 생성.
+- `pcd2pgm.py`로 `alm_map.pgm/yaml` 생성.
+- FAST-LIO-Localization 측위 성공 기록 있음.
+- `map_publisher.py`와 `localization.rviz`로 2D 트래킹 뷰 검증.
+
+## 현재 남은 정리 포인트
+
+- `localization.launch.py`의 `map_pcd`와 `fastlio_relocalization.yaml`의
+  `prior_map_path` 동기화.
+- ICP voxel leaf size 튜닝.
+- Python UDP point parser CPU 부하 개선.
+- 실차 본체 연결 후 Nav2 goal -> `/cmd_vel` -> `/mcu/command` -> 실제 주행 검증.
+- livox_ros_driver2 런타임 미사용과 빌드 의존성의 경계가 헷갈리지 않도록 추가 정리.

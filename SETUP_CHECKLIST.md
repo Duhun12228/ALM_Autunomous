@@ -23,7 +23,9 @@ CAD(alm_p1_ASSEM_0526) 실측으로 채움. 값이 맞는지만 확인:
 - [ ] **LiDAR 마운트 위치** (미확정): `lidar.launch.py` 의 `lidar_x/lidar_y/lidar_z`
       (base_link→livox_frame static TF). 기본 `0,0,0.5`
 - [ ] `pointcloud_to_scan` 의 `min_height/max_height`(라이다 기준 상대높이) — 마운트 높이 맞춰 조정
-- [ ] livox_ros_driver2 설치/빌드 되어 있는지
+- [ ] `livox_udp_pointcloud2.py` 의 `HOST_IP/POINT_PORT` 상수 — 실제 네트워크와 일치하는지
+- [ ] 런타임은 UDP 직접 파싱 사용. livox_ros_driver2 노드는 기본 launch 에서 실행하지 않음
+- [ ] 단 전체 워크스페이스 빌드 시 FAST-LIO/ICP 의 메시지 헤더 의존성 때문에 Livox-SDK2/livox_ros_driver2 빌드 환경 확인
 
 ## 4. IMU
 - [ ] Livox 내장 6축 IMU 사용 (`/livox/imu` → `/imu/data`). orientation 없음 → EKF 는 yaw rate + 선가속도만 융합
@@ -45,8 +47,15 @@ CAD(alm_p1_ASSEM_0526) 실측으로 채움. 값이 맞는지만 확인:
 - [ ] `/emergency_stop`(std_msgs/Bool) 배선 — 물리 e-stop 을 이 토픽으로 연결
 
 ## 7. 최초 브링업 검증 순서(권장)
-1. `robot.launch.py` → `ros2 topic list` 로 `/scan /imu/data /odometry/filtered /wheel_odom` 확인
+1. `robot.launch.py` → `ros2 topic list` 로 `/livox/lidar /livox/imu /scan /imu/data /wheel_odom` 확인
 2. `ros2 run tf2_tools view_frames` 로 TF 트리(map↔odom↔base_link↔livox_frame) 확인
 3. teleop 으로 `/cmd_vel` 발행 → `/mcu/command` 나오는지, STM32 가 움직이는지
-4. `slam.launch.py` 로 맵 작성 → 저장
-5. `navigation.launch.py map:=...` 로 자율주행
+4. `slam.launch.py` 로 FAST-LIO2 3D 맵 작성 → `/map_save`
+5. `pcd2pgm.py` 로 2D `alm_map.pgm/yaml` 생성
+6. `localization.launch.py` 로 FAST-LIO-Localization 측위 검증
+7. `navigation.launch.py map:=... map_pcd:=...` 로 자율주행
+
+## 8. 현재 코드 기준 주의
+- [ ] 주행 모드에서는 EKF 를 끕니다. `navigation.launch.py` 가 `robot.launch.py use_ekf:=false` 로 실행합니다.
+- [ ] Nav2 의 odom topic 은 `/Odometry` 입니다. FAST-LIO-Localization 이 발행합니다.
+- [ ] `localization.launch.py map_pcd:=...` 와 `fastlio_relocalization.yaml` 의 `prior_map_path` 는 같은 PCD 를 가리켜야 합니다.

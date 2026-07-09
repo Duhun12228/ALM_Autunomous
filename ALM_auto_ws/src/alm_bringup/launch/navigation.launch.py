@@ -1,6 +1,8 @@
-"""자율주행 모드: 로봇 상시 스택 + AMCL 위치추정 + Nav2.
+"""자율주행 모드: 로봇 상시 스택 + FAST-LIO-Localization + Nav2.
 
-    ros2 launch alm_bringup navigation.launch.py map:=<ws>/src/alm_navigation/maps/my_map.yaml
+    ros2 launch alm_bringup navigation.launch.py \
+      map:=<ws>/src/alm_navigation/maps/alm_map.yaml \
+      map_pcd:=<ws>/src/alm_navigation/maps/alm_3d_map.pcd
 
 이후 RViz 에서 2D Pose Estimate 로 초기 위치를 주고 Nav2 Goal 로 목표를 지정하거나,
     ros2 topic pub /drive_mode std_msgs/msg/String "{data: 'auto'}" -1
