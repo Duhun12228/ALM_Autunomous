@@ -15,6 +15,12 @@ find_package(sensor_msgs REQUIRED)
 find_package(alm_msgs REQUIRED)
 
 install(
+  PROGRAMS
+    scripts/command_manager.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+install(
   DIRECTORY config launch
   DESTINATION share/${PROJECT_NAME}
 )

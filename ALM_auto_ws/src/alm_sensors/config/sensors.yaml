@@ -1,10 +1,13 @@
+# 센서 토픽/프레임 요약 (실제 파라미터는 각 launch 에서 주입)
 lidar:
-  ros__parameters:
-    frame_id: lidar_link
-    pointcloud_topic: /points
+  driver: livox_ros_driver2      # 공식 드라이버 (Livox MID-360)
+  frame_id: livox_frame
+  pointcloud_topic: /livox/lidar
+  scan_topic: /scan              # pointcloud_to_scan 변환 결과
 
 imu:
-  ros__parameters:
-    frame_id: imu_link
-    imu_topic: /imu/data
-
+  source: livox_mid360_builtin   # LiDAR 내장 6축 IMU
+  raw_topic: /livox/imu
+  imu_topic: /imu/data           # imu_relay 재발행 (EKF 입력)
+  frame_id: livox_frame          # IMU 도 LiDAR 본체 기준
+  has_orientation: false         # 6축(자이로+가속도)만, orientation 없음

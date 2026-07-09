@@ -1,0 +1,2 @@
+# slam_toolbox 로 만든 맵(my_map.yaml + my_map.pgm)을 여기에 저장하세요.
+# 저장: ros2 run nav2_map_server map_saver_cli -f <ws>/src/alm_navigation/maps/my_map

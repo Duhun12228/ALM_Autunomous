@@ -17,9 +17,13 @@
 
   <exec_depend>ament_index_python</exec_depend>
   <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
   <exec_depend>python3-serial</exec_depend>
   <exec_depend>rclpy</exec_depend>
   <exec_depend>sensor_msgs_py</exec_depend>
+  <exec_depend>pointcloud_to_laserscan</exec_depend>
+  <!-- 공식 Livox 드라이버 (별도 설치/빌드 필요): https://github.com/Livox-SDK/livox_ros_driver2 -->
+  <exec_depend>livox_ros_driver2</exec_depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>

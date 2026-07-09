@@ -1,0 +1,44 @@
+command_manager:
+  ros__parameters:
+    # ---- 토픽 ----
+    cmd_vel_topic: /cmd_vel            # Nav2/teleop 입력
+    drive_mode_topic: /drive_mode      # 원하는 모드 (normal/crab/spin/auto)
+    estop_topic: /emergency_stop       # std_msgs/Bool
+    command_topic: /mcu/command        # alm_msgs/McuCommand (MCU 전송용)
+    mcu_state_topic: /mcu/state        # alm_msgs/McuState (MCU fault 감시)
+    odom_topic: /odometry/filtered     # nav_msgs/Odometry (워치독)
+
+    # ---- 동작 ----
+    publish_rate_hz: 50.0
+    default_drive_mode: "auto"
+    enable_motors_on_start: true
+    cmd_timeout_sec: 0.5               # 이 시간 넘게 cmd_vel 없으면 정지
+
+    # ---- 속도/가속 제한 (안전 게이팅). ##TODO## 실제 플랫폼 사양으로 조정 ----
+    max_linear_x: 0.45
+    min_linear_x: -0.15
+    max_linear_y: 0.30                 # crab 모드 측면 속도 한계
+    max_angular_z: 0.8
+    # (9) Nav2 velocity_smoother 가 이미 가속 제한을 하므로 여기 rate_limit 은
+    #     mode 전환/e-stop 해제 시점의 안전 램프 역할. 이중 제한이 굼뜨면 false 로.
+    enable_rate_limit: true
+    max_accel_x: 1.0                   # m/s^2 (rate limit)
+    max_accel_y: 1.0
+    max_accel_theta: 1.5              # rad/s^2
+
+    # ---- 추가 안전 (7) MCU fault 반영, (8) 오도메트리 워치독 ----
+    stop_on_mcu_fault: true           # /mcu/state 에 fault/estop 오면 정지
+    odom_watchdog_sec: 0.5            # 주행 중 odom 이 이 시간 끊기면 정지 (0=비활성)
+
+    # ---- auto 모드 선택 로직 (참고 레포 selectAutoDriveMode 포팅) ----
+    auto_crab_enabled: false          # localization 안정성 위해 기본 비활성
+    auto_spin_angular_threshold: 0.35
+    auto_spin_release_angular_threshold: 0.03
+    auto_spin_linear_threshold: 0.04
+    auto_spin_exit_linear_threshold: 0.10
+    auto_spin_max_angular_speed: 0.45
+    auto_spin_entry_duration_sec: 0.20
+    auto_spin_exit_duration_sec: 0.40
+    auto_mode_min_hold_sec: 0.80
+    auto_crab_lateral_threshold: 0.05
+    auto_crab_angular_threshold: 0.10

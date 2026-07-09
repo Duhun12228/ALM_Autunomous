@@ -1,0 +1,21 @@
+mcu_bridge:
+  ros__parameters:
+    # ---- 시리얼 (Jetson <-> STM32 UART) ----
+    port: /dev/ttyTHS1         # Jetson 하드웨어 UART (THS1). 확인됨.
+    baudrate: 115200           # ##CONFIRM## STM32 UART baud 와 일치해야 함
+    serial_timeout: 0.02
+    reconnect_period_sec: 1.0
+
+    # ---- 토픽 ----
+    command_topic: /mcu/command       # alm_msgs/McuCommand (구독, -> STM32)
+    state_topic: /mcu/state           # alm_msgs/McuState (발행, <- STM32)
+    odom_topic: /wheel_odom           # nav_msgs/Odometry (발행, EKF 입력)
+    publish_joint_states: true        # /joint_states (RViz 바퀴 시각화)
+
+    # ---- 프레임 ----
+    odom_frame: odom
+    base_frame: base_link
+    publish_odom_tf: false            # odom->base_link TF 는 EKF 가 담당
+
+    # ---- 발행 주기 ----
+    poll_rate_hz: 200.0               # 시리얼 수신 폴링

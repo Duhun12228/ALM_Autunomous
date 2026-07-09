@@ -16,7 +16,13 @@ find_package(diagnostic_msgs REQUIRED)
 find_package(alm_msgs REQUIRED)
 
 install(
-  DIRECTORY config launch
+  PROGRAMS
+    scripts/mcu_bridge.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+install(
+  DIRECTORY config launch docs
   DESTINATION share/${PROJECT_NAME}
 )
 

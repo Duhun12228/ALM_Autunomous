@@ -9,6 +9,14 @@
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 
+  <exec_depend>alm_description</exec_depend>
+  <exec_depend>alm_sensors</exec_depend>
+  <exec_depend>alm_navigation</exec_depend>
+  <exec_depend>alm_base_control</exec_depend>
+  <exec_depend>alm_mcu_interface</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>
 

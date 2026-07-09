@@ -1,0 +1,120 @@
+<?xml version="1.0"?>
+<!--
+  ALM 4-wheel independent steering (4WIS) platform description.
+
+  ┌────────────────────────────────────────────────────────────────────────┐
+  │  로봇 지오메트리 SINGLE SOURCE OF TRUTH.                                 │
+  │  값 출처: alm_p1_ASSEM_0526 CAD 실측 (wnstj, 2026-06-23) + 지급 스펙.     │
+  │  이 값들은 Nav2 footprint(alm_navigation/config/nav2.yaml) 및           │
+  │  STM32 4WIS 기구학 상수와 반드시 일치해야 합니다.                        │
+  └────────────────────────────────────────────────────────────────────────┘
+
+  주의: LiDAR(Livox MID-360) 장착 위치가 아직 미확정이므로 이 URDF에는
+  센서 프레임을 넣지 않았습니다. base_link → livox_frame 변환은
+  alm_sensors/launch/lidar.launch.py 의 static_transform_publisher 에서
+  파라미터로 주며, 실측 후 그 한 줄만 수정하면 됩니다.
+
+  런타임 TF:  map =[slam/amcl]=> odom =[EKF]=> base_link =[this URDF]=> wheels
+-->
+<robot name="alm_robot" xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <!-- ===================== GEOMETRY (CAD 실측) ===================== -->
+  <!-- 바퀴 -->
+  <xacro:property name="wheel_radius" value="0.103"/>     <!-- 103 mm -->
+  <xacro:property name="wheel_width"  value="0.0488"/>    <!-- 48.8 mm -->
+
+  <!-- 바퀴 중심 위치 (base_link=차체중심 기준). 앞/뒤 x가 대칭이 아님(CAD 값). -->
+  <xacro:property name="front_x" value="0.6106"/>   <!-- 앞축: FL/RL 평균 X -->
+  <xacro:property name="rear_x"  value="-0.3010"/>  <!-- 뒤축: FR/RR 평균 X -->
+  <xacro:property name="half_track" value="0.500"/> <!-- 좌우 ±500 mm → 트레드 1000 mm -->
+  <!-- 휠베이스 = front_x - rear_x = 0.9116 m (≈912 mm) -->
+
+  <!-- 조향 기계적 한계: toe-in 90°, toe-out 45° (URDF 조인트는 시각화용으로 ±90°) -->
+  <xacro:property name="steer_lower" value="-1.5708"/>
+  <xacro:property name="steer_upper" value="1.5708"/>
+
+  <!-- 차체 박스 (전장×전폭×높이) -->
+  <xacro:property name="body_length" value="1.200"/>
+  <xacro:property name="body_width"  value="0.9872"/>
+  <xacro:property name="body_height" value="0.450"/>
+  <!-- 차체 박스 중심 높이(시각화용): 바퀴축 위로 얹힘 -->
+  <xacro:property name="body_cz" value="${wheel_radius + body_height/2.0}"/>
+
+  <xacro:property name="steer_col_r" value="0.035"/>
+  <xacro:property name="steer_col_h" value="0.05"/>
+
+  <!-- ===================== MATERIALS ===================== -->
+  <material name="alm_body">  <color rgba="0.20 0.35 0.55 1.0"/></material>
+  <material name="alm_wheel"> <color rgba="0.08 0.08 0.08 1.0"/></material>
+  <material name="alm_steer"> <color rgba="0.80 0.55 0.10 1.0"/></material>
+
+  <!-- ===================== BASE ===================== -->
+  <!-- base_link 원점 = 차체 XY 중심(=무게중심), Z=0 은 지면 접촉면. -->
+  <link name="base_link">
+    <visual>
+      <origin xyz="0 0 ${body_cz}" rpy="0 0 0"/>
+      <geometry><box size="${body_length} ${body_width} ${body_height}"/></geometry>
+      <material name="alm_body"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 ${body_cz}" rpy="0 0 0"/>
+      <geometry><box size="${body_length} ${body_width} ${body_height}"/></geometry>
+    </collision>
+    <inertial>
+      <!-- 질량 80 kg, 균일 박스 근사 관성 (Ixx=1/12 m (w²+h²) 등) -->
+      <origin xyz="0 0 ${body_cz}" rpy="0 0 0"/>
+      <mass value="80.0"/>
+      <inertia
+        ixx="7.848" ixy="0.0" ixz="0.0"
+        iyy="9.950" iyz="0.0"
+        izz="16.093"/>
+    </inertial>
+  </link>
+
+  <!-- ===================== 4WIS CORNER MACRO ===================== -->
+  <xacro:macro name="corner" params="name x y">
+    <joint name="${name}_steer_joint" type="revolute">
+      <parent link="base_link"/>
+      <child  link="${name}_steer_link"/>
+      <origin xyz="${x} ${y} ${wheel_radius}" rpy="0 0 0"/>
+      <axis xyz="0 0 1"/>
+      <limit lower="${steer_lower}" upper="${steer_upper}" effort="100.0" velocity="6.0"/>
+    </joint>
+    <link name="${name}_steer_link">
+      <visual>
+        <origin xyz="0 0 ${steer_col_h/2.0}" rpy="0 0 0"/>
+        <geometry><cylinder radius="${steer_col_r}" length="${steer_col_h}"/></geometry>
+        <material name="alm_steer"/>
+      </visual>
+    </link>
+
+    <joint name="${name}_wheel_joint" type="continuous">
+      <parent link="${name}_steer_link"/>
+      <child  link="${name}_wheel_link"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <axis xyz="0 1 0"/>
+    </joint>
+    <link name="${name}_wheel_link">
+      <visual>
+        <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+        <geometry><cylinder radius="${wheel_radius}" length="${wheel_width}"/></geometry>
+        <material name="alm_wheel"/>
+      </visual>
+      <collision>
+        <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+        <geometry><cylinder radius="${wheel_radius}" length="${wheel_width}"/></geometry>
+      </collision>
+      <inertial>
+        <mass value="2.0"/>
+        <inertia ixx="0.006" ixy="0" ixz="0" iyy="0.011" iyz="0" izz="0.006"/>
+      </inertial>
+    </link>
+  </xacro:macro>
+
+  <!-- 이름은 물리적 앞/뒤·좌/우 기준 (ROS: x 전방, y 좌측) -->
+  <xacro:corner name="front_left"  x="${front_x}" y="${half_track}"/>
+  <xacro:corner name="front_right" x="${front_x}" y="${-half_track}"/>
+  <xacro:corner name="rear_left"   x="${rear_x}"  y="${half_track}"/>
+  <xacro:corner name="rear_right"  x="${rear_x}"  y="${-half_track}"/>
+
+</robot>
