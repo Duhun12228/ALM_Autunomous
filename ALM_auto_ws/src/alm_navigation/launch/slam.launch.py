@@ -25,10 +25,12 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     nav_share = get_package_share_directory("alm_navigation")
-    fast_lio_share = get_package_share_directory("fast_lio")
 
     default_config = os.path.join(nav_share, "config", "fastlio_mid360.yaml")
-    rviz_cfg = os.path.join(fast_lio_share, "rviz", "fastlio.rviz")
+    # 매핑 전용 RViz (Fixed Frame=odom, /Laser_map·/cloud_registered 표시).
+    # fast_lio 의 rviz 파일명은 loam_livox.rviz 라 예전 fastlio.rviz 참조는 로드
+    # 실패했었음 -> alm_navigation 자체 rviz 로 고정.
+    rviz_cfg = os.path.join(nav_share, "rviz", "fastlio_mapping.rviz")
 
     config_file = LaunchConfiguration("fastlio_config")
     rviz_use = LaunchConfiguration("rviz")
