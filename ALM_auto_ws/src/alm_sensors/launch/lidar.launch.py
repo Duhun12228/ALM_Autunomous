@@ -1,34 +1,33 @@
-"""Livox MID-360 3D LiDAR bringup (공식 livox_ros_driver2).
+"""Livox MID-360 3D LiDAR + 내장 IMU bringup (UDP 직접 파싱 방식, SDK 불필요).
 
-  livox_ros_driver2_node : /livox/lidar (PointCloud2), /livox/imu (Imu)
-  pointcloud_to_laserscan: /livox/lidar -> /scan (2D LaserScan, C++ 표준 노드)
+  livox_udp_pointcloud2 : UDP 56301 파싱 -> /livox/lidar (PointCloud2)
+  livox_udp_imu         : UDP 56401 파싱 -> /livox/imu (내장 6축 IMU)
+  imu_relay             : /livox/imu -> /imu/data (EKF 입력, orientation 무효화)
+  pointcloud_to_scan    : /livox/lidar -> /scan (2D LaserScan, numpy)
   static_transform_publisher : base_link -> livox_frame  (##TODO## 실측 마운트)
 
-사전 준비:
-  - livox_ros_driver2: https://github.com/Livox-SDK/livox_ros_driver2
-  - pointcloud_to_laserscan: sudo apt install ros-humble-pointcloud-to-laserscan
-  - config/MID360_config.json 의 lidar ip / host ip 를 실제 네트워크에 맞게 수정.
+공식 livox_ros_driver2(SDK)를 쓰지 않고, LiDAR 가 호스트로 쏘는 UDP 패킷을
+직접 파싱한다. MID360_config.json 의 host_net_info 포트(56301/56401)와
+host IP(192.168.1.5)가 실제 네트워크와 일치해야 한다.
 
-주의(2D scan 튜닝):
-  target_frame=base_link 로 두어 높이 밴드(min/max_height)가 '지면 기준'이 됩니다.
-  → 바닥점(z<min_height)은 자동 제외되어 바닥 오탐이 줄어듭니다.
-  실내에서 벽이 잘 잡히도록 min_height/max_height 를 돌려보며 조정하세요.
+주의: livox_udp_pointcloud2.py 는 HOST_IP/POINT_PORT 가 상수로 박혀 있으니
+네트워크가 바뀌면 스크립트도 함께 수정할 것.
 """
 
 import os
 
-from ament_index_python.packages import get_package_share_directory
+from ament_index_python.packages import get_package_prefix
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 
-def generate_launch_description():
-    share = get_package_share_directory("alm_sensors")
-    default_cfg = os.path.join(share, "config", "MID360_config.json")
+def executable_path(name):
+    return os.path.join(get_package_prefix("alm_sensors"), "lib", "alm_sensors", name)
 
-    user_config = LaunchConfiguration("user_config_path")
+
+def generate_launch_description():
     frame_id = LaunchConfiguration("lidar_frame")
 
     # ##TODO## LiDAR 마운트 위치 확정 후 아래 x y z (m) 수정
@@ -38,26 +37,38 @@ def generate_launch_description():
 
     return LaunchDescription(
         [
-            DeclareLaunchArgument("user_config_path", default_value=default_cfg),
             DeclareLaunchArgument("lidar_frame", default_value="livox_frame"),
             DeclareLaunchArgument("lidar_x", default_value="0.0"),
             DeclareLaunchArgument("lidar_y", default_value="0.0"),
             DeclareLaunchArgument("lidar_z", default_value="0.5"),
-            # ---- Livox 공식 드라이버 ----
+            # ---- UDP 포인트클라우드 파서: /livox/lidar ----
             Node(
-                package="livox_ros_driver2",
-                executable="livox_ros_driver2_node",
+                executable=executable_path("livox_udp_pointcloud2.py"),
                 name="livox_lidar",
                 output="screen",
+            ),
+            # ---- UDP 내장 IMU 파서: /livox/imu ----
+            Node(
+                executable=executable_path("livox_udp_imu.py"),
+                name="livox_imu",
+                output="screen",
                 parameters=[
-                    {"xfer_format": 0},        # 0 = PointCloud2
-                    {"multi_topic": 0},
-                    {"data_src": 0},           # 0 = raw lidar
-                    {"publish_freq": 10.0},
-                    {"output_data_type": 0},
+                    {"host_ip": "192.168.1.5"},
+                    {"imu_port": 56401},
+                    {"imu_topic": "/livox/imu"},
                     {"frame_id": frame_id},
-                    {"user_config_path": user_config},
-                    {"cmdline_input_bd_code": "livox0000000001"},
+                ],
+            ),
+            # ---- IMU relay: /livox/imu -> /imu/data (EKF 입력) ----
+            Node(
+                executable=executable_path("imu_relay.py"),
+                name="imu_relay",
+                output="screen",
+                parameters=[
+                    {"input_topic": "/livox/imu"},
+                    {"output_topic": "/imu/data"},
+                    {"frame_id": ""},
+                    {"invalidate_orientation": True},
                 ],
             ),
             # ---- base_link -> livox_frame 정적 변환 (##TODO## 실측) ----
@@ -71,32 +82,15 @@ def generate_launch_description():
                     "--frame-id", "base_link", "--child-frame-id", frame_id,
                 ],
             ),
-            # ---- 3D PointCloud2 -> 2D LaserScan (C++ 표준, 고속) ----
+            # ---- 3D PointCloud2 -> 2D LaserScan (numpy) ----
             Node(
-                package="pointcloud_to_laserscan",
-                executable="pointcloud_to_laserscan_node",
-                name="pointcloud_to_laserscan",
+                executable=executable_path("pointcloud_to_scan.py"),
+                name="pointcloud_to_scan",
                 output="screen",
-                remappings=[
-                    ("cloud_in", "/livox/lidar"),
-                    ("scan", "/scan"),
+                parameters=[
+                    {"cloud_topic": "/livox/lidar"},
+                    {"scan_topic": "/scan"},
                 ],
-                parameters=[{
-                    "target_frame": "base_link",   # 지면 기준으로 높이 필터
-                    "transform_tolerance": 0.05,
-                    # 높이 밴드(base_link 지면 기준). ##TODO## 실내 벽/장애물에 맞게 튜닝
-                    "min_height": 0.20,
-                    "max_height": 1.00,
-                    "angle_min": -3.14159,
-                    "angle_max": 3.14159,
-                    "angle_increment": 0.0087,     # 0.5 deg
-                    "scan_time": 0.1,
-                    "range_min": 0.20,
-                    "range_max": 40.0,
-                    "use_inf": True,
-                    "inf_epsilon": 1.0,
-                    "concurrency_level": 1,
-                }],
             ),
         ]
     )

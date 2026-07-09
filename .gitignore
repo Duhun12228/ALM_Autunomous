@@ -6,3 +6,10 @@ log/
 venv/
 __pycache__/
 *.pyc
+
+# 로컬 백업 (커밋 X)
+_backup_local_*/
+# Livox SDK 빌드트리 (UDP 직접파싱으로 전환, 재생성 가능)
+ALM_auto_ws/thirdparty/
+# 3D 점군맵 (대용량 바이너리, 실주행맵 확보 후 별도관리)
+ALM_auto_ws/src/alm_navigation/maps/*.pcd

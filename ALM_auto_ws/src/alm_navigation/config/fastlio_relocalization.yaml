@@ -1,0 +1,59 @@
+/**:
+    ros__parameters:
+        # FAST-LIO 측위 모드 (prior map.pcd 안에서 재측위).
+        # 입력: /livox/lidar (PointCloud2 + per-point time) + /livox/imu (내장 6축)
+        # 출력: odom->base_link TF (send_odom_base_tf), /Odometry.
+        #       map->odom 은 icp_relocalization(transform_publisher)가 담당.
+        # ##TODO## prior_map_path 를 실제 주행 매핑으로 만든 map.pcd 로 지정.
+        locate_in_prior_map: true
+        prior_map_path: "/home/kdh/ALM_Autunomous/ALM_auto_ws/src/alm_navigation/maps/alm_3d_map.pcd"
+        feature_extract_enable: false
+        point_filter_num: 3
+        max_iteration: 3
+        filter_size_surf: 0.5
+        filter_size_map: 0.5
+        cube_side_length: 1000.0
+        runtime_pos_log_enable: false
+        map_file_path: "./reloc.pcd"
+
+        common:
+            odom_frame_id: "odom"
+            sensor_frame_id: "livox_frame"
+            base_frame_id: "base_link"
+            send_odom_base_tf: true          # fast-lio 가 odom->base_link TF 발행
+            lid_topic:  "/livox/lidar"
+            imu_topic:  "/livox/imu"         # 내장 6축 raw (imu_relay 불필요)
+            time_sync_en: false
+            time_offset_lidar_to_imu: 0.0
+
+        preprocess:
+            lidar_type: 2                # 2 = generic PointCloud2 (per-point "time" 필드 포함)
+            scan_line: 1
+            scan_rate: 10
+            timestamp_unit: 0            # 0 = seconds (livox_udp_pointcloud2 의 time 필드)
+            blind: 0.5
+
+        mapping:
+            acc_cov: 0.1
+            gyr_cov: 0.1
+            b_acc_cov: 0.0001
+            b_gyr_cov: 0.0001
+            fov_degree:    360.0
+            det_range:     100.0
+            extrinsic_est_en:  true
+            extrinsic_T: [ -0.011, -0.02329, 0.04412 ]
+            extrinsic_R: [ 1., 0., 0.,
+                        0., 1., 0.,
+                        0., 0., 1.]
+
+        publish:
+            path_en: false
+            effect_map_en: false
+            map_en: false
+            scan_publish_en:  true
+            dense_publish_en: true
+            scan_bodyframe_pub_en: true
+
+        pcd_save:
+            pcd_save_en: false
+            interval: -1

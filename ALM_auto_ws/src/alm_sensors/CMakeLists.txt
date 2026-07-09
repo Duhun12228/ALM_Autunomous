@@ -16,8 +16,9 @@ install(
   PROGRAMS
     scripts/imu_relay.py
     scripts/pointcloud_to_scan.py
-    scripts/imu_publisher.py
     scripts/livox_udp_pointcloud2.py
+    scripts/livox_udp_imu.py
+    scripts/add_time_field.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

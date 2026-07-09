@@ -12,31 +12,38 @@ SLAM 이나 자율주행은 이 위에 slam.launch.py / navigation.launch.py 를
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.substitutions import FindPackageShare
 
 
-def _include(pkg, launch_file, args=None):
+def _include(pkg, launch_file, args=None, condition=None):
     return IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             PathJoinSubstitution([FindPackageShare(pkg), "launch", launch_file])
         ),
         launch_arguments=(args or {}).items(),
+        condition=condition,
     )
 
 
 def generate_launch_description():
     use_sim_time = LaunchConfiguration("use_sim_time")
+    use_ekf = LaunchConfiguration("use_ekf")
 
     return LaunchDescription(
         [
             DeclareLaunchArgument("use_sim_time", default_value="false"),
+            # 매핑(slam)에서는 EKF 사용(true). 주행(navigation)에서는 FAST-LIO-Localization
+            # 이 odom->base_link 를 담당하므로 EKF 를 끈다(false, TF 충돌 방지).
+            DeclareLaunchArgument("use_ekf", default_value="true"),
             _include("alm_description", "description.launch.py",
                      {"use_sim_time": use_sim_time}),
-            _include("alm_sensors", "sensors.launch.py"),
+            _include("alm_sensors", "lidar.launch.py"),
             _include("alm_navigation", "ekf.launch.py",
-                     {"use_sim_time": use_sim_time}),
+                     {"use_sim_time": use_sim_time},
+                     condition=IfCondition(use_ekf)),
             _include("alm_base_control", "base_control.launch.py"),
             _include("alm_mcu_interface", "mcu_interface.launch.py"),
         ]

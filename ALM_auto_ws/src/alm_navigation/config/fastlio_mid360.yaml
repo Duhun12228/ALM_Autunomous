@@ -1,0 +1,54 @@
+/**:
+    ros__parameters:
+        # FAST-LIO2 3D 매핑 (Livox Mid-360 + 내장 6축 IMU).
+        # 입력: alm_sensors 의 livox_udp_pointcloud2 -> /livox/lidar
+        #       (/livox/lidar 자체에 실제 per-point "time" 필드 포함 -> add_time_field 불필요)
+        #       livox_udp_imu -> /livox/imu (내장 6축)
+        feature_extract_enable: false
+        point_filter_num: 3
+        max_iteration: 3
+        filter_size_surf: 0.5
+        filter_size_map: 0.5
+        cube_side_length: 1000.0
+        runtime_pos_log_enable: false
+        # /map_save 서비스가 이 경로로 3D 점군맵을 저장한다.
+        map_file_path: "/home/kdh/ALM_Autunomous/ALM_auto_ws/src/alm_navigation/maps/alm_3d_map.pcd"
+
+        common:
+            lid_topic:  "/livox/lidar"
+            imu_topic:  "/livox/imu"
+            time_sync_en: false
+            time_offset_lidar_to_imu: 0.0
+
+        preprocess:
+            lidar_type: 2                # generic PointCloud2 with per-point "time" field (add_time_field.py)
+            scan_line: 1
+            scan_rate: 10
+            timestamp_unit: 0            # 0 = seconds (add_time_field.py 의 합성 time 필드와 일치)
+            blind: 0.5
+
+        mapping:
+            acc_cov: 0.1
+            gyr_cov: 0.1
+            b_acc_cov: 0.0001
+            b_gyr_cov: 0.0001
+            fov_degree:    360.0
+            det_range:     100.0
+            # Mid-360 공장 IMU->LiDAR extrinsic (FAST-LIO stock mid360.yaml).
+            extrinsic_est_en:  true
+            extrinsic_T: [ -0.011, -0.02329, 0.04412 ]
+            extrinsic_R: [ 1., 0., 0.,
+                        0., 1., 0.,
+                        0., 0., 1.]
+
+        publish:
+            path_en:  true
+            scan_publish_en:  true
+            dense_publish_en: true
+            scan_bodyframe_pub_en: false
+            map_en: true                 # 맵 저장에 필수: 전체 맵을 누적해 /Laser_map 발행.
+                                         # 없으면 /map_save 가 빈 .pcd 를 쓴다.
+
+        pcd_save:
+            pcd_save_en: true
+            interval: -1

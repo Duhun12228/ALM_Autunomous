@@ -26,12 +26,16 @@ def _include(pkg, launch_file, args=None):
 def generate_launch_description():
     use_sim_time = LaunchConfiguration("use_sim_time")
     map_yaml = LaunchConfiguration("map")
+    map_pcd = LaunchConfiguration("map_pcd")
     return LaunchDescription(
         [
             DeclareLaunchArgument("use_sim_time", default_value="false"),
             DeclareLaunchArgument("map", default_value=""),
-            _include("alm_bringup", "robot.launch.py", {"use_sim_time": use_sim_time}),
+            DeclareLaunchArgument("map_pcd", default_value=""),
+            # 측위는 FAST-LIO-Localization 담당 -> EKF 끔 (odom->base_link TF 충돌 방지)
+            _include("alm_bringup", "robot.launch.py",
+                     {"use_sim_time": use_sim_time, "use_ekf": "false"}),
             _include("alm_navigation", "navigation.launch.py",
-                     {"use_sim_time": use_sim_time, "map": map_yaml}),
+                     {"use_sim_time": use_sim_time, "map": map_yaml, "map_pcd": map_pcd}),
         ]
     )
