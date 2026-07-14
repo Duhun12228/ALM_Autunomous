@@ -13,3 +13,5 @@ _backup_local_*/
 ALM_auto_ws/thirdparty/
 # 3D 점군맵 (대용량 바이너리, 실주행맵 확보 후 별도관리)
 ALM_auto_ws/src/alm_navigation/maps/*.pcd
+# Scan Context DB (맵에서 sc_build_db.py 로 재생성 가능)
+ALM_auto_ws/src/alm_navigation/maps/*.npz

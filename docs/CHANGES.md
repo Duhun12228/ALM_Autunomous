@@ -139,3 +139,27 @@ Livox MID-360 UDP 직접 파싱
 - Python UDP point parser CPU 부하 개선.
 - 실차 본체 연결 후 Nav2 goal -> `/cmd_vel` -> `/mcu/command` -> 실제 주행 검증.
 - livox_ros_driver2 런타임 미사용과 빌드 의존성의 경계가 헷갈리지 않도록 추가 정리.
+
+## 방식 B: Scan Context 초기위치 자동화 (dev/fastlio2-sc, 2026-07-14)
+
+RViz "2D Pose Estimate" 수동 초기화를 대체하는 글로벌 재측위. vendored
+C++(icp_relocalization/fast_lio)는 무수정 — `icp_node` 가 이미 `/initialpose` 를
+구독하므로 그 앞단에 SC 노드만 추가했다. 전부 `alm_navigation` 파이썬.
+
+- `scripts/scan_context.py`: SC 디스크립터(극좌표 ring×sector, bin=max z)와
+  매칭(ring key 후보 → 전 shift 코사인 거리, 최적 shift=yaw) 공용 모듈.
+  - 열 한쪽만 점유 시 거리 1 페널티: 이것 없으면 거의 빈 디스크립터가
+    아무 스캔과도 거리 0 으로 오매칭됨 (selftest 3/20 → 20/20 의 핵심 수정).
+- `scripts/sc_build_db.py`: prior map.pcd → 격자(기본 0.5 m) 가상 키프레임 SC
+  DB(.npz). 유효성: 점수/장애물내부(clearance)/방위 커버리지. `--selftest N` 으로
+  가상스캔 자가검증. **z밴드(기본 [-0.3, 1.0])는 반드시 천장 아래** — 천장이
+  들어가면 모든 bin 이 천장 높이로 균일해져 장소 구분이 무너진다 (실측 확인).
+- `scripts/sc_localizer.py`: /livox/lidar 10프레임 누적(정지 상태) → SC 매칭 →
+  상위 후보를 `/initialpose` 로 순차 발행(후보당 ICP 12 s 대기, 실패 시 재스캔
+  루프) → `/icp_result` 수신 시 종료. 디버그용 `/sc_candidates`(PoseArray).
+- `localization.launch.py`: `auto_init`(기본 true)·`sc_db` 인자 추가.
+- 검증(집 맵 764k점, LiDAR 미연결 오프라인):
+  - sc_build_db selftest 30/30 (pos 중앙값 0.18 m, yaw 1.1°).
+  - 합성스캔 E2E(맵에서 뜬 가상 스캔 → sc_localizer → icp_node): 2개 pose 모두
+    첫 후보에서 ICP 수렴, `/icp_result` 오차 ~0.3 m / 3°.
+  - 실센서/실차 검증은 남음 (누적 스캔은 맵과 달리 가림(occlusion) 있음).

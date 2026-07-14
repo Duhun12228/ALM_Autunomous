@@ -17,6 +17,14 @@ install(
   PROGRAMS
     scripts/pcd2pgm.py
     scripts/map_publisher.py
+    scripts/sc_build_db.py
+    scripts/sc_localizer.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+# 공용 모듈 (sc_build_db/sc_localizer 가 같은 디렉토리에서 import)
+install(
+  FILES scripts/scan_context.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

@@ -1,7 +1,7 @@
 # TODO — 남은 작업
 
 3D LIO 측위 전환(FAST-LIO2 매핑 + FAST-LIO-Localization) 이후 남은 작업 목록.
-최종 업데이트: 2026-07-10.
+최종 업데이트: 2026-07-14 (dev/fastlio2-sc: Scan Context 자동초기화 구현).
 
 ## ✅ 완료 (방식 A, 집에서 LiDAR 핸드헬드 검증)
 - 센서 UDP 직접 파싱 (per-point time 포함), 런치 통합
@@ -35,8 +35,12 @@
 - [ ] degeneracy(빈 복도) 대비 엔코더(wheel_odom) 융합 여부 결정 — 세 브랜치 공통 하부구조.
 
 ### 5. 브랜치별 개발 (측위 3방식)
-- [ ] **`dev/fastlio2-sc`**: Scan Context 재측위 통합 → 초기위치 자동화(2D Pose Estimate 불필요).
-      PolarisXQ엔 SC 없음(SAC-IA만) → scancontext 이식. MID-360 비반복스캔 대응(프레임 누적).
+- [x] **`dev/fastlio2-sc`**: Scan Context 재측위 구현 완료 (2026-07-14, 오프라인 검증).
+      `scan_context.py`+`sc_build_db.py`(맵→가상키프레임 SC DB, selftest 30/30)
+      +`sc_localizer.py`(10프레임 누적→SC 매칭→`/initialpose`), vendored 코드 무수정.
+      합성스캔 E2E: SC→ICP 수렴, 오차 ~0.3 m/3°. **실센서/실차 검증 남음.**
+      핵심 노하우: 실내는 z밴드가 천장을 포함하면 안 됨(디스크립터 균일화),
+      빈 디스크립터 오매칭은 열 불일치 페널티로 방지.
 - [ ] **`dev/sc-lio-sam`**: SC-LIO-SAM(ROS2) 매핑 교체 + 루프클로저. GTSAM 빌드(ARM),
       6축 IMU 대응 필요. 공간 넓을 때만 가치.
 - [ ] 세 방식 실차 비교(초기화 성공률·정확도·Orin Nano 부하).
