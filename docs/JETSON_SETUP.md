@@ -118,6 +118,47 @@ source /opt/ros/humble/setup.bash
 source ~/ALM_Autunomous/ALM_auto_ws/install/setup.bash
 ```
 
+## 5-1. 방식 C(SC-LIO-SAM) 추가 준비 — dev/sc-lio-sam 브랜치
+
+방식 C 매핑(`slam_sc.launch.py`)을 쓰려면 아래 두 가지를 1회 준비합니다.
+(방식 A/B 만 쓸 경우 이 절은 건너뜁니다 — `lio_sam` 패키지가 빌드에 실패해도
+`colcon build --packages-skip lio_sam` 으로 나머지는 빌드 가능)
+
+### 5-1-1. GTSAM 4.1.1 소스빌드 (apt 미제공, 30~60분)
+
+```bash
+cd ~/ALM_Autunomous/ALM_auto_ws/thirdparty
+touch COLCON_IGNORE          # colcon 이 thirdparty 를 패키지로 오인하지 않게
+cd src
+git clone --depth 1 --branch 4.1.1 https://github.com/borglab/gtsam.git
+cd gtsam && mkdir -p build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX=~/ALM_Autunomous/ALM_auto_ws/thirdparty/install \
+  -DGTSAM_BUILD_WITH_MARCH_NATIVE=OFF -DGTSAM_USE_SYSTEM_EIGEN=ON \
+  -DGTSAM_BUILD_TESTS=OFF -DGTSAM_BUILD_EXAMPLES_ALWAYS=OFF \
+  -DGTSAM_BUILD_UNSTABLE=OFF -DGTSAM_WITH_TBB=OFF
+make -j3 install             # RAM 8GB 기준 -j3 이하 권장
+```
+
+- `GTSAM_USE_SYSTEM_EIGEN=ON` 필수: PCL/ROS 와 Eigen 을 통일해 alignment 크래시 방지.
+- lio_sam 의 CMakeLists 가 `thirdparty/install` 을 자동으로 찾으므로 추가 설정 불필요.
+
+### 5-1-2. OpenCV 헤더 추출 (Jetson 전용, sudo 불필요)
+
+JetPack 의 `libopencv-dev` 4.8 은 헤더/CMake 만 있고 라이브러리가 없어
+`find_package(OpenCV)` 가 실패합니다. 실제 라이브러리는 Ubuntu 런타임(4.5d)뿐이므로,
+버전이 일치하는 4.5.4 헤더를 추출해 셤(vendored `cmake/opencv4-jetson-shim`)이
+사용하게 합니다:
+
+```bash
+mkdir -p ~/ALM_Autunomous/ALM_auto_ws/thirdparty/opencv454
+cd ~/ALM_Autunomous/ALM_auto_ws/thirdparty/opencv454
+apt-get download libopencv-core-dev
+dpkg -x libopencv-core-dev*.deb extracted
+```
+
+이후 `colcon build` 시 lio_sam 이 자동으로 셤을 사용합니다.
+
 ## 6. 하드웨어 연결
 
 ### 6-1. STM32 UART

@@ -13,6 +13,10 @@ pcd 는 FAST-LIO map 프레임 기준(시작 위치가 원점, z 상방). 라이
 라면 지면은 z≈-0.5 근처이므로, 실행하면 출력되는 z 분포를 보고 --z-min/--z-max 를
 '지면 위 0.2~1.5 m' 에 맞게 조정할 것.
 
+장거리/경사 주행처럼 전역 z가 변하는 맵은 --trajectory를 함께 주면 각 포인트에서
+가장 가까운 센서 pose의 z를 빼고 높이 밴드를 적용한다. 예를 들어 센서가 지면에서
+1.7 m라면 --z-min -1.45 --z-max 0.3은 대략 지면 위 0.25~2.0 m를 선택한다.
+
 사용:
   ros2 run alm_navigation pcd2pgm.py --pcd <in.pcd> --out <basename>
   (또는 직접 실행)  python3 pcd2pgm.py --pcd map.pcd --out map --z-min -0.3 --z-max 1.5
@@ -97,6 +101,12 @@ def main():
     ap.add_argument("--z-min", type=float, default=-0.3, help="높이밴드 하한 (pcd z, m)")
     ap.add_argument("--z-max", type=float, default=1.5, help="높이밴드 상한 (pcd z, m)")
     ap.add_argument("--min-points", type=int, default=1, help="점유 판정 셀당 최소 점 수")
+    ap.add_argument(
+        "--trajectory", default="",
+        help="선택: trajectory.pcd. 지정 시 가장 가까운 센서 pose 기준 상대 z 사용")
+    ap.add_argument(
+        "--obstacles-only", action="store_true",
+        help="점유셀만 검정, 나머지는 모두 흰색인 시각화용 맵 생성")
     args = ap.parse_args()
 
     if not os.path.isfile(args.pcd):
@@ -107,9 +117,30 @@ def main():
     xyz = xyz[np.isfinite(xyz).all(axis=1)]
     print(f"  포인트 {len(xyz)}개")
 
-    z = xyz[:, 2]
-    print(f"  z 분포: min={z.min():.2f} max={z.max():.2f} "
-          f"p5={np.percentile(z,5):.2f} p50={np.percentile(z,50):.2f} p95={np.percentile(z,95):.2f}")
+    absolute_z = xyz[:, 2]
+    print(f"  z 분포: min={absolute_z.min():.2f} max={absolute_z.max():.2f} "
+          f"p5={np.percentile(absolute_z,5):.2f} "
+          f"p50={np.percentile(absolute_z,50):.2f} "
+          f"p95={np.percentile(absolute_z,95):.2f}")
+
+    z = absolute_z
+    if args.trajectory:
+        if not os.path.isfile(args.trajectory):
+            sys.exit(f"trajectory 없음: {args.trajectory}")
+        try:
+            from scipy.spatial import cKDTree
+        except ImportError:
+            sys.exit("--trajectory 사용에는 scipy 필요: sudo apt install python3-scipy")
+        trajectory = read_pcd_xyz(args.trajectory)
+        trajectory = trajectory[np.isfinite(trajectory).all(axis=1)]
+        if len(trajectory) == 0:
+            sys.exit("trajectory 포인트가 비어 있음")
+        tree = cKDTree(trajectory[:, :2])
+        _, nearest_pose = tree.query(xyz[:, :2], workers=-1)
+        z = absolute_z - trajectory[nearest_pose, 2]
+        print(f"  trajectory 상대 z: p5={np.percentile(z,5):.2f} "
+              f"p50={np.percentile(z,50):.2f} p95={np.percentile(z,95):.2f} "
+              f"({len(trajectory)} poses)")
     print(f"  높이밴드 [{args.z_min}, {args.z_max}] m 적용")
 
     res = args.resolution
@@ -134,8 +165,11 @@ def main():
     occupied = occ_count >= args.min_points
 
     # PGM 값: 0=점유(검정), 254=자유(흰), 205=unknown(회색). row0=상단이라 y 뒤집기.
-    img = np.full((H, W), 205, dtype=np.uint8)
-    img[observed & ~occupied] = 254
+    if args.obstacles_only:
+        img = np.full((H, W), 254, dtype=np.uint8)
+    else:
+        img = np.full((H, W), 205, dtype=np.uint8)
+        img[observed & ~occupied] = 254
     img[occupied] = 0
     img = np.flipud(img)
 
@@ -154,7 +188,7 @@ def main():
         f.write("free_thresh: 0.25\n")
 
     n_occ = int(occupied.sum())
-    n_free = int((observed & ~occupied).sum())
+    n_free = int((~occupied).sum()) if args.obstacles_only else int((observed & ~occupied).sum())
     print(f"[pcd2pgm] 저장: {pgm_path} , {yaml_path}")
     print(f"  점유셀 {n_occ}, 자유셀 {n_free}, unknown {W*H - n_occ - n_free}")
 

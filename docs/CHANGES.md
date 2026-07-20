@@ -126,6 +126,11 @@ Livox MID-360 UDP 직접 파싱
 ## 검증/실험 기록
 
 - `colcon build --cmake-args -DBUILD_TESTING=OFF` 통과 기록 있음.
+- AIST 공개 MID-360 ROS 2 bag(약 35초 구간)으로 SC-LIO-SAM 통합 검증:
+  - driver2 `timestamp`/`line`을 상대 `time`/`ring`으로 변환.
+  - bag IMU의 g 단위를 `9.80665` 배율로 m/s² 변환.
+  - deskew 약 7.1 Hz, mapping odometry 약 4.2 Hz, velocity reset/TF 오류 0회.
+  - 약 75 m 이동 구간에서 최종 z 약 -1.38 m로, 수정 전 수백 m 수직 발산 해소.
 - FAST-LIO2 매핑으로 `alm_3d_map.pcd` 생성.
 - `pcd2pgm.py`로 `alm_map.pgm/yaml` 생성.
 - FAST-LIO-Localization 측위 성공 기록 있음.
@@ -163,3 +168,40 @@ C++(icp_relocalization/fast_lio)는 무수정 — `icp_node` 가 이미 `/initia
   - 합성스캔 E2E(맵에서 뜬 가상 스캔 → sc_localizer → icp_node): 2개 pose 모두
     첫 후보에서 ICP 수렴, `/icp_result` 오차 ~0.3 m / 3°.
   - 실센서/실차 검증은 남음 (누적 스캔은 맵과 달리 가림(occlusion) 있음).
+
+## 방식 C: SC-LIO-SAM 매핑 (dev/sc-lio-sam, 2026-07-14)
+
+FAST-LIO2 매핑을 **SC-LIO-SAM**(LIO-SAM + Scan Context 루프클로저)으로 교체하는
+브랜치. 넓은 공간(창고/긴 복도/순환 경로)에서 루프클로저로 누적 드리프트를
+보정해 맵 품질을 높이는 것이 목적. 방식 B(SC 재측위)가 머지되어 있어 만든 맵으로
+재측위 자동화까지 동일하게 쓴다.
+
+- **GTSAM 4.1.1 ARM 소스빌드** (`ALM_auto_ws/thirdparty/src/gtsam` →
+  `thirdparty/install`): 과거 FAST-LIO-SAM 시도를 접게 했던 난관.
+  `-DGTSAM_USE_SYSTEM_EIGEN=ON`(PCL/ROS 와 Eigen 정합, alignment 크래시 방지)
+  `-DGTSAM_BUILD_WITH_MARCH_NATIVE=OFF` 로 빌드 성공. colcon 이 gtsam 의
+  package.xml 을 워크스페이스 패키지로 오인하므로 `thirdparty/COLCON_IGNORE` 필요
+  (gitignore 영역이라 깨끗한 체크아웃에선 재생성해야 함 — JETSON_SETUP 참고).
+- **vendored `src/thirdparty/SC-LIO-SAM`** (패키지명 lio_sam): TixiaoShan/LIO-SAM
+  ros2 브랜치 기반 + gisbi-kim SC-LIO-SAM(ROS1)의 SC 루프클로저를 diff 로 추출해
+  이식. 이식 내용: SCManager + 키프레임마다 SC 디스크립터(SINGLE_SCAN_FULL,
+  deskewed raw 0.5 복셀), performSCLoopClosure(SC 검출→base_key 기준 ICP 검증→
+  robust Cauchy 루프팩터), loopFindNearKeyframesWithRespectTo, multimap/
+  SharedNoiseModel 자료구조 변경. giseop 의 SCD/g2o 파일 덤프는 제외(인메모리만).
+- **MID-360 적응** (imageProjection ALM 패치): UDP 파서 출력(x,y,z,intensity,time,
+  ring 없음)을 LivoxPointXYZIT 로 받고 고도각(-8~55도)을 N_SCAN(16) 밴드로 양자화해
+  ring 합성. column 은 비반복 스캔에 맞는 도착순(LIVOX 경로) 사용.
+- **6축 IMU 대응**: LIO-SAM 은 orientation 필요(deskew 초기 roll/pitch) →
+  `alm_sensors/imu_orientation.py`(Madgwick, 자력계 없음)로 /livox/imu →
+  /livox/imu_orient 합성. yaw 는 드리프트하므로 useImuHeadingInitialization=false.
+- **Scancontext 실내 튜닝**: PC_MAX_RADIUS 80→40, LIDAR_HEIGHT 2.0→0.5,
+  PC_MAX_Z=3.5 천장컷 추가(방식 B 에서 실측한 천장 균일화 문제 예방).
+- `slam_sc.launch.py`(4노드+IMU필터+static map→odom) + `config/sc_lio_sam.yaml`.
+  맵 저장: `/lio_sam/save_map` 서비스 → maps/sc_lio_sam/GlobalMap.pcd.
+- **빌드/런타임 마무리**: 사용하지 않는 `gtsam_unstable` 헤더 제거, GTSAM/Eigen
+  `Vector` 충돌 해소, Scan Context 각도 계산을 `atan2`로 안전화. GTSAM의 간접
+  의존성 `libmetis-gtsam.so`를 찾도록 ament 환경 훅 추가. IMU 실행 파일 내부의
+  두 노드 이름이 launch remap으로 겹치던 문제와 static TF 구식 인자도 정리.
+- 검증: `BUILD_TESTING=OFF` 전체 워크스페이스 11패키지 빌드 통과. `slam_sc.launch.py`
+  6프로세스(IMU 필터, static TF, LIO-SAM 4노드) 기동 스모크 통과.
+  **루프클로저/맵품질/Orin 부하는 실센서 데이터 필요** (다음 단계).

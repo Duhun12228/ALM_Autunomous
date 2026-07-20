@@ -1,7 +1,7 @@
 # TODO — 남은 작업
 
 3D LIO 측위 전환(FAST-LIO2 매핑 + FAST-LIO-Localization) 이후 남은 작업 목록.
-최종 업데이트: 2026-07-14 (dev/fastlio2-sc: Scan Context 자동초기화 구현).
+최종 업데이트: 2026-07-14 (dev/sc-lio-sam: 전체 빌드·기동 스모크 검증).
 
 ## ✅ 완료 (방식 A, 집에서 LiDAR 핸드헬드 검증)
 - 센서 UDP 직접 파싱 (per-point time 포함), 런치 통합
@@ -41,8 +41,13 @@
       합성스캔 E2E: SC→ICP 수렴, 오차 ~0.3 m/3°. **실센서/실차 검증 남음.**
       핵심 노하우: 실내는 z밴드가 천장을 포함하면 안 됨(디스크립터 균일화),
       빈 디스크립터 오매칭은 열 불일치 페널티로 방지.
-- [ ] **`dev/sc-lio-sam`**: SC-LIO-SAM(ROS2) 매핑 교체 + 루프클로저. GTSAM 빌드(ARM),
-      6축 IMU 대응 필요. 공간 넓을 때만 가치.
+- [x] **`dev/sc-lio-sam`**: SC-LIO-SAM 매핑 구현 완료 (2026-07-14, 빌드 검증).
+      GTSAM 4.1.1 ARM 소스빌드 성공(thirdparty/install, 과거 접었던 벽 돌파).
+      LIO-SAM ros2 vendoring + SC 루프클로저 이식(mapOptmization), MID-360 ring 합성
+      (imageProjection ALM 패치), 6축 IMU → Madgwick orientation(imu_orientation.py).
+      `slam_sc.launch.py` + `config/sc_lio_sam.yaml`. 전체 11패키지 빌드 및 6프로세스
+      기동 스모크 통과(`BUILD_TESTING=OFF`). **실센서 매핑 검증 남음**
+      (루프클로저 동작·맵품질·Orin 부하는 실데이터 필요).
 - [ ] 세 방식 실차 비교(초기화 성공률·정확도·Orin Nano 부하).
 
 ## ⚠️ 알아둘 것

@@ -13,5 +13,12 @@ _backup_local_*/
 ALM_auto_ws/thirdparty/
 # 3D 점군맵 (대용량 바이너리, 실주행맵 확보 후 별도관리)
 ALM_auto_ws/src/alm_navigation/maps/*.pcd
+ALM_auto_ws/src/alm_navigation/maps/**/*.pcd
+# 하위폴더의 대용량 2D 래스터맵 (top-level alm_map.pgm 은 커밋 유지)
+ALM_auto_ws/src/alm_navigation/maps/**/*.pgm
 # Scan Context DB (맵에서 sc_build_db.py 로 재생성 가능)
 ALM_auto_ws/src/alm_navigation/maps/*.npz
+# SC-LIO-SAM save_map 출력 (대용량, 세션마다 재생성)
+ALM_auto_ws/src/alm_navigation/maps/sc_lio_sam/
+# SC-LIO-SAM MID-360 공개 bag 테스트맵 (대용량, 재생성 가능)
+ALM_auto_ws/src/alm_navigation/maps/sc_lio_sam_mid360_test/

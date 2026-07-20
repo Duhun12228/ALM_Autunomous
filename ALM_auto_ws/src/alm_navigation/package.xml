@@ -14,6 +14,7 @@
   <!-- 3D 매핑(FAST-LIO2): fastlio_mapping 노드 + alm_sensors 의 add_time_field 어댑터 -->
   <exec_depend>fast_lio</exec_depend>
   <exec_depend>icp_relocalization</exec_depend>
+  <exec_depend>lio_sam</exec_depend>
   <exec_depend>alm_sensors</exec_depend>
   <exec_depend>nav2_bringup</exec_depend>
   <exec_depend>nav2_amcl</exec_depend>
@@ -22,6 +23,7 @@
   <exec_depend>tf2_ros</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
+  <exec_depend>python3-scipy</exec_depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>
