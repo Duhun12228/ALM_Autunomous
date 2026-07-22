@@ -127,7 +127,7 @@ ros2 launch alm_navigation localization.launch.py      # sc_localizer + icp + tr
 #    sc_localizer 가 10프레임(1초, 정지 상태) 누적 → SC 매칭 → /initialpose 자동 발행
 #    → ICP 수렴(로그 "측위 성공"). 수동으로 하려면 auto_init:=false + RViz 2D Pose Estimate.
 ros2 run alm_navigation map_publisher.py --ros-args -p yaml:=$MAPS/alm_map.yaml   # /map 발행
-rviz2 -d $WS/install/alm_navigation/share/alm_navigation/rviz/localization.rviz   # 2D 트래킹 뷰
+rviz2 -d /home/kdh/ALM_Autunomous/ALM_auto_ws/install/alm_navigation/share/alm_navigation/rviz/localization.rviz
 
 # 4) 자율주행 (측위 + Nav2). 주행 모드에선 EKF off
 ros2 launch alm_bringup navigation.launch.py map:=$MAPS/alm_map.yaml map_pcd:=$MAPS/alm_3d_map.pcd
