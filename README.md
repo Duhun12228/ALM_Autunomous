@@ -118,7 +118,7 @@ ros2 run alm_navigation pcd2pgm.py --pcd $MAPS/alm_3d_map.pcd --out $MAPS/alm_ma
 ros2 launch alm_sensors lidar.launch.py                # 센서
 ros2 launch alm_navigation localization.launch.py      # icp + transform_publisher + fastlio
 ros2 run alm_navigation map_publisher.py --ros-args -p yaml:=$MAPS/alm_map.yaml   # /map 발행
-rviz2 -d $WS/install/alm_navigation/share/alm_navigation/rviz/localization.rviz   # 2D 트래킹 뷰
+rviz2 -d /home/kdh/ALM_Autunomous/ALM_auto_ws/install/alm_navigation/share/alm_navigation/rviz/localization.rviz
 #    시작점이 맵 원점과 다르면 RViz "2D Pose Estimate"로 실제 위치 지정 → ICP 수렴(로그 converged)
 
 # 4) 자율주행 (측위 + Nav2). 주행 모드에선 EKF off
