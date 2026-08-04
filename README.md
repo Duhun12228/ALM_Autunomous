@@ -194,7 +194,7 @@ ros2 launch alm_navigation localization.launch.py      # TEASER++ + GICP + trans
 #    10프레임 누적 동안 로봇 정지 → FPFH 대응점 → TEASER++ → overlap 검증 → 지역 GICP
 #    → 새 누적 스캔 2회에서 자세가 일치하면 /icp_result 발행.
 ros2 run alm_navigation map_publisher.py --ros-args -p yaml:=$MAPS/alm_map.yaml   # /map 발행
-rviz2 -d $WS/install/alm_navigation/share/alm_navigation/rviz/localization.rviz   # 2D 트래킹 뷰
+rviz2 -d /home/kdh/ALM_Autunomous/ALM_auto_ws/install/alm_navigation/share/alm_navigation/rviz/localization.rviz
 
 # 측위 로그를 터미널에 표시하면서 파일에도 전부 저장
 mkdir -p $WS/logs
