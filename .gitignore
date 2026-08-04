@@ -13,5 +13,24 @@ _backup_local_*/
 ALM_auto_ws/thirdparty/
 # 3D 점군맵 (대용량 바이너리, 실주행맵 확보 후 별도관리)
 ALM_auto_ws/src/alm_navigation/maps/*.pcd
+# FPFH 초기측위 DB는 실제 맵에서 로컬로 재생성
+ALM_auto_ws/src/alm_navigation/maps/fpfh_map.meta
 # Scan Context DB (맵에서 sc_build_db.py 로 재생성 가능)
 ALM_auto_ws/src/alm_navigation/maps/*.npz
+
+# 로컬 측위 실행 로그/빌드 보조 파일
+ALM_auto_ws/*.log
+ALM_auto_ws/logs/
+ALM_auto_ws/symlink_install_manifest.txt
+
+# TEASER++ 런타임 빌드에 사용하지 않는 upstream 자료
+ALM_auto_ws/src/thirdparty/TEASER-plusplus/.github/
+ALM_auto_ws/src/thirdparty/TEASER-plusplus/doc/
+ALM_auto_ws/src/thirdparty/TEASER-plusplus/examples/
+ALM_auto_ws/src/thirdparty/TEASER-plusplus/matlab/
+ALM_auto_ws/src/thirdparty/TEASER-plusplus/python/
+ALM_auto_ws/src/thirdparty/TEASER-plusplus/test/
+ALM_auto_ws/src/thirdparty/TEASER-plusplus/.clang-format
+ALM_auto_ws/src/thirdparty/TEASER-plusplus/.readthedocs.yml
+ALM_auto_ws/src/thirdparty/TEASER-plusplus/README.md
+ALM_auto_ws/src/thirdparty/TEASER-plusplus/THANKS.md

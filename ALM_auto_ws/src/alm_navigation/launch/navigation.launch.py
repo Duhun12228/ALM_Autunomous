@@ -10,8 +10,8 @@
 (alm_bringup/robot.launch.py -> alm_sensors/lidar.launch.py).
 
     ros2 launch alm_navigation navigation.launch.py \
-        map:=<2D map.yaml>  map_pcd:=<3D map.pcd>  initial_a:=<yaw>
-  초기 pose 는 initial_x/y/z/a 인자 또는 RViz "2D Pose Estimate".
+        map:=<2D map.yaml> map_pcd:=<3D map.pcd> fpfh_db_prefix:=<DB prefix>
+  초기 pose 는 FPFH+TEASER++ 전역 정합으로 자동 계산한다.
 """
 
 import os
@@ -30,11 +30,14 @@ def generate_launch_description():
     default_params = os.path.join(nav_share, "config", "nav2.yaml")
     default_map = os.path.join(nav_share, "maps", "my_map.yaml")
     default_map_pcd = os.path.join(nav_share, "maps", "alm_3d_map.pcd")
+    default_fpfh_db = os.path.join(nav_share, "maps", "fpfh_map")
 
     use_sim_time = LaunchConfiguration("use_sim_time")
     params_file = LaunchConfiguration("params_file")
     map_yaml = LaunchConfiguration("map")
     map_pcd = LaunchConfiguration("map_pcd")
+    fpfh_db_prefix = LaunchConfiguration("fpfh_db_prefix")
+    accum_frames = LaunchConfiguration("accum_frames")
 
     nav2_navigation_launch = PathJoinSubstitution(
         [FindPackageShare("nav2_bringup"), "launch", "navigation_launch.py"]
@@ -51,10 +54,9 @@ def generate_launch_description():
                                   description="2D 맵(pcd2pgm 산출 .yaml) - global costmap용"),
             DeclareLaunchArgument("map_pcd", default_value=default_map_pcd,
                                   description="3D prior 맵(.pcd) - FAST-LIO-Localization용"),
-            DeclareLaunchArgument("initial_x", default_value="0.0"),
-            DeclareLaunchArgument("initial_y", default_value="0.0"),
-            DeclareLaunchArgument("initial_z", default_value="0.0"),
-            DeclareLaunchArgument("initial_a", default_value="0.0"),
+            DeclareLaunchArgument("fpfh_db_prefix", default_value=default_fpfh_db,
+                                  description="map_pcd에서 생성한 FPFH DB prefix"),
+            DeclareLaunchArgument("accum_frames", default_value="10"),
 
             # ---- 저장된 2D 맵 서버 (global costmap static layer) ----
             Node(
@@ -80,10 +82,9 @@ def generate_launch_description():
                 PythonLaunchDescriptionSource(loc_launch),
                 launch_arguments={
                     "map_pcd": map_pcd,
-                    "initial_x": LaunchConfiguration("initial_x"),
-                    "initial_y": LaunchConfiguration("initial_y"),
-                    "initial_z": LaunchConfiguration("initial_z"),
-                    "initial_a": LaunchConfiguration("initial_a"),
+                    "fpfh_db_prefix": fpfh_db_prefix,
+                    "accum_frames": accum_frames,
+                    "auto_init": "true",
                 }.items(),
             ),
 
