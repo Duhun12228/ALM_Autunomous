@@ -6,7 +6,9 @@ command_manager:
     estop_topic: /emergency_stop       # std_msgs/Bool
     command_topic: /mcu/command        # alm_msgs/McuCommand (MCU 전송용)
     mcu_state_topic: /mcu/state        # alm_msgs/McuState (MCU fault 감시)
-    odom_topic: /odometry/filtered     # nav_msgs/Odometry (워치독)
+    # 워치독 대상. 주행 모드에선 EKF 를 끄므로 /odometry/filtered 가 없어
+    # 워치독이 조용히 비활성된다 -> FAST-LIO 출력을 본다.
+    odom_topic: /Odometry              # nav_msgs/Odometry (워치독)
 
     # ---- 동작 ----
     publish_rate_hz: 50.0
@@ -42,3 +44,23 @@ command_manager:
     auto_mode_min_hold_sec: 0.80
     auto_crab_lateral_threshold: 0.05
     auto_crab_angular_threshold: 0.10
+
+    # ---- 4WIS 변환 (twist -> steer_deg/speed_rpm/mode) ----
+    # ##CONFIRM## 아래 4개는 STM32 CONS 벡터와 반드시 같은 값이어야 합니다.
+    #   wheelbase_m <- CONS(2) B [mm] / 1000
+    #   track_m     <- CONS(3) T [mm] / 1000   (전체 윤거)
+    #   rws_ratio   <- CONS(1) RWS_percent / 100
+    #   straight_angle_deg <- CONS(4)
+    wheelbase_m: 0.9116               # ##CONFIRM## 잠정값 (docs 기준)
+    track_m: 1.0                      # ##CONFIRM## 잠정값
+    rws_ratio: 0.0                    # ##CONFIRM## 후륜 보조조향 비율 (0=후륜 고정)
+    wheel_radius_m: 0.103             # ##CONFIRM## rpm 환산에 직접 영향
+    gear_ratio: 1.0                   # ##CONFIRM## 모터 rpm / 휠 rpm
+    max_steer_deg: 30.0               # ##CONFIRM## 조향 기구 한계
+    straight_angle_deg: 2.0           # ##CONFIRM## CONS(4) 데드밴드
+    crab_rpm_scale: 1.0               # ##CONFIRM## CONS(10)
+    zero_turn_rpm_scale: 1.0          # ##CONFIRM## CONS(11)
+    # 크랩/제로턴 방향 부호. 실차에서 바퀴 도는 방향 보고 뒤집을 것 (+1 / -1)
+    crab_steer_sign: 1.0              # ##CONFIRM##
+    spin_steer_sign: 1.0              # ##CONFIRM##
+    max_rpm: 3000.0                   # ##CONFIRM## 구동 드라이버 한계

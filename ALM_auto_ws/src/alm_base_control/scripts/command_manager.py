@@ -8,8 +8,10 @@
                   MCU fault 반영, 오도메트리 워치독)
 을 수행하고 alm_msgs/McuCommand 를 /mcu/command 로 발행합니다.
 
-실제 4WIS 바퀴별 조향각/속도 계산(역기구학)은 STM32 가 담당하므로 여기서는 하지 않고,
-'해석된 twist + 유효 drive_mode' 만 MCU 로 넘깁니다.
+바퀴별 조향각/속도 계산(역기구학)은 STM32 의 FourWIS_DrivingAlgorithm 이 담당하므로
+여기서는 하지 않습니다. 다만 STM32 는 RC 조종기 규격(조향각 1개 + 속도 1개 + 모드)을
+받으므로, 마지막에 twist -> (steer_deg, speed_rpm, mode_id) 변환을 수행해
+McuCommand 에 함께 실어 보냅니다(변환 로직은 fourwis_encode.py).
 """
 
 import math
@@ -21,6 +23,8 @@ from nav_msgs.msg import Odometry
 from std_msgs.msg import Bool, String
 
 from alm_msgs.msg import McuCommand, McuState
+
+import fourwis_encode
 
 
 def clamp(v, lo, hi):
@@ -82,6 +86,19 @@ class CommandManager(Node):
                 ("auto_mode_min_hold_sec", 0.80),
                 ("auto_crab_lateral_threshold", 0.05),
                 ("auto_crab_angular_threshold", 0.10),
+                # ---- 4WIS 변환 (STM32 CONS 와 반드시 일치시킬 것) ----
+                ("wheelbase_m", 0.9116),
+                ("track_m", 1.0),
+                ("rws_ratio", 0.0),
+                ("wheel_radius_m", 0.103),
+                ("gear_ratio", 1.0),
+                ("max_steer_deg", 30.0),
+                ("straight_angle_deg", 2.0),
+                ("crab_rpm_scale", 1.0),
+                ("zero_turn_rpm_scale", 1.0),
+                ("crab_steer_sign", 1.0),
+                ("spin_steer_sign", 1.0),
+                ("max_rpm", 3000.0),
             ],
         )
         g = self.get_parameter
@@ -112,6 +129,22 @@ class CommandManager(Node):
 
         self.desired_mode = g("default_drive_mode").value
         self.enabled = bool(g("enable_motors_on_start").value)
+
+        # STM32 4WIS 인터페이스 변환 파라미터
+        self.wis = fourwis_encode.FourWISParams(
+            wheelbase_m=g("wheelbase_m").value,
+            track_m=g("track_m").value,
+            rws_ratio=g("rws_ratio").value,
+            wheel_radius_m=g("wheel_radius_m").value,
+            gear_ratio=g("gear_ratio").value,
+            max_steer_deg=g("max_steer_deg").value,
+            straight_angle_deg=g("straight_angle_deg").value,
+            crab_rpm_scale=g("crab_rpm_scale").value,
+            zero_turn_rpm_scale=g("zero_turn_rpm_scale").value,
+            crab_steer_sign=g("crab_steer_sign").value,
+            spin_steer_sign=g("spin_steer_sign").value,
+            max_rpm=g("max_rpm").value,
+        )
 
         # 상태
         self.cmd = Twist()
@@ -149,6 +182,20 @@ class CommandManager(Node):
             f"rate_limit={'on' if self.rate_limit_on else 'off'}, "
             f"mcu_fault_stop={self.stop_on_mcu_fault}, odom_watchdog={self.odom_watchdog}s"
         )
+
+        # 기구학 한계 대비 속도 제한이 타당한지 시작 시 1회 점검
+        r_min = fourwis_encode.min_turn_radius(self.wis)
+        wz_max = fourwis_encode.max_angular_speed(self.wis, self.max_lx)
+        self.get_logger().info(
+            f"4WIS: 최소 회전반경 {r_min:.2f} m, "
+            f"vx={self.max_lx} m/s 에서 가능한 최대 wz={wz_max:.2f} rad/s"
+        )
+        if self.max_wz > wz_max * 1.05:
+            self.get_logger().warn(
+                f"max_angular_z({self.max_wz})가 기구학 한계({wz_max:.2f})를 초과합니다. "
+                f"일반 주행에서 조향이 상시 포화되어 실제 궤적이 계획과 어긋납니다. "
+                f"Nav2/base_control 의 각속도 제한을 낮추거나 spin 모드를 쓰세요."
+            )
 
     def _now(self):
         return self.get_clock().now().nanoseconds * 1e-9
@@ -280,6 +327,16 @@ class CommandManager(Node):
         self.out_vy = self._rate_limit(vy, self.out_vy, self.acc_y, dt)
         self.out_wz = self._rate_limit(wz, self.out_wz, self.acc_th, dt)
 
+        # ---- STM32 4WIS 인터페이스로 변환 ----
+        # 모터 비활성/정지 상황은 mode 0(정지) 으로 내려보낸다.
+        motors_on = self.enabled and not (self.estop or mcu_stop or odom_stale)
+        steer_deg, speed_rpm, mode_id, note = fourwis_encode.encode(
+            self.out_vx, self.out_vy, self.out_wz,
+            effective, hard_stop or not motors_on, self.wis,
+        )
+        if note:
+            self.get_logger().warn(note, throttle_duration_sec=2.0)
+
         # ---- McuCommand 발행 ----
         self.sequence = (self.sequence + 1) & 0xFFFFFFFF
         out = McuCommand()
@@ -289,8 +346,11 @@ class CommandManager(Node):
         out.cmd_vel.linear.y = self.out_vy
         out.cmd_vel.angular.z = self.out_wz
         out.drive_mode = effective
+        out.steer_deg = steer_deg
+        out.speed_rpm = speed_rpm
+        out.mode_id = mode_id
         # e-stop/MCU fault/odom-stale 는 모터 비활성으로 전달
-        out.enable_motors = self.enabled and not (self.estop or mcu_stop or odom_stale)
+        out.enable_motors = motors_on
         out.emergency_stop = bool(self.estop or mcu_stop or odom_stale)
         self.pub.publish(out)
 

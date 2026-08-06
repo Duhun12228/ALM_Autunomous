@@ -206,6 +206,13 @@ ros2 launch alm_bringup navigation.launch.py map:=$MAPS/alm_map.yaml \
   map_pcd:=$MAPS/alm_3d_map.pcd fpfh_db_prefix:=$MAPS/fpfh_map
 #    FPFH+TEASER++ 초기위치 완료 후 RViz에서 Nav2 Goal 지정
 #    또는 auto 모드로: ros2 topic pub /drive_mode std_msgs/msg/String "{data: 'auto'}" -1
+
+# 5) [점검] UART 수동 조작 — ROS 없이 STM32 로 직접 명령 송신 (제어단 연동 확인용)
+cd $WS/src/alm_base_control/scripts
+python3 uart_teleop.py --dry-run --mode sequence          # 배선 전: 프레임만 확인
+python3 uart_teleop.py --port /dev/ttyTHS1                # WASD 키보드 조작
+python3 uart_teleop.py --port /dev/ttyTHS1 --mode direct  # steer/rpm/mode 직접 입력
+#    ⚠ 바퀴가 실제로 돕니다. 잭업 상태에서 먼저 확인할 것. 상세 → docs/uart.md
 ```
 
 > 주의: `localization.launch.py` 의 `map_pcd` 인자와
@@ -225,6 +232,8 @@ auto 는 Nav2 의 `/cmd_vel`(vx+wz)을 보고 normal↔spin 을 자동 전환합
 ## 문서
 - **Jetson 처음부터 설치·실행 → `docs/JETSON_SETUP.md`**
 - 매핑→저장→자율주행 운영 → `docs/OPERATION_GUIDE.md`
+- **Jetson→STM32 UART 연동·확인 절차 → `docs/uart.md`** (변경사항 정리 + 제어단 점검 체크리스트)
+- UART 프로토콜 규격 v2 → `ALM_auto_ws/src/alm_mcu_interface/docs/uart_protocol.md`
 - 실차 전 확인/수정할 값 → `SETUP_CHECKLIST.md`
 - 작업 내역 → `docs/CHANGES.md`
 - **남은 작업(TODO) → `docs/TODO.md`**

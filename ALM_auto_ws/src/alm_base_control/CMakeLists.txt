@@ -17,6 +17,8 @@ find_package(alm_msgs REQUIRED)
 install(
   PROGRAMS
     scripts/command_manager.py
+    scripts/fourwis_encode.py
+    scripts/uart_teleop.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
