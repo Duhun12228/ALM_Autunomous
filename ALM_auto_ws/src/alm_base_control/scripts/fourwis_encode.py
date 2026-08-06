@@ -118,8 +118,8 @@ class FourWISParams:
 
 
 # ---------------------------------------------------------------- 프레임 생성
-# uart_protocol.md v2 와 mcu_bridge.py 의 CMD_FMT 에 대응. 단독 도구
-# (uart_teleop.py)가 ROS 없이도 같은 바이트를 만들 수 있도록 여기 둡니다.
+# uart_protocol.md v2 와 mcu_bridge.py 의 CMD_FMT 에 대응. 실제 UART 프레임은
+# mcu_bridge 가 만들지만, 오프라인 프레임 검증/테스트용으로 여기에도 둡니다.
 SYNC0, SYNC1 = 0xAA, 0x55
 MSG_COMMAND = 0x01
 

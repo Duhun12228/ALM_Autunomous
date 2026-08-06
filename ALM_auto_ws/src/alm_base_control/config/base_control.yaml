@@ -1,8 +1,31 @@
+# ============================================================================
+# cmd_arbiter: 자율/텔레옵 동작권 중재. 여기 출력(mux)이 command_manager 입력이 된다.
+# 동작권 전환:  ros2 service call /cmd_arbiter/set_owner
+#                 alm_msgs/srv/SetControlOwner "{owner: teleop}"   (auto | teleop)
+# 파라미터는 런타임 변경 가능: ros2 param set /cmd_arbiter teleop_timeout_sec 1.0
+# ============================================================================
+cmd_arbiter:
+  ros__parameters:
+    # 입력(소스) 토픽
+    cmd_vel_nav_topic: /cmd_vel            # Nav2(DWB) 출력
+    drive_mode_nav_topic: /drive_mode      # 수동/webui 가 설정하는 자율 모드
+    cmd_vel_teleop_topic: /cmd_vel_teleop  # keyboard_teleop 출력
+    drive_mode_teleop_topic: /drive_mode_teleop
+    # 출력 토픽 (command_manager 입력과 반드시 일치)
+    cmd_vel_out_topic: /cmd_vel_mux
+    drive_mode_out_topic: /drive_mode_mux
+    owner_topic: /cmd_arbiter/owner        # 현재 소유자 (latched, 관측용)
+    # 동작
+    default_owner: "auto"                  # 부팅 시 소유자 (자율)
+    publish_rate_hz: 50.0
+    nav_timeout_sec: 0.5                   # Nav2 가 이 시간 끊기면 0 twist
+    teleop_timeout_sec: 0.5               # 텔레옵 끊기면 정지 유지(HELD)
+
 command_manager:
   ros__parameters:
     # ---- 토픽 ----
-    cmd_vel_topic: /cmd_vel            # Nav2/teleop 입력
-    drive_mode_topic: /drive_mode      # 원하는 모드 (normal/crab/spin/auto)
+    cmd_vel_topic: /cmd_vel_mux         # cmd_arbiter 출력 (자율/텔레옵 중재 결과)
+    drive_mode_topic: /drive_mode_mux   # cmd_arbiter 출력 모드
     estop_topic: /emergency_stop       # std_msgs/Bool
     command_topic: /mcu/command        # alm_msgs/McuCommand (MCU 전송용)
     mcu_state_topic: /mcu/state        # alm_msgs/McuState (MCU fault 감시)

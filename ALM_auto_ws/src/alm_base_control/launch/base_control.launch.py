@@ -1,4 +1,9 @@
-"""command_manager 실행 - /cmd_vel + /drive_mode -> /mcu/command."""
+"""base_control 실행.
+
+  cmd_arbiter     : 자율(/cmd_vel,/drive_mode) vs 텔레옵(/cmd_vel_teleop,...) 동작권 중재
+                    -> /cmd_vel_mux + /drive_mode_mux
+  command_manager : /cmd_vel_mux + /drive_mode_mux -> /mcu/command (4WIS 변환 + 안전 게이팅)
+"""
 
 import os
 
@@ -20,6 +25,12 @@ def generate_launch_description():
     return LaunchDescription(
         [
             DeclareLaunchArgument("params_file", default_value=default_cfg),
+            Node(
+                executable=executable_path("cmd_arbiter.py"),
+                name="cmd_arbiter",
+                output="screen",
+                parameters=[LaunchConfiguration("params_file")],
+            ),
             Node(
                 executable=executable_path("command_manager.py"),
                 name="command_manager",

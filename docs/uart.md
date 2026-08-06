@@ -102,7 +102,7 @@ C: `#pragma pack(1) struct { float steer_deg, speed_rpm; uint8_t mode, flags; }`
 | 파일 | 줄수 | 역할 |
 |---|---|---|
 | `alm_base_control/scripts/fourwis_encode.py` | 360 | **twist → `steer_deg`/`speed_rpm`/`mode` 변환 + 프레임 생성.** ROS 의존성 없음 |
-| `alm_base_control/scripts/uart_teleop.py` | 322 | **수동 조작/점검 도구.** ROS 없이 단독 실행 |
+| ~~`alm_base_control/scripts/uart_teleop.py`~~ | — | *(후속 커밋에서 제거)* 포트 이중 점유 방지를 위해 ROS 텔레옵(`keyboard_teleop.py`) + `cmd_arbiter` 로 대체. → [control_arbitration.md](control_arbitration.md) |
 
 **`fourwis_encode.py`** 안에 든 것:
 - `FourWISParams` — 기하 상수 (STM32 `CONS`와 맞춰야 하는 값들)
@@ -180,31 +180,21 @@ source install/setup.bash
 
 ---
 
-### 방법 A. 단독 도구 — **제어단 확인은 이걸로** (ROS 불필요)
+### 방법 A. 키보드 텔레옵 (ROS 경유)
 
-터미널 **1개**면 된다. 자율주행 연산 없이 우리가 원하는 값을 바로 쏜다.
+> **변경됨:** 포트를 직접 열던 `uart_teleop.py` 는 제거되었다. 포트는 `mcu_bridge`
+> 하나만 소유한다(이중 점유 시 프레임 깨짐). 수동 조작도 ROS 를 거쳐 동작권 중재기
+> (`cmd_arbiter`)를 통과한다. 배선·상태기계·서비스 사용법은
+> **[docs/control_arbitration.md](control_arbitration.md)** 참고.
 
 ```bash
-cd ~/ALM_fastlio2-sc/ALM_auto_ws/src/alm_base_control/scripts
-
-# A-0) 배선 전: 프레임만 눈으로 확인 (시리얼 안 엶)
-python3 uart_teleop.py --dry-run --mode sequence
-
-# A-1) 값 직접 지정 — "조향 20도, 300rpm, 일반주행 줘봐"
-python3 uart_teleop.py --port /dev/ttyTHS1 --mode direct
-#   프롬프트에 "20 300 1" 입력 → 2초간 반복 송신 + 프레임 hex 표시
-
-# A-2) 모드별 자동 시퀀스 — 제어단이 바퀴 반응만 관찰
-python3 uart_teleop.py --port /dev/ttyTHS1 --mode sequence
-#   정지→직진→좌회전→우회전→정지→제로턴좌→제로턴우→크랩좌→크랩우→정지
-
-# A-3) 키보드 수동 조작 (자율주행과 같은 변환 경로를 탐)
-python3 uart_teleop.py --port /dev/ttyTHS1
-#   w/s 전후, a/d 회전, q/e 게걸음, space 즉시정지, 1/3/4 모드고정, x 종료
+ros2 run alm_base_control keyboard_teleop.py
+#   t 동작권잡기, w/s 전후, a/d 회전, q/e 게걸음, space 비상정지, c 해제,
+#   1/3/4/0 모드, r 반납(auto), x 종료
 ```
 
 > ⚠ **바퀴가 실제로 돕니다. 잭업(차량 들어올림) 상태에서 먼저 확인할 것.**
-> 종료·정지 시 `mode 0` 프레임을 5회 반복 전송한다.
+> 먼저 `t` 로 동작권을 잡아야 명령이 반영된다. 텔레옵이 명령을 끊으면 정지 유지(HELD).
 
 **Jetson 쪽 단독 배선 점검 (STM32 없이):**
 `/dev/ttyTHS1`의 **TX와 RX를 서로 단락**시키고 위 도구를 실행하면,

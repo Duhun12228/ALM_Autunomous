@@ -1,0 +1,7 @@
+# cmd_arbiter 동작권(ownership) 전환 요청.
+# 자율주행(auto)과 수동 텔레옵(teleop) 사이에서 누가 /cmd_vel 을 소유할지 정한다.
+string owner          # "auto" | "teleop"
+---
+bool success          # 요청이 받아들여졌는지
+string message        # 실패 사유 등 사람이 읽는 설명
+string active_owner   # 반영된 현재 소유자 ("auto" | "teleop")

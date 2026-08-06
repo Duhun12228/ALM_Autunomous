@@ -18,7 +18,8 @@ install(
   PROGRAMS
     scripts/command_manager.py
     scripts/fourwis_encode.py
-    scripts/uart_teleop.py
+    scripts/cmd_arbiter.py
+    scripts/keyboard_teleop.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

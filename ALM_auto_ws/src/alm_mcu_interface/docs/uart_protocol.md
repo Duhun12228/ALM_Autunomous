@@ -139,13 +139,14 @@ Jetson 측 twist → `steer_deg/speed_rpm` 역산은
 - Jetson 프레임 송신: `alm_mcu_interface/scripts/mcu_bridge.py` (`CMD_FMT`)
 - Jetson twist 변환: `alm_base_control/scripts/fourwis_encode.py`
   (단독 실행하면 자체 검증: `python3 fourwis_encode.py`)
-- **수동 조작/점검 도구**: `alm_base_control/scripts/uart_teleop.py`
-  ROS 없이 단독 실행되며 mcu_bridge 와 동일한 바이트를 보냅니다.
+- **포트 단일 소유 원칙**: 시리얼 포트(`/dev/ttyTHS1`)는 **`mcu_bridge` 하나만** 연다.
+  두 프로세스가 동시에 쓰면 프레임 바이트가 섞여 STM32 파서가 동기를 잃는다.
+- **수동 조작(텔레옵)**: `alm_base_control/scripts/keyboard_teleop.py` (ROS 노드).
+  포트를 직접 열지 않고 `/cmd_vel_teleop` 를 발행 → `cmd_arbiter` 가 동작권을 주면
+  자율과 같은 경로(cmd_arbiter → command_manager → mcu_bridge)로 내려간다.
+  자세한 배선/사용법은 `docs/control_arbitration.md` 참고.
   ```bash
-  python3 uart_teleop.py --port /dev/ttyTHS1                  # WASD 키보드 조작
-  python3 uart_teleop.py --port /dev/ttyTHS1 --mode direct    # steer/rpm/mode 직접 입력
-  python3 uart_teleop.py --port /dev/ttyTHS1 --mode sequence  # 모드별 자동 시퀀스
-  python3 uart_teleop.py --dry-run --mode sequence            # 배선 전 프레임만 확인
+  ros2 run alm_base_control keyboard_teleop.py   # t=동작권 잡기, WASD 조작, r=반납
   ```
 - 변환 파라미터: `alm_base_control/config/base_control.yaml` 의 `##CONFIRM##` 항목
 - 메시지 정의: `alm_msgs/msg/McuCommand.msg`, `alm_msgs/msg/McuState.msg`
