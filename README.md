@@ -32,6 +32,7 @@ FAST-LIO, 경로계획은 Nav2, 구동은 STM32. 방식 A→B→C 순으로 무�
 Livox MID-360 (3D LiDAR + 내장 6축 IMU)
   └ alm_sensors (UDP 직접 파싱, Livox 드라이버 노드 미사용)
       ├ livox_udp_pointcloud2 → /livox/lidar (PointCloud2 + per-point time 필드)
+      │                         + 자기가림 마스크(LiDAR 뒤 적재물 점 제거)
       ├ livox_udp_imu         → /livox/imu (내장 6축)
       └ pointcloud_to_scan    → /scan (2D costmap 관측용)
 
@@ -121,6 +122,8 @@ GICP까지 진입하거나 `/icp_result`를 발행한 시도는 없었습니다.
 - `alm_description`: 4WIS URDF(xacro, CAD 실측), robot_state_publisher, RViz
 - `alm_sensors`: Livox MID-360 **UDP 직접 파싱**(livox_udp_pointcloud2/imu, per-point time 포함)
   + PointCloud→Scan. 런타임에서 livox_ros_driver2 드라이버 노드는 쓰지 않음.
+  **자기가림 마스크**: LiDAR 뒤 적재물을 `/livox/lidar` 발행 전에 제거(방위 center±width
+  + 수평거리)하므로 FAST-LIO·FPFH/GICP·Nav2 costmap·`/scan` 에 동시에 적용된다.
 - `alm_navigation`: **FAST-LIO2 매핑**(slam.launch) · **FAST-LIO-Localization 측위**(localization.launch)
   · **pcd2pgm**(3D→2D) · Nav2 설정/launch · EKF(매핑용) · map · rviz. `map_publisher.py`(맵 확인용).
   [방식 B] **FPFH+TEASER++**: `fpfh_map_builder`(맵 feature DB) ·
@@ -171,6 +174,13 @@ source install/setup.bash
 # 1) 상시 하드웨어 스택 (센서+EKF+제어+MCU)
 ros2 launch alm_bringup robot.launch.py
 
+# 1.5) 자기가림 마스크 튜닝 (적재물 형상이 바뀌었을 때만)
+ros2 launch alm_sensors lidar.launch.py mask_debug:=/livox/lidar_masked
+#    RViz 에 /livox/lidar(흰색) + /livox/lidar_masked(빨강) 동시 표시 →
+#    적재물만 빨갛게 덮이도록 mask_center_deg/mask_width_deg/mask_max_range 조정
+#    ##중요## 마스크를 바꾸면 아래 2)~2.5) 를 다시 돌려 맵과 FPFH DB 를 재생성할 것.
+#    스캔에서만 점이 빠지고 prior map 에는 남아 있으면 정합이 오히려 나빠진다.
+
 # 2) 매핑 (FAST-LIO2 3D SLAM)
 ros2 launch alm_sensors lidar.launch.py          # 터미널1: 센서(/livox/lidar,/livox/imu)
 ros2 launch alm_navigation slam.launch.py rviz:=true   # 터미널2: FAST-LIO2 (RViz Fixed Frame=odom)
@@ -207,12 +217,12 @@ ros2 launch alm_bringup navigation.launch.py map:=$MAPS/alm_map.yaml \
 #    FPFH+TEASER++ 초기위치 완료 후 RViz에서 Nav2 Goal 지정
 #    또는 auto 모드로: ros2 topic pub /drive_mode std_msgs/msg/String "{data: 'auto'}" -1
 
-# 5) [점검] UART 수동 조작 — ROS 없이 STM32 로 직접 명령 송신 (제어단 연동 확인용)
-cd $WS/src/alm_base_control/scripts
-python3 uart_teleop.py --dry-run --mode sequence          # 배선 전: 프레임만 확인
-python3 uart_teleop.py --port /dev/ttyTHS1                # WASD 키보드 조작
-python3 uart_teleop.py --port /dev/ttyTHS1 --mode direct  # steer/rpm/mode 직접 입력
-#    ⚠ 바퀴가 실제로 돕니다. 잭업 상태에서 먼저 확인할 것. 상세 → docs/uart.md
+# 5) [수동] 키보드 텔레옵 — ROS 경유. 자율과 같은 경로로 STM32 까지 내려간다.
+#    시리얼 포트는 mcu_bridge 하나만 소유한다(포트 이중 점유 금지).
+ros2 run alm_base_control keyboard_teleop.py
+#    t=동작권 잡기(teleop), WASD/qe 조작, r=반납(auto), space=비상정지, c=해제
+#    기본 소유자는 자율(auto). 텔레옵이 명령을 끊으면 정지 유지(HELD).
+#    ⚠ 바퀴가 실제로 돕니다. 잭업 상태에서 먼저 확인할 것. 상세 → docs/control_arbitration.md
 ```
 
 > 주의: `localization.launch.py` 의 `map_pcd` 인자와

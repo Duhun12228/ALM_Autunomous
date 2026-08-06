@@ -19,6 +19,7 @@ install(
     scripts/map_publisher.py
     scripts/sc_build_db.py
     scripts/sc_localizer.py
+    scripts/pcd_replay.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

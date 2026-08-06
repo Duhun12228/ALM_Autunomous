@@ -17,6 +17,10 @@ ALM_auto_ws/src/alm_navigation/maps/*.pcd
 ALM_auto_ws/src/alm_navigation/maps/fpfh_map.meta
 # Scan Context DB (맵에서 sc_build_db.py 로 재생성 가능)
 ALM_auto_ws/src/alm_navigation/maps/*.npz
+# 방식 C(SC-LIO-SAM) 매핑 산출물 — 157MB 바이너리, dev/sc-lio-sam 에서 재생성
+ALM_auto_ws/src/alm_navigation/maps/sc_lio_sam_mid360_test/
+# 점군 뷰어(CloudCompare/pcl_viewer)가 남기는 카메라 위치 파일
+*.cam
 
 # 로컬 측위 실행 로그/빌드 보조 파일
 ALM_auto_ws/*.log

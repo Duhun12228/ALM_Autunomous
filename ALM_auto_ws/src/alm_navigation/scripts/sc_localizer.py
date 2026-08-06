@@ -67,6 +67,7 @@ class SCLocalizer(Node):
         self.cand_i = 0
         self.deadline = None      # WAIT 상태에서 다음 후보로 넘어갈 시각
         self.attempt = 0
+        self.waiting_for_icp_subscriber_logged = False
 
         self.pose_pub = self.create_publisher(
             PoseWithCovarianceStamped, "/initialpose", 10)
@@ -103,6 +104,13 @@ class SCLocalizer(Node):
         if self.deadline is None:
             if len(self.frames) < self.accum_frames:
                 return
+            if self.pose_pub.get_subscription_count() == 0:
+                if not self.waiting_for_icp_subscriber_logged:
+                    self.get_logger().info(
+                        "/initialpose 구독자 발견 대기 중 — 첫 SC 후보를 아직 발행하지 않음")
+                    self.waiting_for_icp_subscriber_logged = True
+                return
+            self.waiting_for_icp_subscriber_logged = False
             self.run_match()
             return
         if now >= self.deadline:

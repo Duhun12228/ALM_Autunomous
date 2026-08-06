@@ -21,7 +21,7 @@ class SCParams:
     """디스크립터 파라미터. DB 생성과 런타임 매칭에서 반드시 같아야 한다."""
 
     def __init__(self, num_ring=20, num_sector=60, max_radius=10.0,
-                 z_min=-0.3, z_max=1.0):
+                 z_min=-0.35, z_max=1.0):
         self.num_ring = int(num_ring)
         self.num_sector = int(num_sector)
         self.max_radius = float(max_radius)   # 이 반경 밖 점은 무시 (실내 ~10 m)
