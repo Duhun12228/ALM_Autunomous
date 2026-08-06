@@ -1,7 +1,7 @@
 # TODO — 남은 작업
 
 3D LIO 측위 전환(FAST-LIO2 매핑 + FAST-LIO-Localization) 이후 남은 작업 목록.
-최종 업데이트: 2026-07-14 (dev/fastlio2-sc: Scan Context 자동초기화 구현).
+최종 업데이트: 2026-08-07 (dev/fastlio2-sc: 자동초기화를 FPFH+TEASER++ 로 확정, Scan Context 제거).
 
 ## ✅ 완료 (방식 A, 집에서 LiDAR 핸드헬드 검증)
 - 센서 UDP 직접 파싱 (per-point time 포함), 런치 통합
@@ -36,10 +36,10 @@
       제거된 점은 `mask_debug` 토픽으로 확인 가능. 오프라인/실센서 검증 통과.
 - [ ] **실측 튜닝**: 적재물 올린 상태로 `mask_debug` 보며 center/width/max_range 확정
       → `lidar.launch.py` 기본값에 반영 (현재값 180deg/60deg/1.5m 는 추정치).
-- [ ] **마스크 ON 상태로 재매핑 → pcd2pgm → sc_build_db 재실행**. 적재물이 0.5m 밖까지
-      뻗어 있어 `blind: 0.5` 로 안 걸러졌으므로, 기존 `alm_3d_map.pcd` 에는 적재물이
-      궤적을 따라 번져 기록돼 있다. 스캔에서만 빼면 domain gap 이 반대로 벌어진다.
-- [ ] 재매핑 후 초기정합 성공률 재측정 — 적재물이 SC/ICP 실패에 기여했는지 확인
+- [ ] **마스크 ON 상태로 재매핑 → pcd2pgm → fpfh_map_builder 재실행**. 적재물이 0.5m
+      밖까지 뻗어 있어 `blind: 0.5` 로 안 걸러졌으므로, 기존 `alm_3d_map.pcd` 에는
+      적재물이 궤적을 따라 번져 기록돼 있다. 스캔에서만 빼면 domain gap 이 반대로 벌어진다.
+- [ ] 재매핑 후 초기정합 성공률 재측정 — 적재물이 TEASER/ICP 실패에 기여했는지 확인
       (실험 체크리스트의 단독 변수 하나로 다룰 것).
 
 ### 4. TF/구조 정리
@@ -48,12 +48,16 @@
 - [ ] degeneracy(빈 복도) 대비 엔코더(wheel_odom) 융합 여부 결정 — 세 브랜치 공통 하부구조.
 
 ### 5. 브랜치별 개발 (측위 3방식)
-- [x] **`dev/fastlio2-sc`**: Scan Context 재측위 구현 완료 (2026-07-14, 오프라인 검증).
-      `scan_context.py`+`sc_build_db.py`(맵→가상키프레임 SC DB, selftest 30/30)
-      +`sc_localizer.py`(10프레임 누적→SC 매칭→`/initialpose`), vendored 코드 무수정.
-      합성스캔 E2E: SC→ICP 수렴, 오차 ~0.3 m/3°. **실센서/실차 검증 남음.**
-      핵심 노하우: 실내는 z밴드가 천장을 포함하면 안 됨(디스크립터 균일화),
-      빈 디스크립터 오매칭은 열 불일치 페널티로 방지.
+- [x] **`dev/fastlio2-sc`**: 자동초기화를 **FPFH+TEASER++** 로 확정.
+      `fpfh_map_builder`(맵 feature DB) + `teaser_fpfh_localizer`(전역 대응점 →
+      TEASER++ → 지역 GICP), `icp_node` 는 coarse/medium/fine 다단계.
+      **실센서/실차 검증 남음.**
+- [x] ~~Scan Context 재측위~~ **제거**. `scan_context.py`/`sc_build_db.py`/
+      `sc_localizer.py` 는 FPFH+TEASER++ 로 교체되면서 런치에서 빠진 뒤 방치돼 있었고,
+      이 브랜치에서 삭제했다. 코드는 `dev/sc-lio-sam` 과 이 브랜치 히스토리(`09e9dc3`)에
+      남아 있다. `experiment/alm_experiment_gui.py` 의 SC 탭은 이제 동작하지 않는다.
+      남길 만한 노하우: 실내는 z밴드가 천장을 포함하면 안 됨(디스크립터 균일화),
+      가상 키프레임 DB 는 오클루전을 넣어야 실제 스캔과 채움률이 맞음(12.1% vs 12.2%).
 - [ ] **`dev/sc-lio-sam`**: SC-LIO-SAM(ROS2) 매핑 교체 + 루프클로저. GTSAM 빌드(ARM),
       6축 IMU 대응 필요. 공간 넓을 때만 가치.
 - [ ] 세 방식 실차 비교(초기화 성공률·정확도·Orin Nano 부하).

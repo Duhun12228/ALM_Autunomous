@@ -1,5 +1,10 @@
 # ALM Scan Context–ICP 실험 GUI
 
+> ⚠ **`dev/fastlio2-sc` 에서는 SC 기능이 동작하지 않습니다.** 이 브랜치는 자동초기화를
+> FPFH+TEASER++ 로 교체하면서 `sc_build_db.py`/`sc_localizer.py`/`scan_context.py` 를
+> 삭제했습니다. 아래 SC 관련 탭은 `ros2 run` 단계에서 실패합니다.
+> SC 실험은 `dev/sc-lio-sam` 브랜치에서 하세요. ICP 관련 탭은 그대로 쓸 수 있습니다.
+
 ## 목적
 
 `dev/fastlio2-sc`, `dev/sc-lio-sam` 브랜치의 Scan Context DB 생성과 초기 위치 정합 실험을 터미널 명령 반복 없이 수행하기 위한 Python GUI입니다.

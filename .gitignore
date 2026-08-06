@@ -15,7 +15,8 @@ ALM_auto_ws/thirdparty/
 ALM_auto_ws/src/alm_navigation/maps/*.pcd
 # FPFH 초기측위 DB는 실제 맵에서 로컬로 재생성
 ALM_auto_ws/src/alm_navigation/maps/fpfh_map.meta
-# Scan Context DB (맵에서 sc_build_db.py 로 재생성 가능)
+# Scan Context DB. 이 브랜치는 SC 를 쓰지 않지만(FPFH+TEASER++ 로 교체) 로컬에
+# 남은 sc_db_*.npz 가 실수로 커밋되지 않도록 규칙은 유지한다.
 ALM_auto_ws/src/alm_navigation/maps/*.npz
 # 방식 C(SC-LIO-SAM) 매핑 산출물 — 157MB 바이너리, dev/sc-lio-sam 에서 재생성
 ALM_auto_ws/src/alm_navigation/maps/sc_lio_sam_mid360_test/
