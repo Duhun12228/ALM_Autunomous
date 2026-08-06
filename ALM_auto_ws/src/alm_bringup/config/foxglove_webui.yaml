@@ -1,0 +1,73 @@
+# foxglove_bridge — WebUI 읽기 전용 연동 설정. (foxglove_bridge 3.4.2 기준)
+#
+# ⚠ 이 파일이 Phase 1~2 의 안전 경계입니다.
+#   브리지는 기본값으로 브라우저가 **아무 토픽에나 publish** 하게 열어 둡니다
+#   (client_topic_whitelist 기본값이 ['.*']). 그 상태면 브라우저가
+#   /cmd_vel_teleop 이나 /emergency_stop 을 직접 쏠 수 있어, cmd_arbiter 의
+#   동작권과 alm_web_backend 의 검증을 통째로 우회합니다.
+#
+#   그래서 두 겹으로 막습니다.
+#     1) capabilities 에서 clientPublish 를 아예 뺀다 (구조적 차단)
+#     2) client_topic_whitelist 를 어떤 이름과도 매칭되지 않는 패턴으로 둔다
+#   1번만으로 충분하지만, 나중에 누가 capabilities 를 되돌려도 2번이 남습니다.
+#
+#   명령 연동(Phase 3~5)은 이 브리지가 아니라 alm_web_backend 를 통해 나갑니다.
+#   여기에 /cmd_vel* 이나 /emergency_stop 을 절대 추가하지 마세요.
+#
+#   ※ 파라미터 이름은 `ros2 param list /foxglove_bridge` 로 확인한 실제 값입니다.
+#     topic_publish_whitelist / num_threads 같은 이름은 존재하지 않아
+#     써 두어도 조용히 무시됩니다 — 막았다고 착각하기 쉬우니 주의.
+
+foxglove_bridge:
+  ros__parameters:
+    port: 8765
+    address: "0.0.0.0"
+    tls: false
+    send_buffer_limit: 10000000
+    # 압축을 켜면 포인트클라우드 대역폭이 줄지만 Jetson CPU 를 씁니다.
+    # 유선/로컬에서는 꺼두는 편이 프레임이 안정적입니다.
+    use_compression: false
+    include_hidden: false
+
+    # ---- 능력 축소: 읽기와 그래프 조회만 남긴다 ----
+    # 빠진 것: clientPublish(토픽 발행), services(서비스 호출),
+    #          parameters/parametersSubscribe(파라미터 읽기·쓰기), assets
+    capabilities: ["connectionGraph"]
+
+    # ---- 구독 허용 (읽기) ----
+    topic_whitelist:
+      # 리소스·상태
+      - "/alm/jetson_stats"
+      - "/mcu/state"
+      # 명령 쪽 estop 도 읽는다. /mcu/state.emergency_stop 은 MCU '자신의'
+      # 정지 상태(물리 버튼)라, 소프트웨어로 건 정지는 여기에만 보인다.
+      # 구독(읽기)일 뿐이며 발행 경로는 아래에서 여전히 막혀 있다.
+      - "/mcu/command"
+      - "/cmd_arbiter/owner"
+      - "/drive_mode/effective"
+      - "/rosout"
+      # 위치·주행
+      - "/Odometry"
+      - "/wheel_odom"
+      - "/tf"
+      - "/tf_static"
+      - "/map"
+      - "/scan"
+      - "/plan"
+      - "/local_plan"
+      - "/global_costmap/costmap"
+      - "/local_costmap/costmap"
+      # 측위
+      - "/sc_candidates"
+      - "/icp_result"
+      # 3D 뷰포트
+      - "/livox/lidar"
+      - "/cloud_registered"
+
+    # ---- 쓰기·호출 차단 ----
+    # 어떤 토픽/서비스/파라미터 이름과도 매칭되지 않는 정규식.
+    client_topic_whitelist: ["$^"]
+    service_whitelist: ["$^"]
+    param_whitelist: ["$^"]
+    # 파일 서빙도 필요 없다 (URDF 메시 등을 브라우저로 내보내지 않는다)
+    asset_uri_allowlist: ["$^"]

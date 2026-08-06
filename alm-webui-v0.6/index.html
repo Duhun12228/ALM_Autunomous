@@ -1,0 +1,775 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="theme-color" content="#0A0C0F" />
+<title>ALM — Autonomous Control Studio v0.6</title>
+
+<!-- 한글 -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/sun-typeface/SUITE@2/fonts/variable/woff2/SUITE-Variable.css" />
+<!-- 숫자 · 라벨 · 기술값 -->
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Geist+Mono:ital,wght@0,100..700;1,300..500&display=swap" rel="stylesheet" />
+
+<link rel="stylesheet" href="assets/obsidian.css" />
+<link rel="stylesheet" href="assets/landing.css" />
+<link rel="stylesheet" href="assets/guide.css" />
+</head>
+<body class="booted">
+
+<!-- ══ 0번 화면 · Cold Start ═════════════════════════ -->
+<div class="cold-start" id="coldStart">
+  <div class="cs-bg"><canvas id="csBgCanvas"></canvas></div>
+
+  <button class="cs-skip" id="skipBoot">건너뛰기 →</button>
+
+  <!-- 좌측 부팅 게이지 -->
+  <div class="boot-rail">
+    <div class="boot-track"><div class="boot-fill"></div></div>
+    <span class="boot-pct" id="bootPct">000%</span>
+    <div class="boot-checks">
+      <span class="boot-check" data-i="0"><b>✓</b>power</span>
+      <span class="boot-check" data-i="1"><b>✓</b>sensors</span>
+      <span class="boot-check" data-i="2"><b>✓</b>mapping</span>
+      <span class="boot-check" data-i="3"><b>✓</b>safety</span>
+      <span class="boot-check" data-i="4"><b>✓</b>ready</span>
+    </div>
+  </div>
+
+  <!-- 00 HERO -->
+  <section class="cs-section cs-hero" data-check="0">
+    <div class="cs-logo"><span>A</span><span>L</span><span>M</span></div>
+    <p class="cs-hero-sub">자율주행 로봇 관제 스튜디오</p>
+    <p class="cs-hero-tag">Autonomous Control Studio · v0.6</p>
+    <p class="cs-hero-sponsor">Supported by <b>하이드로훼스트</b></p>
+    <div class="scroll-cue">스크롤하여 시스템 시작<i></i></div>
+  </section>
+
+  <!-- 01 IDENTITY -->
+  <section class="cs-section cs-identity reveal-stagger" data-check="1">
+    <p class="cs-eyebrow">01</p>
+    <h2>하나의 로봇을 매핑부터 자율주행까지,<br /><b>한 화면에서 통제합니다.</b></h2>
+    <p>SLAM으로 공간을 그리고, Scan Context로 스스로 위치를 찾고, Nav2로 주행하고, 필요할 땐 데드맨 방식으로 직접 몹니다. 모든 계통의 상태는 언제나 한눈에 들어옵니다.</p>
+  </section>
+
+  <!-- 02 SUBSYSTEMS -->
+  <section class="cs-section cs-subsystems" data-check="2">
+    <p class="cs-eyebrow reveal">02</p>
+
+    <div class="subsys reveal">
+      <div class="subsys-copy">
+        <span class="idx">01 / SLAM</span>
+        <h3>실시간 3D 매핑</h3>
+        <p>FAST-LIO와 SC-LIO-SAM으로 라이다 포인트클라우드를 누적해 3D 맵을 만듭니다.</p>
+        <ul><li>PCD → PGM 2D 변환</li><li>Scan Context DB 자동 생성</li><li>외부 조이스틱 주행</li></ul>
+      </div>
+      <div class="subsys-demo">
+        <span class="demo-tag">pointcloud</span><span class="demo-live"><i></i>live</span>
+        <canvas id="demoMapping"></canvas>
+      </div>
+    </div>
+
+    <div class="subsys reveal">
+      <div class="subsys-copy">
+        <span class="idx">02 / NAV</span>
+        <h3>측위 · 자율주행</h3>
+        <p>Scan Context로 초기위치를 자동으로 찾고, 웨이포인트를 따라 순찰합니다.</p>
+        <ul><li>수동 · 자동 초기위치</li><li>웨이포인트 미션</li><li>글로벌 · 로컬 경로</li></ul>
+      </div>
+      <div class="subsys-demo">
+        <span class="demo-tag">2d map</span><span class="demo-live"><i></i>live</span>
+        <div class="mini-map">
+          <div class="grid"></div>
+          <div class="bot"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="subsys reveal">
+      <div class="subsys-copy">
+        <span class="idx">03 / MANUAL</span>
+        <h3>데드맨 수동주행</h3>
+        <p>버튼을 누르는 동안에만 20 Hz로 명령을 보냅니다. 손을 떼면 즉시 멈춥니다.</p>
+        <ul><li>Normal · Spin · Crab</li><li>속도 배율 조절</li><li>포커스 상실 시 자동 정지</li></ul>
+      </div>
+      <div class="subsys-demo">
+        <span class="demo-tag">dead-man pad</span><span class="demo-live"><i></i>demo</span>
+        <div class="mini-pad"><div class="pad">
+          <span class="k up">↑</span><span class="k lf">←</span><span class="k st">■</span><span class="k rt">→</span><span class="k dn">↓</span>
+        </div></div>
+      </div>
+    </div>
+
+    <div class="subsys reveal">
+      <div class="subsys-copy">
+        <span class="idx">04 / MONITOR</span>
+        <h3>시스템 모니터링</h3>
+        <p>Jetson 온보드 자원, 라이다 상태, ROS 그래프, 안전 계통을 실시간으로 감시합니다.</p>
+        <ul><li>CPU · GPU · 온도 · 전력</li><li>MID-360 헬스</li><li>안전 인터록 진단</li></ul>
+      </div>
+      <div class="subsys-demo">
+        <span class="demo-tag">onboard load</span><span class="demo-live"><i></i>live</span>
+        <canvas id="demoMonitor"></canvas>
+      </div>
+    </div>
+  </section>
+
+  <!-- 03 SAFETY -->
+  <section class="cs-section cs-safety" data-check="3">
+    <div class="safety-pin reveal-stagger">
+      <div class="safety-num mono">0.5<span class="safety-unit">초</span></div>
+      <p class="safety-caption">포커스를 잃거나 연결이 끊기면 <strong>0.5초 이내에 정지</strong>합니다.</p>
+      <p class="safety-sub">command timeout · odom watchdog · mcu fault stop</p>
+    </div>
+  </section>
+
+  <!-- 04 SPEC -->
+  <section class="cs-section cs-spec" data-check="3">
+    <p class="cs-eyebrow reveal">04</p>
+    <h2 class="reveal d1">제어 제한값</h2>
+    <div class="spec-list reveal-stagger">
+      <div class="spec-row"><span>전진 속도</span><i class="lead"></i><strong>0.45 <b>m/s</b></strong></div>
+      <div class="spec-row"><span>후진 속도</span><i class="lead"></i><strong>−0.15 <b>m/s</b></strong></div>
+      <div class="spec-row"><span>횡이동 속도</span><i class="lead"></i><strong>0.30 <b>m/s</b></strong></div>
+      <div class="spec-row"><span>회전 각속도</span><i class="lead"></i><strong>0.80 <b>rad/s</b></strong></div>
+      <div class="spec-row"><span>명령 타임아웃</span><i class="lead"></i><strong>0.50 <b>s</b></strong></div>
+      <div class="spec-row"><span>주행 감독 타임아웃</span><i class="lead"></i><strong>1.00 <b>s</b></strong></div>
+      <div class="spec-row"><span>라이다</span><i class="lead"></i><strong>Livox MID-360 · 5 / 200 <b>Hz</b></strong></div>
+      <div class="spec-row"><span>온보드</span><i class="lead"></i><strong>Jetson Orin Nano · 15 <b>W</b></strong></div>
+    </div>
+  </section>
+
+  <!-- 05 ENTER -->
+  <section class="cs-section cs-enter" data-check="4">
+    <div class="enter-status reveal"><i></i>시스템 준비 완료</div>
+    <h2 class="reveal d1">관제 콘솔에 진입하세요</h2>
+    <p class="reveal d2">Bridge · Backend · MCU 연결 정상 · 안전 계통 ARMED</p>
+    <button class="enter-button reveal d3" id="enterConsole">
+      관제 콘솔 진입
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+    </button>
+    <p class="enter-hint reveal d3">언제든 상단 ALM 로고를 눌러 다시 볼 수 있습니다</p>
+  </section>
+</div>
+
+<!-- ══ HUD 리본 ══════════════════════════════════════ -->
+<header class="hud">
+  <a class="hud-brand" href="#" id="coldStartReopen" aria-label="시작 화면 다시 보기">ALM</a>
+  <span class="hud-sep"></span>
+  <div class="page-heading">
+    <p class="eyebrow" id="pageEyebrow">OPERATION / 01</p>
+    <h1 id="pageTitle">SLAM 매핑</h1>
+  </div>
+
+  <div class="hud-right">
+    <button class="context-pill" id="profilePill"><span class="pill-label">프로필</span><strong>방식 <b id="profileText">B</b></strong></button>
+    <button class="context-pill" id="mapPill"><span class="pill-label">활성 맵</span><strong id="activeMapText">lab_main</strong></button>
+
+    <span class="hud-sep"></span>
+
+    <div class="hud-group">
+      <span class="hud-item"><i class="status-dot ok"></i>bridge</span>
+      <span class="hud-item"><i class="status-dot ok"></i>backend</span>
+      <span class="hud-item"><i class="status-dot ok"></i>mcu</span>
+    </div>
+
+    <span class="hud-sep"></span>
+
+    <div class="cpu-strip">
+      <span>cpu</span>
+      <strong class="mono" id="sidebarCpu">34%</strong>
+      <i class="mini-bar"><b id="sidebarCpuBar" style="width:34%"></b></i>
+    </div>
+
+    <button class="control-role owned" id="controlRoleButton">
+      <span class="role-dot"></span>
+      <span><small>제어권</small><strong id="controlRoleText">내가 보유</strong></span>
+    </button>
+
+    <!-- cmd_arbiter 동작권. 제어권(누가 조작하나)과는 다른 축이다 —
+         이쪽은 로봇이 자율을 따르는지 텔레옵을 따르는지를 뜻한다. -->
+    <div class="owner-badge" id="ownerBadge" data-owner="unknown">
+      <span class="owner-dot"></span>
+      <span><small>동작권</small><strong>—</strong></span>
+    </div>
+
+    <div class="battery-widget">
+      <span class="battery-icon"><i id="batteryFill" style="width:85%"></i></span>
+      <span><small>배터리</small><strong class="mono" id="batteryTop">85%</strong></span>
+    </div>
+
+    <button class="icon-button round" id="openGuide" aria-label="가이드 다시 보기">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9.2"/><path d="M9.2 9.3a2.8 2.8 0 0 1 5.4.9c0 1.9-2.6 2.2-2.6 4.1"/><circle cx="12" cy="17.2" r=".15" fill="currentColor" stroke="none"/></svg>
+    </button>
+    <button class="icon-button round" id="openSettings" aria-label="설정 및 연결">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1 1.56V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1.11-1.56 1.7 1.7 0 0 0-1.88.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.56-1H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.6 8.9a1.7 1.7 0 0 0-.34-1.88l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.6h.09A1.7 1.7 0 0 0 10 3.04V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.56 1.7 1.7 0 0 0 1.88-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.88V9a1.7 1.7 0 0 0 1.56 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.51 1z"/></svg>
+    </button>
+  </div>
+</header>
+
+<!-- ══ 안전 스트립 ═══════════════════════════════════ -->
+<section class="safety-strip" id="safetyStrip">
+  <div class="safety-copy">
+    <span class="safety-symbol">✓</span>
+    <div>
+      <strong id="safetyTitle">안전 계통 정상</strong>
+      <small id="safetySub">E-STOP 해제 · 감독 하트비트 정상 · 활성 fault 없음</small>
+    </div>
+  </div>
+  <div class="safety-actions">
+    <span class="heartbeat"><i></i>감독 5 Hz</span>
+    <button class="release-button hidden" id="releaseEstop">정지 해제</button>
+    <button class="estop-button" id="globalEstop" aria-label="길게 눌러 비상정지">
+      <svg class="estop-ring" viewBox="0 0 46 46"><circle class="ring-bg" cx="23" cy="23" r="21" fill="none" stroke-width="1.5"/><circle class="ring-fg" cx="23" cy="23" r="21" fill="none" stroke-width="1.5" stroke-linecap="round"/></svg>
+      <span class="estop-core"><i></i></span>
+      <span class="estop-hint">길게 눌러 비상정지</span>
+    </button>
+  </div>
+</section>
+
+<main class="stage">
+
+<!-- ══ 01 · SLAM 매핑 ════════════════════════════════ -->
+<section class="tab-panel active" id="tab-mapping">
+
+  <div class="hero">
+    <div class="hero-head">
+      <span class="lbl">실시간 3D 맵</span>
+      <em>live visualization · 5.0 Hz</em>
+      <div class="hero-actions">
+        <span class="live-badge"><i></i>LIVE</span>
+        <button class="icon-button" id="reset3d">뷰 리셋</button>
+        <button class="icon-button" id="topView3d">탑다운</button>
+      </div>
+    </div>
+
+    <div class="pointcloud-stage">
+      <canvas id="pointCloudCanvas"></canvas>
+      <div class="viewport-toolbar">
+        <button class="tool active" data-layer="map">누적 맵</button>
+        <button class="tool active" data-layer="scan">현재 스캔</button>
+        <button class="tool active" data-layer="path">경로</button>
+        <button class="tool active" data-layer="robot">로봇</button>
+      </div>
+      <div class="viewport-overlay top-left"><span>points</span><strong class="mono" id="pointCount">128,420</strong><small>/ 200,000</small></div>
+      <div class="viewport-overlay top-right"><span>stream</span><strong class="mono">5.0 Hz</strong><small>4,820 pts/frame</small></div>
+      <div class="viewport-footer">
+        <div><span>현재 위치</span><strong class="mono">x 2.14 · y −0.86 · 14°</strong></div>
+        <div><span>이동 거리</span><strong class="mono">128.4 m</strong></div>
+        <div><span>외부 조이스틱</span><strong class="text-ok">연결 · 입력 대기</strong></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="rule"></div>
+
+  <div class="ledger cols-3">
+    <section class="col">
+      <div class="col-head">
+        <span class="lbl">매핑 워크플로</span>
+        <div class="head-actions">
+          <select id="mappingProfile" class="select-control">
+            <option value="A">방식 A</option>
+            <option value="B" selected>방식 B</option>
+            <option value="C">방식 C</option>
+          </select>
+          <button class="text-button" id="newMapButton">＋ 새 맵</button>
+        </div>
+      </div>
+      <p class="helper" id="profileDesc" style="margin-bottom:14px"></p>
+      <div class="row"><span>활성 맵</span><i class="lead"></i><strong class="mono" id="mappingActiveMapText">lab_main</strong></div>
+      <div class="row"><span>현재 상태</span><i class="lead"></i><strong id="mappingStateLabel">대기 중</strong></div>
+      <div class="row"><span>경과 시간</span><i class="lead"></i><strong class="mono" id="mappingElapsed">00:00</strong></div>
+      <ol class="stepper" id="mappingStepper"></ol>
+      <div class="workflow-actions">
+        <button class="primary-button" id="startMapping">SLAM 시작</button>
+        <button class="secondary-button" id="stopMapping" disabled>SLAM 종료</button>
+      </div>
+      <p class="helper">매핑 중 차량 이동은 외부 조이스틱으로 수행하며, 웹 수동주행과 Nav2는 잠깁니다.</p>
+    </section>
+
+    <section class="col">
+      <div class="col-head"><span class="lbl">온보드 자원</span><span class="tag">1 Hz</span></div>
+      <div class="ring-row">
+        <div class="ring" id="cpuRing"><div><strong class="mono" id="mappingCpu">34</strong><small>% cpu</small></div></div>
+        <div class="ring" id="ramRing"><div><strong class="mono" id="mappingRam">52</strong><small>% ram</small></div></div>
+        <div class="ring" id="gpuRing"><div><strong class="mono" id="mappingGpu">28</strong><small>% gpu</small></div></div>
+      </div>
+      <div class="row"><span>cpu 온도</span><i class="lead"></i><strong class="mono" id="mappingTemp">45.2°C</strong></div>
+      <div class="row"><span>네트워크</span><i class="lead"></i><strong class="mono">3.8 Mbps</strong></div>
+      <div class="row"><span>스트림 LOD</span><i class="lead"></i><strong class="text-ok">HIGH</strong></div>
+    </section>
+
+    <section class="col">
+      <div class="col-head"><span class="lbl">맵 후처리</span><button class="text-button" id="openMapManager">맵 관리</button></div>
+      <div class="asset-row">
+        <span class="asset-icon">PCD</span>
+        <div><strong>3D 맵 저장</strong><small id="pcdAssetText">아직 저장되지 않음</small></div>
+        <button class="small-button" id="savePcd">저장</button>
+      </div>
+      <div class="asset-row">
+        <span class="asset-icon">2D</span>
+        <div><strong>PCD → PGM</strong><small id="pgmAssetText">resolution 0.05 m</small></div>
+        <button class="small-button" id="openPcd2Pgm">변환</button>
+      </div>
+      <div class="asset-row">
+        <span class="asset-icon">SC</span>
+        <div><strong>Scan Context DB</strong><small id="scAssetText">B/C 자동 측위용</small></div>
+        <button class="small-button" id="buildScDb">생성</button>
+      </div>
+    </section>
+  </div>
+
+  <div class="rule"></div>
+
+  <section class="band-single">
+    <div class="col-head">
+      <span class="lbl">실행 로그</span>
+      <div class="head-actions">
+        <select id="logLevel" class="select-control tiny">
+          <option>전체</option><option>INFO</option><option>WARN</option><option>ERROR</option>
+        </select>
+        <button class="text-button" id="clearLogs">지우기</button>
+      </div>
+    </div>
+    <div class="log-window" id="logWindow"></div>
+  </section>
+</section>
+
+<!-- ══ 02 · 측위 · 자율주행 ═══════════════════════════ -->
+<section class="tab-panel" id="tab-navigation">
+  <div class="nav-split">
+
+    <div class="nav-main">
+      <div class="hero-head">
+        <span class="lbl">2D 운용 지도</span>
+        <em id="navMapTitle">lab_main · revision 3</em>
+        <div class="hero-actions">
+          <button class="icon-button" id="fitMap">화면 맞춤</button>
+          <button class="icon-button" id="resetRotation">회전 리셋</button>
+        </div>
+      </div>
+
+      <div class="map-stage" id="mapStage">
+        <svg id="navigationMap" viewBox="0 0 900 620" role="img" aria-label="자율주행 지도">
+          <defs>
+            <pattern id="minorGrid" width="25" height="25" patternUnits="userSpaceOnUse"><path d="M25 0H0V25" fill="none" stroke="rgba(255,255,255,.045)" stroke-width="1"/></pattern>
+            <pattern id="majorGrid" width="100" height="100" patternUnits="userSpaceOnUse"><rect width="100" height="100" fill="url(#minorGrid)"/><path d="M100 0H0V100" fill="none" stroke="rgba(255,255,255,.085)" stroke-width="1"/></pattern>
+            <filter id="robotShadow" x="-50%" y="-50%" width="200%" height="200%"><feDropShadow dx="0" dy="3" stdDeviation="6" flood-color="#000" flood-opacity=".5"/></filter>
+          </defs>
+          <rect width="900" height="620" fill="#0B0E13"/>
+          <rect width="900" height="620" fill="url(#majorGrid)"/>
+          <g id="staticMapLayer" class="map-layer">
+            <path d="M82 82H818V538H82Z M188 162H350V255H188Z M490 138H725V222H490Z M194 365H335V472H194Z M462 330H710V468H462Z" fill="#1B222B" fill-rule="evenodd"/>
+            <path d="M118 118H782V502H118Z M220 195H325V235H220Z M520 170H695V205H520Z M225 395H305V450H225Z M500 365H675V440H500Z" fill="#0B0E13" fill-rule="evenodd"/>
+          </g>
+          <g id="globalCostLayer" class="map-layer hidden-layer" opacity=".18"><rect x="102" y="102" width="696" height="416" rx="10" fill="#FF4D4F"/></g>
+          <g id="localCostLayer" class="map-layer hidden-layer" opacity=".3"><circle id="localCostCircle" cx="370" cy="300" r="75" fill="#F5A524"/></g>
+          <g id="globalPathLayer" class="map-layer"><path d="M370 300 C420 280,480 300,530 340 S650 410,710 390" fill="none" stroke="#6FA8FF" stroke-width="7" stroke-linecap="round" opacity=".4"/></g>
+          <g id="localPathLayer" class="map-layer"><path d="M370 300 C410 285,438 286,470 304" fill="none" stroke="#4ADE9B" stroke-width="4" stroke-linecap="round"/></g>
+          <g id="scanLayer" class="map-layer"></g>
+          <g id="candidateLayer" class="map-layer hidden-layer"></g>
+          <g id="waypointLayer" class="map-layer"></g>
+          <g id="robotLayer" class="map-layer" transform="translate(370 300) rotate(12)" filter="url(#robotShadow)">
+            <path d="M-24-15H18L30 0L18 15H-24Z" fill="#D8C4A0"/>
+            <rect x="-13" y="-9" width="21" height="18" rx="3" fill="#0A0C0F"/>
+            <path d="M15-5L24 0L15 5Z" fill="#6FA8FF"/>
+          </g>
+        </svg>
+
+        <div class="map-tools">
+          <button id="zoomIn" aria-label="확대">+</button>
+          <button id="zoomOut" aria-label="축소">−</button>
+          <button id="mapPanToggle" aria-label="패닝 모드">손</button>
+        </div>
+
+        <div class="layer-panel">
+          <strong class="lbl">레이어</strong>
+          <label><input type="checkbox" data-map-layer="staticMapLayer" checked />정적 맵</label>
+          <label><input type="checkbox" data-map-layer="robotLayer" checked />로봇 자세</label>
+          <label><input type="checkbox" data-map-layer="globalPathLayer" checked />글로벌 경로</label>
+          <label><input type="checkbox" data-map-layer="localPathLayer" checked />로컬 경로</label>
+          <label><input type="checkbox" data-map-layer="scanLayer" checked />라이다 스캔</label>
+          <label><input type="checkbox" data-map-layer="localCostLayer" />로컬 코스트맵</label>
+          <label><input type="checkbox" data-map-layer="globalCostLayer" />글로벌 코스트맵</label>
+        </div>
+
+        <div class="map-mode-hint" id="mapModeHint">맵을 탐색하거나 웨이포인트를 추가하세요.</div>
+        <div class="map-coordinates mono" id="mapCoordinates">x 0.00 · y 0.00</div>
+      </div>
+
+      <div class="nav-command-bar">
+        <div class="localization-group">
+          <span class="command-label">초기위치</span>
+          <button class="secondary-button" id="manualInitialPose">수동 지정</button>
+          <button class="secondary-button" id="autoLocalization">자동 탐색</button>
+          <button class="ghost-button" id="relocalize">재측위</button>
+        </div>
+        <div class="nav-run-group">
+          <button class="primary-button" id="startNavigation">주행 시작</button>
+          <button class="secondary-button" id="pauseNavigation" disabled>일시정지</button>
+          <button class="danger-text-button" id="cancelNavigation" disabled>중단</button>
+        </div>
+      </div>
+    </div>
+
+    <aside class="nav-rail">
+      <section class="rail-block">
+        <div class="col-head"><span class="lbl">웨이포인트</span><span class="count-badge mono" id="waypointCount">0</span></div>
+        <button class="add-waypoint-button" id="addWaypointMode">＋ 맵에서 웨이포인트 추가</button>
+        <div class="waypoint-list" id="waypointList"></div>
+        <div class="waypoint-empty" id="waypointEmpty"><strong>경로가 비어 있습니다</strong><small>맵을 클릭해 주행 지점을 추가하세요.</small></div>
+        <div class="mission-options">
+          <label><span>반복 횟수</span><input id="repeatCount" type="number" min="1" max="99" value="1" /></label>
+          <label class="switch-label"><span>순환 주행</span><input id="loopMission" type="checkbox" /><i></i></label>
+          <label><span>기본 도달 반경</span><div class="input-suffix"><input id="defaultTolerance" type="number" min="0.1" max="2" step="0.05" value="0.25" /><b>m</b></div></label>
+        </div>
+        <div class="split-actions">
+          <button class="secondary-button" id="loadWaypointSet">불러오기</button>
+          <button class="primary-button" id="saveWaypointSet">세트 저장</button>
+        </div>
+      </section>
+
+      <section class="rail-block">
+        <div class="col-head"><span class="lbl">측위 상태</span><span class="state-chip idle" id="localizationChip">대기</span></div>
+        <div class="localization-visual">
+          <div class="radar"><i></i><i></i><i></i><span>▲</span></div>
+          <div class="localization-copy">
+            <strong id="localizationTitle">초기위치가 필요합니다</strong>
+            <small id="localizationDetail">방식 B · Scan Context 자동 초기화 가능</small>
+          </div>
+        </div>
+        <div class="localization-progress hidden" id="localizationProgress">
+          <div class="progress-track"><i id="localizationProgressBar"></i></div>
+          <span class="mono" id="localizationProgressText">프레임 0 / 10 누적</span>
+        </div>
+        <div class="row"><span>모드</span><i class="lead"></i><strong id="localizationModeText">Scan Context</strong></div>
+        <div class="row"><span>fitness</span><i class="lead"></i><strong class="mono" id="fitnessText">—</strong></div>
+        <div class="row"><span>pose</span><i class="lead"></i><strong class="mono" id="poseText">미확정</strong></div>
+        <div class="row"><span>신뢰도</span><i class="lead"></i><strong id="confidenceText">—</strong></div>
+      </section>
+
+      <section class="rail-block">
+        <div class="col-head"><span class="lbl">주행 진행</span><span class="state-chip idle" id="navStateChip">IDLE</span></div>
+        <div class="mission-row">
+          <div class="mission-progress-ring" id="missionProgressRing"><div><strong class="mono" id="missionPercent">0%</strong><small>진행률</small></div></div>
+          <div class="mission-metrics">
+            <div class="row"><span>현재 목표</span><i class="lead"></i><strong class="mono" id="currentGoalText">—</strong></div>
+            <div class="row"><span>남은 거리</span><i class="lead"></i><strong class="mono" id="remainingDistance">—</strong></div>
+            <div class="row"><span>예상 소요</span><i class="lead"></i><strong class="mono" id="etaText">—</strong></div>
+            <div class="row"><span>선택 / 실제</span><i class="lead"></i><strong class="mono" id="navDriveMode">auto / normal</strong></div>
+          </div>
+        </div>
+        <div class="drive-mode-selector" id="navDriveModes">
+          <button data-mode="normal">Normal</button>
+          <button data-mode="spin">Spin</button>
+          <button data-mode="crab" disabled>Crab</button>
+          <button data-mode="auto" class="active">Auto</button>
+        </div>
+      </section>
+
+      <section class="rail-block">
+        <div class="col-head"><span class="lbl">알람 · 이벤트</span><button class="text-button" id="clearAlarms">지우기</button></div>
+        <div class="alarm-list" id="alarmList"></div>
+      </section>
+    </aside>
+  </div>
+</section>
+
+<!-- ══ 03 · 수동주행 ═════════════════════════════════ -->
+<section class="tab-panel" id="tab-manual">
+  <div class="hero">
+    <div class="hero-head">
+      <span class="lbl">데드맨 제어</span>
+      <em id="manualStatusText">수동주행 비활성</em>
+      <div class="hero-actions">
+        <button class="primary-button" id="enterManual">모터 활성화 및 진입</button>
+        <button class="secondary-button hidden" id="exitManual">수동주행 종료</button>
+      </div>
+    </div>
+
+    <p class="hero-note">버튼을 누르고 있는 동안에만 20 Hz 명령을 보냅니다. 포커스 상실 또는 연결 끊김 시 0.5초 이내 정지합니다.</p>
+
+    <div class="manual-mode-row">
+      <div><span class="command-label">주행 모드</span>
+        <div class="segmented-control" id="manualModeSelector">
+          <button data-mode="normal" class="active">Normal</button>
+          <button data-mode="spin">Spin</button>
+          <button data-mode="crab">Crab</button>
+          <button data-mode="auto">Auto</button>
+        </div>
+      </div>
+      <div><span class="command-label">속도 배율</span>
+        <div class="segmented-control compact" id="speedMultiplier">
+          <button data-value="25">25%</button>
+          <button data-value="50" class="active">50%</button>
+          <button data-value="75">75%</button>
+          <button data-value="100">100%</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="manual-control-zone disabled" id="manualControlZone">
+      <div class="vehicle-top-view">
+        <div class="vehicle-body">
+          <div class="wheel front left" id="wheelFL"></div>
+          <div class="wheel front right" id="wheelFR"></div>
+          <div class="wheel rear left" id="wheelRL"></div>
+          <div class="wheel rear right" id="wheelRR"></div>
+          <span>ALM</span>
+        </div>
+        <div class="steer-caption"><span>전축 <strong class="mono" id="frontSteer">0.0°</strong></span><span>후축 <strong class="mono" id="rearSteer">0.0°</strong></span></div>
+      </div>
+
+      <div class="deadman-pad">
+        <button class="drive-button forward" data-command="forward">↑<small>전진</small></button>
+        <button class="drive-button left" data-command="left">←<small>좌회전</small></button>
+        <button class="drive-button stop" data-command="stop">■<small>정지</small></button>
+        <button class="drive-button right" data-command="right">→<small>우회전</small></button>
+        <button class="drive-button reverse" data-command="reverse">↓<small>후진</small></button>
+      </div>
+
+      <div class="twist-readout">
+        <div><span>선속도 X</span><strong class="mono" id="cmdX">0.00</strong><small>m/s</small><i><b id="cmdXBar"></b></i></div>
+        <div><span>선속도 Y</span><strong class="mono" id="cmdY">0.00</strong><small>m/s</small><i><b id="cmdYBar"></b></i></div>
+        <div><span>각속도 Z</span><strong class="mono" id="cmdZ">0.00</strong><small>rad/s</small><i><b id="cmdZBar"></b></i></div>
+      </div>
+    </div>
+
+    <div class="manual-lock-overlay" id="manualLockOverlay">
+      <strong>모터 활성화가 필요합니다</strong>
+      <small>제어권과 안전 상태를 확인한 뒤 수동주행을 시작하세요.</small>
+    </div>
+  </div>
+
+  <div class="rule"></div>
+
+  <div class="ledger cols-2">
+    <section class="col">
+      <div class="col-head"><span class="lbl">차량 실측 상태</span><span class="live-badge"><i></i>10 Hz</span></div>
+      <div class="wheel-speed-grid">
+        <div><span>FL</span><strong class="mono" id="speedFL">0.00</strong><small>m/s</small></div>
+        <div><span>FR</span><strong class="mono" id="speedFR">0.00</strong><small>m/s</small></div>
+        <div><span>RL</span><strong class="mono" id="speedRL">0.00</strong><small>m/s</small></div>
+        <div><span>RR</span><strong class="mono" id="speedRR">0.00</strong><small>m/s</small></div>
+      </div>
+      <div class="comparison-line"><span>linear x</span><i><b id="measuredXBar"></b></i><strong class="mono" id="measuredX">0.00</strong></div>
+      <div class="comparison-line"><span>angular z</span><i><b id="measuredZBar"></b></i><strong class="mono" id="measuredZ">0.00</strong></div>
+      <div class="row"><span>배터리 전압</span><i class="lead"></i><strong class="mono" id="batteryVoltage">23.8 V</strong></div>
+      <div class="row"><span>배터리 전류</span><i class="lead"></i><strong class="mono" id="batteryCurrent">1.6 A</strong></div>
+      <div class="row"><span>명령 타임아웃</span><i class="lead"></i><strong class="text-ok">정상</strong></div>
+    </section>
+
+    <section class="col">
+      <div class="col-head"><span class="lbl">주행 안전 상태</span></div>
+      <div class="lock-row"><i class="status-dot ok"></i><span>제어권</span><strong id="manualControlCheck">보유</strong></div>
+      <div class="lock-row"><i class="status-dot" id="motorDot"></i><span>모터 활성</span><strong id="motorState">비활성</strong></div>
+      <!-- command_manager 가 auto 를 해석해 실제로 고른 모드 (/drive_mode/effective) -->
+      <div class="lock-row"><i class="status-dot ok"></i><span>적용 모드</span><strong class="mono" id="effectiveMode">—</strong></div>
+      <div class="lock-row"><i class="status-dot ok"></i><span>command timeout</span><strong class="mono">0.5 s</strong></div>
+      <div class="lock-row"><i class="status-dot ok"></i><span>mcu fault</span><strong>없음</strong></div>
+      <div class="lock-row"><i class="status-dot ok"></i><span>odom watchdog</span><strong class="mono">/Odometry</strong></div>
+      <div class="notice-box warning hidden" id="crabNotice">
+        <strong>Crab 모드가 비활성입니다</strong>
+        <small>auto_crab_enabled=false이며 설정 파일 변경과 프로세스 재시작이 필요합니다.</small>
+      </div>
+    </section>
+  </div>
+</section>
+
+<!-- ══ 04 · 시스템 모니터링 ═══════════════════════════ -->
+<section class="tab-panel" id="tab-monitoring">
+  <div class="hero">
+    <div class="hero-head">
+      <span class="lbl">온보드 컴퓨팅</span>
+      <em>Jetson Orin Nano · 15W 모드 · 정상</em>
+      <div class="hero-actions"><button class="icon-button" id="exportSnapshot">스냅샷 내보내기</button></div>
+    </div>
+
+    <div class="readouts">
+      <div class="readout">
+        <span>cpu</span>
+        <div class="val"><b class="mono" id="monCpu">34%</b></div>
+        <div class="track"><b id="monCpuBar" style="width:34%"></b></div>
+        <small>6 cores · 1.50 GHz</small>
+      </div>
+      <div class="readout">
+        <span>gpu</span>
+        <div class="val"><b class="mono" id="monGpu">28%</b></div>
+        <div class="track"><b id="monGpuBar" style="width:28%"></b></div>
+        <small>624 MHz</small>
+      </div>
+      <div class="readout">
+        <span>메모리</span>
+        <div class="val"><b class="mono" id="monRam">4.1 / 7.8 GB</b></div>
+        <div class="track"><b id="monRamBar" style="width:52%"></b></div>
+        <small>swap 0.2 / 4.0 GB</small>
+      </div>
+      <div class="readout">
+        <span>소비 전력</span>
+        <div class="val"><b class="mono" id="monPower">8.7 W</b></div>
+        <div class="track"><b style="width:58%"></b></div>
+        <small>15W 모드 · 여유 6.3 W</small>
+      </div>
+    </div>
+
+    <div class="wave"><canvas id="systemChart"></canvas></div>
+  </div>
+
+  <div class="rule"></div>
+
+  <div class="ledger cols-4">
+    <section class="col">
+      <div class="col-head"><span class="lbl">써멀</span><span class="tag ok">여유</span></div>
+      <div class="row"><span>cpu</span><i class="lead"></i><strong class="mono" id="tempCpu">45.2°C</strong></div>
+      <div class="row"><span>gpu</span><i class="lead"></i><strong class="mono" id="tempGpu">43.1°C</strong></div>
+      <div class="row"><span>soc</span><i class="lead"></i><strong class="mono" id="tempSoc">42.5°C</strong></div>
+      <div class="row"><span>junction</span><i class="lead"></i><strong class="mono" id="tempTj">47.0°C</strong></div>
+      <div class="row"><span>스로틀링</span><i class="lead"></i><strong class="text-ok">없음</strong></div>
+    </section>
+
+    <section class="col">
+      <div class="col-head"><span class="lbl">라이다 MID-360</span><span class="tag ok">연결됨</span></div>
+      <div class="big-read"><b class="mono" id="pointsRate">124,210 pts/s</b></div>
+      <div class="row"><span>스캔 / imu</span><i class="lead"></i><strong class="mono">5.0 / 200 Hz</strong></div>
+      <div class="row"><span>패킷 손실</span><i class="lead"></i><strong class="mono text-ok">0.03%</strong></div>
+      <div class="row"><span>마지막 수신</span><i class="lead"></i><strong class="mono">8 ms 전</strong></div>
+      <div class="row"><span>내부 온도</span><i class="lead"></i><strong class="dim">미지원</strong></div>
+    </section>
+
+    <section class="col">
+      <div class="col-head"><span class="lbl">무선 연결</span><span class="tag">−48 dBm</span></div>
+      <div class="bars"><i></i><i></i><i></i><i></i></div>
+      <div class="row"><span>ssid</span><i class="lead"></i><strong class="mono">ALM-Robot-5G</strong></div>
+      <div class="row"><span>업로드</span><i class="lead"></i><strong class="mono" id="netTx">1.8 Mbps</strong></div>
+      <div class="row"><span>다운로드</span><i class="lead"></i><strong class="mono" id="netRx">3.2 Mbps</strong></div>
+      <div class="row"><span>jetson ip</span><i class="lead"></i><strong class="mono">192.168.1.110</strong></div>
+    </section>
+
+    <section class="col">
+      <div class="col-head"><span class="lbl">ROS 2 그래프</span><span class="tag ok">14 / 14</span></div>
+      <div class="topic"><i class="status-dot ok"></i><code>/livox/lidar</code><em>5.0 Hz</em></div>
+      <div class="topic"><i class="status-dot ok"></i><code>/livox/imu</code><em>200 Hz</em></div>
+      <div class="topic"><i class="status-dot ok"></i><code>/Odometry</code><em>10 Hz</em></div>
+      <div class="topic"><i class="status-dot ok"></i><code>/mcu/state</code><em>10 Hz</em></div>
+      <div class="topic"><i class="status-dot ok"></i><code>/alm/safety_status</code><em>2 Hz</em></div>
+      <div class="topic"><i class="status-dot ok"></i><code>map → odom → base_link</code><em>TF</em></div>
+    </section>
+  </div>
+
+  <div class="rule"></div>
+
+  <div class="band">
+    <section>
+      <div class="col-head"><span class="lbl">안전 인터록</span><span class="tag ok">ARMED</span></div>
+      <div class="interlocks">
+        <div class="lock"><i class="status-dot ok"></i><div class="lk"><strong>E-STOP 래치</strong><small>마지막 작동 없음</small></div><em id="monEstop" class="text-ok">해제</em></div>
+        <div class="lock"><i class="status-dot ok"></i><div class="lk"><strong>제어 하트비트</strong><small>freshness 24 ms</small></div><em>5 Hz</em></div>
+        <div class="lock"><i class="status-dot ok"></i><div class="lk"><strong>명령 타임아웃</strong><small>0.5초 초과 시 정지</small></div><em>활성</em></div>
+        <div class="lock"><i class="status-dot ok"></i><div class="lk"><strong>MCU fault stop</strong><small>활성 fault 없음</small></div><em>활성</em></div>
+        <div class="lock"><i class="status-dot ok"></i><div class="lk"><strong>Odom stale stop</strong><small>/Odometry 10 Hz</small></div><em>활성</em></div>
+        <div class="lock"><i class="status-dot ok"></i><div class="lk"><strong>주행 감독</strong><small>timeout 1.0초</small></div><em>활성</em></div>
+      </div>
+    </section>
+
+    <section>
+      <div class="col-head"><span class="lbl">실행 프로세스</span><button class="text-button" id="refreshProcesses">새로고침</button></div>
+      <div class="proc"><i class="status-dot ok"></i><div class="pk"><strong>alm_web_backend</strong><small>pid 2841 · 02:14:33</small></div><em>running</em></div>
+      <div class="proc"><i class="status-dot ok"></i><div class="pk"><strong>alm_safety_supervisor</strong><small>pid 2844 · 02:14:31</small></div><em>running</em></div>
+      <div class="proc"><i class="status-dot ok"></i><div class="pk"><strong>foxglove_bridge</strong><small>pid 2860 · 02:14:26</small></div><em>running</em></div>
+      <div class="proc"><i class="status-dot ok"></i><div class="pk"><strong>livox_udp_pointcloud2</strong><small>pid 2912 · 02:13:58</small></div><em>running</em></div>
+    </section>
+  </div>
+</section>
+
+</main>
+
+<!-- ══ 모드 다이얼 ═══════════════════════════════════ -->
+<nav class="mode-dial" aria-label="주요 화면">
+  <button class="nav-item active" data-tab="mapping"><span class="nav-index mono">01</span>매핑</button>
+  <button class="nav-item" data-tab="navigation"><span class="nav-index mono">02</span>자율주행</button>
+  <button class="nav-item" data-tab="manual"><span class="nav-index mono">03</span>수동주행</button>
+  <button class="nav-item" data-tab="monitoring"><span class="nav-index mono">04</span>모니터링</button>
+</nav>
+
+<!-- ══ 오버레이 ══════════════════════════════════════ -->
+<div class="toast-stack" id="toastStack"></div>
+<div class="modal-backdrop hidden" id="modalBackdrop"><div class="modal" id="modal"></div></div>
+<div class="drawer-backdrop hidden" id="drawerBackdrop"></div>
+<div class="estop-flash" id="estopFlash"></div>
+
+<div class="tour-overlay hidden" id="tourOverlay">
+  <div class="tour-highlight" id="tourHighlight"></div>
+  <div class="tour-tooltip" id="tourTooltip">
+    <button class="close-button" id="tourClose" aria-label="가이드 닫기">×</button>
+    <p class="tour-step mono" id="tourStepCount">1 / 5</p>
+    <h3 id="tourTitle"></h3>
+    <p id="tourText"></p>
+    <div class="tour-nav">
+      <button class="ghost-button" id="tourPrev">이전</button>
+      <button class="primary-button" id="tourNext">다음 →</button>
+    </div>
+  </div>
+</div>
+
+<aside class="settings-drawer" id="settingsDrawer">
+  <div class="drawer-head">
+    <div><p class="lbl">시스템 설정</p><h2>설정 및 연결</h2></div>
+    <button class="close-button" id="closeSettings" aria-label="닫기">×</button>
+  </div>
+
+  <section>
+    <h3 class="lbl">운용 프로필</h3>
+    <div class="profile-cards" id="profileCards">
+      <button data-profile="A"><strong>A</strong><span>수동 초기위치</span><small>PCD</small></button>
+      <button data-profile="B" class="active"><strong>B</strong><span>SC 자동 측위</span><small>PCD + SC DB</small></button>
+      <button data-profile="C"><strong>C</strong><span>SC-LIO-SAM</span><small>PCD + SC DB + GTSAM</small></button>
+    </div>
+  </section>
+
+  <section>
+    <h3 class="lbl">활성 맵</h3>
+    <select id="settingsMapSelect" class="select-control wide">
+      <option>lab_main</option><option>office_floor_1</option><option>outdoor_loop</option>
+    </select>
+    <div class="map-capabilities"><span class="ok">수동 측위</span><span class="ok">SC 측위</span><span class="ok">Navigation</span></div>
+  </section>
+
+  <section>
+    <h3 class="lbl">연결 엔드포인트</h3>
+    <label class="setting-field"><span>Backend</span><input value="https://192.168.1.110" /></label>
+    <label class="setting-field"><span>Foxglove WSS</span><input value="wss://192.168.1.110/foxglove" /></label>
+  </section>
+
+  <section>
+    <h3 class="lbl">제어 제한값</h3>
+    <div class="limit-grid">
+      <div><span>전진</span><strong class="mono">0.45 m/s</strong></div>
+      <div><span>후진</span><strong class="mono">−0.15 m/s</strong></div>
+      <div><span>횡이동</span><strong class="mono">0.30 m/s</strong></div>
+      <div><span>회전</span><strong class="mono">0.80 rad/s</strong></div>
+      <div><span>cmd timeout</span><strong class="mono">0.50 s</strong></div>
+      <div><span>nav supervision</span><strong class="mono">1.00 s</strong></div>
+    </div>
+  </section>
+
+  <div class="drawer-actions">
+    <button class="secondary-button" id="testConnection">연결 테스트</button>
+    <button class="primary-button" id="saveSettings">설정 저장</button>
+  </div>
+</aside>
+
+<script src="assets/app.js"></script>
+<script src="assets/motion.js"></script>
+<script src="assets/landing.js"></script>
+<script src="assets/guide.js"></script>
+
+<!-- 라이브 연동 레이어 (npm run build 산출물).
+     모듈이라 defer 로 동작한다 — 위 스크립트들의 본문보다는 뒤에,
+     DOMContentLoaded 보다는 앞에 실행되어 목업 루프를 끄고 구독을 건다.
+     이 파일이 없으면(빌드 전) 404 로 무시되고 목업 그대로 동작한다. -->
+<script type="module" src="assets/bundle/main.js"></script>
+</body>
+</html>

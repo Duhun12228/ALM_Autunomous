@@ -1,0 +1,21 @@
+{
+  "name": "alm-webui",
+  "version": "0.6.0",
+  "private": true,
+  "type": "module",
+  "description": "ALM 관제 콘솔 — Jetson(ROS 2) 읽기 전용 연동 레이어",
+  "scripts": {
+    "build": "vite build",
+    "watch": "vite build --watch",
+    "serve": "python3 -m http.server 8080"
+  },
+  "devDependencies": {
+    "vite": "^8.2.0"
+  },
+  "dependencies": {
+    "@foxglove/rosmsg": "^5.0.5",
+    "@foxglove/rosmsg2-serialization": "^3.1.2",
+    "@foxglove/ws-protocol": "^0.8.0",
+    "three": "^0.185.1"
+  }
+}

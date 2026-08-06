@@ -1,0 +1,42 @@
+/* ════════════════════════════════════════════════════════════
+   ALM WebUI v0.6 — guide.css
+   탭별 스포트라이트 가이드 투어 스타일.
+   ════════════════════════════════════════════════════════════ */
+
+.tour-overlay{
+  position:fixed;inset:0;z-index:500;
+  background:rgba(6,8,11,.72);
+}
+.tour-overlay.hidden{display:none}
+
+.tour-highlight{
+  position:fixed;border-radius:10px;
+  border:1.5px solid var(--brass);
+  box-shadow:0 0 0 4px rgba(216,196,160,.14),0 0 24px rgba(216,196,160,.18);
+  pointer-events:none;
+  transition:top .32s var(--ease),left .32s var(--ease),width .32s var(--ease),height .32s var(--ease);
+}
+
+.tour-tooltip{
+  position:fixed;width:min(320px,calc(100vw - 24px));
+  background:var(--raise);border:1px solid var(--hair-2);border-radius:10px;
+  padding:20px 20px 16px;box-shadow:0 20px 44px rgba(0,0,0,.45);
+  transition:top .32s var(--ease),left .32s var(--ease);
+}
+.tour-tooltip .close-button{position:absolute;top:10px;right:10px}
+.tour-step{
+  font-size:9.5px;letter-spacing:.2em;text-transform:uppercase;color:var(--brass);
+  margin-bottom:10px;
+}
+.tour-tooltip h3{font-size:16px;font-weight:600;color:var(--txt);margin-bottom:8px}
+.tour-tooltip p:not(.tour-step){font-size:13px;line-height:1.6;color:var(--txt-2)}
+.tour-nav{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}
+.tour-nav button{padding:9px 16px}
+
+@media (prefers-reduced-motion:reduce){
+  .tour-highlight,.tour-tooltip{transition:none !important}
+}
+
+@media (max-width:820px){
+  .tour-tooltip{padding:16px 16px 14px}
+}

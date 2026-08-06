@@ -14,8 +14,14 @@
   <exec_depend>alm_navigation</exec_depend>
   <exec_depend>alm_base_control</exec_depend>
   <exec_depend>alm_mcu_interface</exec_depend>
+  <exec_depend>alm_msgs</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <!-- WebUI 읽기 전용 연동용 텔레메트리 브리지 -->
+  <exec_depend>foxglove_bridge</exec_depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>
