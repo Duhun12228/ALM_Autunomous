@@ -1,0 +1,33 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>alm_web_backend</name>
+  <version>0.0.0</version>
+  <description>
+    WebUI 명령 어댑터. 브라우저의 HTTP 요청을 ROS2 토픽/서비스/프로세스로 번역한다.
+    읽기(텔레메트리)는 foxglove_bridge 가 담당하고, 이 패키지는 쓰기만 맡는다.
+    안전 판단(속도 제한, 타임아웃, fault 정지)은 command_manager 에만 있으며
+    여기에 중복 구현하지 않는다.
+  </description>
+  <maintainer email="kdh1228@inha.edu">duhun</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>ament_cmake_python</buildtool_depend>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
+  <exec_depend>alm_msgs</exec_depend>
+  <!-- maps/ 레이아웃 해석(map_layout.py)과 pcd2pgm.py 를 빌려 쓴다 -->
+  <exec_depend>alm_navigation</exec_depend>
+  <!-- FPFH 측위 DB 빌더(fpfh_map_builder) 를 subprocess 로 실행한다 -->
+  <exec_depend>icp_relocalization</exec_depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
