@@ -33,3 +33,35 @@
     # /emergency_stop 과 /mcu/state 를 직접 구독해 안전 사건을 알린다.
     # 웹을 거치지 않으므로 백엔드가 죽어 있어도, 물리 버튼으로 눌려도 들린다.
     announce_estop: true
+
+    # ── 스피커의 재생/일시정지 버튼 ────────────────────────────────────
+    # 누르면 button_text 를 말한다. 실차에서 "이 젯슨이 아직 살아 있나"를
+    # 태블릿 없이 확인하는 용도다 — 손이 닿는 곳에 스피커만 있으면 된다.
+    #
+    # 이 커널에는 uinput 이 없어 /dev/input 으로는 못 받는다. BlueZ 에 MPRIS
+    # 플레이어를 등록해 AVRCP 패스스루를 D-Bus 콜백으로 받는다. root 불필요.
+    #
+    # ⚠ 어댑터당 플레이어는 하나다. mpris-proxy 나 다른 MPRIS 플레이어를
+    #   같이 띄우면 등록이 충돌한다.
+    button_enabled: true
+
+    # 비워두면 누를 때마다 **지금의 네트워크 상태**를 읽는다:
+    #   "Wifi U S P O T. Address one seven two dot two one dot ... "
+    # 무선이 없으면 "No wifi", 주소가 하나도 없으면 "no address".
+    #
+    # IPv6 는 읽지 않는다 — hostname -I 에 섞여 나오지만 128 비트를 한 자리씩
+    # 읽으면 40초가 넘어 받아적을 수가 없다. IPv4 만, 무선을 먼저 읽는다.
+    #
+    # 고정 문장을 말하게 하려면 여기에 그 문장을 넣는다 (런타임 변경 가능):
+    #   ros2 param set /voice_announcer button_text "System alive"
+    button_text: ""
+
+    # 실측: 이 스피커는 버튼 하나로 PLAY/PAUSE 를 번갈아 보내고,
+    # 사람이 누를 수 있는 최소 간격은 약 500 ms 였다.
+    button_debounce_sec: 0.2
+
+    # 버튼 안내만 느리게 읽는다 (piper --length_scale, 클수록 느림).
+    # 주소는 흘려듣는 정보가 아니라 받아적는 정보라서 기본 속도로는 빠르다.
+    # 1.0 이하로 두면 다른 안내와 같은 속도가 된다.
+    # 속도는 캐시 키에 포함되므로, 바꾸면 그 문장만 한 번 다시 합성된다.
+    button_length_scale: 1.35

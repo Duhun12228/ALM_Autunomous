@@ -110,8 +110,15 @@ def generate_launch_description():
         DeclareLaunchArgument("lidar_z", default_value="0.5",
                               description="base_link 기준 라이다 높이 (lidar.launch.py 와 동일해야 함)"),
 
-        DeclareLaunchArgument("use_voice", default_value="true",
-                              description="음성 안내 (블루투스 스피커) 기동"),
+        # 기본값이 false 인 이유: 음성 안내는 systemd 사용자 서비스
+        # (scripts/install_voice_service.sh) 가 부팅 때부터 이미 띄워 둔다.
+        # 여기서 또 띄우면 노드가 둘이 되어 같은 안내가 두 번 겹쳐 들리고,
+        # BlueZ 는 어댑터당 플레이어를 하나만 받으므로 두 번째 등록이 실패해
+        # **스피커 버튼이 조용히 죽는다.**
+        #   서비스를 설치하지 않았다면: use_voice:=true
+        DeclareLaunchArgument("use_voice", default_value="false",
+                              description="음성 안내 노드를 여기서 기동. "
+                                          "systemd 서비스를 쓰면 false 로 둘 것"),
 
         # ---- 실측: Jetson 리소스 ----
         Node(
