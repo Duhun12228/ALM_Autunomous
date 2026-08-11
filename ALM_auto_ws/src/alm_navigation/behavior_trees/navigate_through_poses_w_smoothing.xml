@@ -1,0 +1,52 @@
+<!--
+  ALM NavigateThroughPoses BT
+  = nav2 기본 navigate_through_poses_w_replanning_and_recovery.xml
+    + ComputePathThroughPoses 뒤에 SmoothPath(ConstrainedSmoother) 삽입.
+  자세한 설명은 navigate_to_pose_w_smoothing.xml 참고.
+
+  RemovePassedGoals radius=0.7 은 로봇 inscribed radius(0.53 m)보다 크게 잡아
+  경유점을 '스치듯' 지나가도 소비되게 한다. Hybrid-A* 는 경유점의 자세(yaw)까지
+  맞추려 하므로, 너무 작게 잡으면 경유점 앞에서 자세를 맞추느라 맴돈다.
+-->
+<root main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <RecoveryNode number_of_retries="6" name="NavigateRecovery">
+      <PipelineSequence name="NavigateWithReplanning">
+        <RateController hz="0.333">
+          <RecoveryNode number_of_retries="1" name="ComputePathThroughPoses">
+            <Sequence name="PlanAndSmooth">
+              <ReactiveSequence>
+                <RemovePassedGoals input_goals="{goals}" output_goals="{goals}" radius="0.7"/>
+                <ComputePathThroughPoses goals="{goals}" path="{path}" planner_id="GridBased"/>
+              </ReactiveSequence>
+              <Fallback name="SmoothIfPossible">
+                <SmoothPath unsmoothed_path="{path}" smoothed_path="{path}"
+                            smoother_id="SmoothPath"
+                            max_smoothing_duration="0.5"
+                            check_for_collisions="true"/>
+                <AlwaysSuccess/>
+              </Fallback>
+            </Sequence>
+            <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
+          </RecoveryNode>
+        </RateController>
+        <RecoveryNode number_of_retries="1" name="FollowPath">
+          <FollowPath path="{path}" controller_id="FollowPath"/>
+          <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap"/>
+        </RecoveryNode>
+      </PipelineSequence>
+      <ReactiveFallback name="RecoveryFallback">
+        <GoalUpdated/>
+        <RoundRobin name="RecoveryActions">
+          <Sequence name="ClearingActions">
+            <ClearEntireCostmap name="ClearLocalCostmap-Subtree" service_name="local_costmap/clear_entirely_local_costmap"/>
+            <ClearEntireCostmap name="ClearGlobalCostmap-Subtree" service_name="global_costmap/clear_entirely_global_costmap"/>
+          </Sequence>
+          <Spin spin_dist="1.57"/>
+          <Wait wait_duration="5"/>
+          <BackUp backup_dist="0.30" backup_speed="0.05"/>
+        </RoundRobin>
+      </ReactiveFallback>
+    </RecoveryNode>
+  </BehaviorTree>
+</root>

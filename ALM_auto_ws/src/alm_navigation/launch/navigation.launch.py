@@ -4,7 +4,13 @@
   map_server            : 저장된 2D 맵(map.pgm/yaml) -> global costmap static layer
   localization.launch.py: FAST-LIO-Localization (map->odom + odom->base_link)
                           ※ AMCL + robot_localization EKF 를 대체
-  nav2 navigation_launch: planner/controller/behavior/bt (본체 변경 없음) -> /cmd_vel
+  nav2 navigation_launch: planner(SmacPlannerHybrid) / smoother(ConstrainedSmoother)
+                          / controller(MPPI) / behavior / bt -> /cmd_vel
+
+경로 파이프라인:
+  ComputePathToPose(Hybrid-A*) -> SmoothPath(ConstrainedSmoother) -> FollowPath(MPPI)
+연결은 alm_navigation/behavior_trees/navigate_*_w_smoothing.xml 이 담당하며,
+bt_navigator 가 읽을 절대경로를 RewrittenYaml 로 nav2.yaml 에 주입합니다.
 
 전제: /livox/lidar (+time) 와 /livox/imu 가 이미 발행 중
 (alm_bringup/robot.launch.py -> alm_sensors/lidar.launch.py).
@@ -24,6 +30,7 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
+from nav2_common.launch import RewrittenYaml
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import map_layout  # noqa: E402  (같은 디렉터리의 공용 헬퍼)
@@ -41,12 +48,28 @@ def generate_launch_description():
     default_map_pcd = active.cloud if active else ""
     default_fpfh_db = active.fpfh_prefix if active else ""
 
+    bt_dir = os.path.join(nav_share, "behavior_trees")
+
     use_sim_time = LaunchConfiguration("use_sim_time")
     params_file = LaunchConfiguration("params_file")
     map_yaml = LaunchConfiguration("map")
     map_pcd = LaunchConfiguration("map_pcd")
     fpfh_db_prefix = LaunchConfiguration("fpfh_db_prefix")
     accum_frames = LaunchConfiguration("accum_frames")
+
+    # nav2.yaml 의 default_nav_*_bt_xml 플레이스홀더를 설치된 BT 절대경로로 치환.
+    # (SmoothPath 노드가 들어간 커스텀 트리 = ConstrainedSmoother 가 실제로 불리는 지점)
+    configured_params = RewrittenYaml(
+        source_file=params_file,
+        root_key="",
+        param_rewrites={
+            "default_nav_to_pose_bt_xml": os.path.join(
+                bt_dir, "navigate_to_pose_w_smoothing.xml"),
+            "default_nav_through_poses_bt_xml": os.path.join(
+                bt_dir, "navigate_through_poses_w_smoothing.xml"),
+        },
+        convert_types=True,
+    )
 
     nav2_navigation_launch = PathJoinSubstitution(
         [FindPackageShare("nav2_bringup"), "launch", "navigation_launch.py"]
@@ -73,7 +96,7 @@ def generate_launch_description():
                 executable="map_server",
                 name="map_server",
                 output="screen",
-                parameters=[params_file, {"yaml_filename": map_yaml},
+                parameters=[configured_params, {"yaml_filename": map_yaml},
                             {"use_sim_time": use_sim_time}],
             ),
             Node(
@@ -97,12 +120,12 @@ def generate_launch_description():
                 }.items(),
             ),
 
-            # ---- Nav2 네비게이션 코어 (planner/controller/bt) ----
+            # ---- Nav2 네비게이션 코어 (planner/smoother/controller/bt) ----
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(nav2_navigation_launch),
                 launch_arguments={
                     "use_sim_time": use_sim_time,
-                    "params_file": params_file,
+                    "params_file": configured_params,
                     "autostart": "true",
                     "use_composition": "False",
                 }.items(),

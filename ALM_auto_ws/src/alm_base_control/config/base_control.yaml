@@ -78,6 +78,41 @@ command_manager:
     auto_crab_lateral_threshold: 0.05
     auto_crab_angular_threshold: 0.10
 
+    # ---- normal 모드 조향각 제한 ----
+    # normal 모드의 조향각은 선회반경 R = |vx|/|wz| 로만 결정된다. 기구가 낼 수
+    # 있는 최소 반경 R_min 을 넘어서면 조향각이 포화되는데, 그때 twist 를 그대로
+    # 두면 /mcu/command 의 cmd_vel 과 실제 조향각이 서로 다른 이야기를 한다
+    # (계획 ≠ 실제). 그래서 여기서 wz 를 접는다:  |wz| <= |vx| / R_min
+    #
+    # ##중요## R_min 을 여기 숫자로 적지 않는다. fourwis_encode.min_turn_radius()
+    # 가 wheelbase_m / track_m / rws_ratio / max_steer_deg 에서 런타임 계산한다.
+    # 아래 상수들을 바꾸면 제한도 따라 바뀐다 — 단일 진실 공급원.
+    #
+    # 현재 상수(B=1.0, T=0.919, rws=0.5, 30°) 기준 유도값:
+    #   R_min = 1.643 m,  vx=0.45 에서 |wz| <= 0.274 rad/s
+    #   ⚠ 후륜 역조향(rws=0.5)이 반영된 값. 후륜 고정(rws=0)으로 손계산하면
+    #     2.079 m 가 나오는데 그건 이 플랫폼의 실제 기구가 아니다.
+    # 확인:  ros2 run alm_navigation nav2_kinematic_check.py
+    steer_limit_enabled: true
+    # 이 속도 미만이면 조향으로 회전을 만들 수 없어 wz=0 으로 접는다
+    # (normal 모드는 제자리 회전 불가).
+    steer_limit_min_vx: 0.03
+    #
+    # 이 제한은 **모드를 바꾸지 않는다.** 로봇은 요청보다 크게 돌고, 그 오차는
+    # Nav2(MPPI)가 피드백으로 메운다. 진짜 제자리 회전이 필요하면 Nav2 가
+    # vx≈0, wz 큰 명령을 내므로 위 auto_spin_angular_threshold 가 잡는다.
+    #   ⚠ 사이 구간(vx 작고 wz < 0.35)은 wz 가 0 으로 접히고 spin 도 안 걸린다.
+    #     MPPI 는 진척이 없으면 wz 를 키우므로 스스로 임계값을 넘어 빠져나온다.
+    #     ##TODO## 실차에서 이 구간에 머무는 게 보이면
+    #     auto_spin_angular_threshold 를 낮추세요(0.35 -> 0.20 등).
+    # ##설계메모## '요구반경 < R_min 이면 spin' 라우팅을 넣었다가 뺐다. 상태머신의
+    #   spin 정의(제자리 회전)와 충돌해 1틱 단위 왕복이 났고, spin 틱마다 vx 가
+    #   0 으로 눌려 정상 선회에서도 속도가 무너졌다. command_manager.py 의
+    #   _select_auto() 주석 참고.
+    #
+    # spin/crab 은 이 제한을 받지 않는다 — STM32 가 고정 자세(CONS(8)/CONS(9))를
+    # 쓰므로 4륜 독립조향의 기계 한계를 그대로 쓸 수 있다.
+
     # ---- 4WIS 변환 (twist -> steer_deg/speed_rpm/mode) ----
     # 아래 5개는 STM32 CONS 벡터와 반드시 같은 값이어야 합니다.
     # 값 출처: STM32 Simulink 모델 ALM07.slx 의 CONS 생성 서브시스템.

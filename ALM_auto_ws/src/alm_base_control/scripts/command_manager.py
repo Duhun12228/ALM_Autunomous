@@ -93,6 +93,13 @@ class CommandManager(Node):
                 ("auto_mode_min_hold_sec", 0.80),
                 ("auto_crab_lateral_threshold", 0.05),
                 ("auto_crab_angular_threshold", 0.10),
+                # ---- normal 모드 조향각 제한 ----
+                # 한계값은 하드코딩하지 않는다. fourwis_encode 가 wheelbase/track/
+                # rws_ratio/max_steer_deg 로 런타임에 계산한다 (단일 진실 공급원).
+                ("steer_limit_enabled", True),
+                # 이 속도 미만에서는 조향 한계 안에서 유효한 회전을 만들 수 없어
+                # wz=0 으로 접는다. normal 모드는 제자리 회전을 못 하기 때문.
+                ("steer_limit_min_vx", 0.03),
                 # ---- 4WIS 변환 (STM32 CONS 와 반드시 일치시킬 것) ----
                 # 기본값 출처: STM32 Simulink 모델 ALM07.slx 의 CONS 생성 서브시스템
                 ("wheelbase_m", 1.0),          # CONS(2) 1000 mm
@@ -154,6 +161,13 @@ class CommandManager(Node):
             max_rpm=g("max_rpm").value,
         )
 
+        # ---- normal 모드 조향각 제한 (기구학에서 유도) ----
+        # R_min 은 '최대 조향각에서의 ICR 측방거리'다. 후륜 역조향(rws_ratio)이
+        # 반영돼 있으므로 후륜 고정 가정으로 손계산한 값과 다르다.
+        self.steer_limit_on = bool(g("steer_limit_enabled").value)
+        self.steer_min_vx = float(g("steer_limit_min_vx").value)
+        self.r_min = fourwis_encode.min_turn_radius(self.wis)
+
         # 상태
         self.cmd = Twist()
         self.last_cmd_sec = 0.0
@@ -202,15 +216,25 @@ class CommandManager(Node):
                 "웹 UI 는 래치를 전제로 동작하므로 운용에서는 true 를 권장합니다.")
 
         # 기구학 한계 대비 속도 제한이 타당한지 시작 시 1회 점검
-        r_min = fourwis_encode.min_turn_radius(self.wis)
         wz_max = fourwis_encode.max_angular_speed(self.wis, self.max_lx)
         self.get_logger().info(
-            f"4WIS: 최소 회전반경 {r_min:.2f} m, "
-            f"vx={self.max_lx} m/s 에서 가능한 최대 wz={wz_max:.2f} rad/s"
+            f"4WIS: 최소 회전반경 {self.r_min:.3f} m, "
+            f"vx={self.max_lx} m/s 에서 가능한 최대 wz={wz_max:.3f} rad/s"
         )
-        if self.max_wz > wz_max * 1.05:
+        if self.steer_limit_on:
+            self.get_logger().info(
+                f"조향 제한 ON: normal 모드 |wz| <= |vx|/{self.r_min:.3f} "
+                f"(내측 전륜 {math.degrees(self.wis.max_steer_rad):.0f}° 한계, "
+                f"vx={self.max_lx} 에서 {wz_max:.3f} rad/s), "
+                f"vx<{self.steer_min_vx} 이면 wz=0"
+            )
+        else:
             self.get_logger().warn(
-                f"max_angular_z({self.max_wz})가 기구학 한계({wz_max:.2f})를 초과합니다. "
+                "조향 제한 OFF — normal 모드에서 기구가 못 내는 곡률을 요구해도 "
+                "조향각만 포화되고 twist 는 그대로 나갑니다(계획≠실제). 운용에서는 true 권장.")
+        if self.max_wz > wz_max * 1.05 and not self.steer_limit_on:
+            self.get_logger().warn(
+                f"max_angular_z({self.max_wz})가 기구학 한계({wz_max:.3f})를 초과합니다. "
                 f"일반 주행에서 조향이 상시 포화되어 실제 궤적이 계획과 어긋납니다. "
                 f"Nav2/base_control 의 각속도 제한을 낮추거나 spin 모드를 쓰세요."
             )
@@ -314,6 +338,19 @@ class CommandManager(Node):
         spin_entry_cond = abs(wz) >= self.spin_ang_th and lin <= self.spin_lin_th
         spin_exit_cond = abs(wz) <= self.spin_rel_th or lin >= self.spin_exit_lin_th
 
+        # ##설계메모## '요구 선회반경이 R_min 보다 작으면 spin 으로 보낸다'는
+        # 반경 기반 라우팅을 여기 넣었다가 뺐다. 이 상태머신은 spin 을
+        # '제자리 회전'(lin <= spin_lin_th)으로 정의하는데, 반경 조건은 전진 중에도
+        # 참이 될 수 있어 두 정의가 충돌한다. 실측 결과 spin↔normal 이 1틱(0.02 s)
+        # 단위로 왕복했고, spin 틱마다 vx 가 0 으로 눌려 가속 램프가 되감기면서
+        # 정상 선회(R=1.0 m)에서도 vx 가 0.3 -> 0.04 로 무너졌다.
+        #
+        # 기구가 못 내는 곡률은 모드를 바꾸지 않고 _limit_normal_wz() 가
+        # wz 를 접어서 처리한다. 로봇은 요청보다 크게 돌고, 그 오차는 Nav2
+        # (MPPI)가 피드백으로 메운다 — 폐루프 제어기가 원래 하는 일이다.
+        # 진짜 제자리 회전이 필요하면 Nav2 는 vx≈0, wz 큰 명령을 내므로
+        # 아래 기존 임계값(wz>=auto_spin_angular_threshold AND lin<=...)이 잡는다.
+
         if self.last_auto_mode == "spin":
             self.spin_entry.active = False
             if hold_active:
@@ -338,6 +375,43 @@ class CommandManager(Node):
             return target
         max_step = accel * dt
         return clamp(target, current - max_step, current + max_step)
+
+    def _limit_normal_wz(self, vx, wz, quiet=False):
+        """normal 모드에서 조향각 한계를 넘지 않는 wz 로 접는다.
+
+        normal 모드의 조향각은 선회반경 R = |vx| / |wz| 로만 결정된다.
+        기구가 낼 수 있는 최소 반경이 R_min 이므로 한계는 그대로
+
+            |wz| <= |vx| / R_min
+
+        이다. R_min 은 fourwis_encode.min_turn_radius() 가 wheelbase/track/
+        rws_ratio/max_steer_deg 에서 계산하므로 여기에 상수를 박지 않는다.
+
+        vx 가 아주 작으면 한계도 0 에 수렴한다 — normal 모드는 제자리 회전을
+        못 하기 때문이다. 그 구간은 wz=0 으로 접는다. 진짜 제자리 회전이
+        필요하면 Nav2 가 vx≈0, wz 큰 명령을 내므로 _select_auto 의 기존
+        임계값이 spin 모드로 잡아준다.
+
+        모드는 건드리지 않는다. 여기서 spin 으로 보내려 하면 상태머신의
+        spin 정의(제자리 회전)와 충돌해 1틱 단위 왕복이 생긴다 —
+        _select_auto 의 설계메모 참고.
+        """
+        if not self.steer_limit_on or not math.isfinite(self.r_min) or self.r_min <= 0.0:
+            return wz
+        if abs(vx) < self.steer_min_vx:
+            if abs(wz) > 1e-3 and not quiet:
+                self.get_logger().warn(
+                    f"normal 모드 vx={vx:.3f} m/s 는 조향으로 회전을 만들기에 너무 느립니다"
+                    f" -> wz={wz:.3f} 를 0 으로 접습니다. 회전이 필요하면 spin 모드로.",
+                    throttle_duration_sec=2.0)
+            return 0.0
+        wz_lim = abs(vx) / self.r_min
+        if abs(wz) > wz_lim and not quiet:
+            self.get_logger().warn(
+                f"조향각 한계로 wz {wz:.3f} -> {math.copysign(wz_lim, wz):.3f} rad/s "
+                f"(요구반경 {abs(vx) / max(abs(wz), 1e-9):.2f} m < R_min {self.r_min:.2f} m)",
+                throttle_duration_sec=2.0)
+        return clamp(wz, -wz_lim, wz_lim)
 
     def _tick(self):
         now = self._now()
@@ -375,6 +449,11 @@ class CommandManager(Node):
         vy = clamp(vy, -self.max_ly, self.max_ly)
         wz = clamp(wz, -self.max_wz, self.max_wz)
 
+        # ---- normal 모드 조향각 한계 (목표 twist) ----
+        # vx 클램프 뒤에 적용해야 한계가 실제로 낼 속도 기준이 된다.
+        if effective == "normal":
+            wz = self._limit_normal_wz(vx, wz)
+
         # ---- 하드 정지 조건 (e-stop / timeout / MCU fault / odom 워치독) ----
         # (8) 움직이려는데 오도메트리가 오래 끊기면 정지 (EKF/센서 사망 방지)
         odom_stale = (
@@ -393,6 +472,13 @@ class CommandManager(Node):
         self.out_vx = self._rate_limit(vx, self.out_vx, self.acc_x, dt)
         self.out_vy = self._rate_limit(vy, self.out_vy, self.acc_y, dt)
         self.out_wz = self._rate_limit(wz, self.out_wz, self.acc_th, dt)
+
+        # ---- normal 모드 조향각 한계 (가속 램프 통과 후) ----
+        # 가속제한은 성분별로 걸린다. wz(1.5 rad/s²)가 vx(1.0 m/s²)보다 빨리
+        # 목표에 도달하므로, 출발 직후 wz/vx 비가 순간적으로 한계를 넘는다.
+        # 목표 twist 에만 걸면 이 구간을 놓친다. (quiet=True — 위에서 이미 경고함)
+        if effective == "normal":
+            self.out_wz = self._limit_normal_wz(self.out_vx, self.out_wz, quiet=True)
 
         # ---- STM32 4WIS 인터페이스로 변환 ----
         # 모터 비활성/정지 상황은 mode 0(정지) 으로 내려보낸다.
