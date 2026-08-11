@@ -45,7 +45,12 @@ Livox MID-360 (3D LiDAR + 내장 6축 IMU)
         fastlio_localization → TF odom→base_link, /Odometry (실시간 추적)
         ※ AMCL + robot_localization EKF 를 대체
 
-Nav2 (planner/controller/bt, odom_topic=/Odometry) → /cmd_vel
+Nav2 (odom_topic=/Odometry) → /cmd_vel
+  planner_server   : SmacPlanner2D        (2D A*)              → /plan
+  smoother_server  : ConstrainedSmoother  (Ceres, 곡률/장애물)  → 평활화된 /plan
+  controller_server: MPPIController       (샘플링 MPC)          → /cmd_vel
+  ※ 커스텀 BT(behavior_trees/navigate_*_w_smoothing.xml)가
+    ComputePathToPose → SmoothPath → FollowPath 로 연결
 alm_base_control · command_manager: /cmd_vel + /drive_mode
       → 모드해석(auto→normal/spin/crab) + 안전게이팅 → /mcu/command (McuCommand)
 alm_mcu_interface · mcu_bridge: /mcu/command ⇄ STM32 (UART) → /wheel_odom, /mcu/state, /joint_states
@@ -64,7 +69,8 @@ LiDAR+IMU 만으로 만들며 엔코더는 관여하지 않습니다.**
 - `alm_sensors`: Livox MID-360 **UDP 직접 파싱**(livox_udp_pointcloud2/imu, per-point time 포함)
   + PointCloud→Scan. 런타임에서 livox_ros_driver2 드라이버 노드는 쓰지 않음.
 - `alm_navigation`: **FAST-LIO2 매핑**(slam.launch) · **FAST-LIO-Localization 측위**(localization.launch)
-  · **pcd2pgm**(3D→2D) · Nav2 설정/launch · EKF(매핑용) · map · rviz. `map_publisher.py`(맵 확인용).
+  · **pcd2pgm**(3D→2D) · Nav2 설정/launch(`config/nav2.yaml`, `behavior_trees/`)
+  · EKF(매핑용) · map · rviz. `map_publisher.py`(맵 확인용).
   [방식 B] **Scan Context**: `scan_context.py`(디스크립터/매칭) · `sc_build_db.py`(맵→SC DB)
   · `sc_localizer.py`(초기위치 자동특정 노드, `/initialpose` 발행).
 - `alm_base_control`: `command_manager` — 모드 선택 + 속도/가속 제한 + e-stop
@@ -79,6 +85,8 @@ LiDAR+IMU 만으로 만들며 엔코더는 관여하지 않습니다.**
 ```bash
 sudo apt install ros-humble-robot-localization \
   ros-humble-navigation2 ros-humble-nav2-bringup \
+  ros-humble-nav2-smac-planner ros-humble-nav2-constrained-smoother \
+  ros-humble-nav2-mppi-controller \
   ros-humble-pcl-ros pcl-tools \
   ros-humble-joint-state-publisher-gui python3-serial
 pip3 install numpy pyyaml pillow    # pcd2pgm / map_publisher / 맵 렌더링
@@ -173,7 +181,11 @@ auto 는 Nav2 의 `/cmd_vel`(vx+wz)을 보고 normal↔spin 을 자동 전환합
 ## 문서
 - **Jetson 처음부터 설치·실행 → `docs/JETSON_SETUP.md`**
 - 매핑→저장→자율주행 운영 → `docs/OPERATION_GUIDE.md`
+- **Nav2 자율주행 스택(SmacPlanner2D+ConstrainedSmoother+MPPI) 전체 설명 → `docs/auto.md`**
+- **4WIS 조향 기구학 + normal 모드 30° 조향각 제한 → `docs/STEERING_KINEMATICS.md`**
+  (역기구학 유도, spin 조향각 ±50.7°/∓31.1°, `uart_protocol.md` 수정필요 항목)
 - 실차 전 확인/수정할 값 → `SETUP_CHECKLIST.md`
+- **Scan Context 초기위치 정합 실험 → `docs/SC_ICP_실험체크리스트.md`**
 - 작업 내역 → `docs/CHANGES.md`
 - **남은 작업(TODO) → `docs/TODO.md`**
 
