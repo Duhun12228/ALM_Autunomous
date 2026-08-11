@@ -1,0 +1,35 @@
+/voice_announcer:
+  ros__parameters:
+    # 데모 중이나 실내 테스트에서 즉시 입을 막을 수 있어야 한다:
+    #   ros2 param set /voice_announcer enabled false
+    enabled: true
+
+    # 비우면 페어링된 장치 중 Audio Sink 를 가진 첫 장치를 자동으로 잡는다.
+    # 이 젯슨에서는 TS-BTS25-2-D (3C:DC:96:E7:89:40) 가 잡힌다.
+    # 스피커를 여러 개 페어링했다면 여기에 MAC 을 박을 것.
+    speaker_mac: ""
+
+    # 블루투스가 없을 때 쓸 싱크. 비우면 PulseAudio 기본 싱크로 나간다.
+    # 실차에서는 HDMI 에 아무것도 안 붙어 있을 테니 보통 비워둔다.
+    fallback_sink: ""
+
+    # scripts/install_piper.sh 가 설치하는 위치.
+    # /opt 에 깔았다면 여기를 그 경로로 바꿀 것.
+    piper_bin: "/home/kdh/.local/share/alm-voice/piper/piper"
+    piper_model: "/home/kdh/.local/share/alm-voice/voices/en_US-lessac-low.onnx"
+    cache_dir: "/home/kdh/.cache/alm_voice"
+
+    # A2DP 스피커는 절전에서 깨는 데 시간이 걸려 **첫 음절이 잘린다.**
+    # 잘려도 되는 무음을 먼저 보낸다. 실측으로 조정할 것 — 스피커마다 다르다.
+    lead_silence_ms: 300
+
+    # 연속 발화 사이 최소 간격. 안내가 서로 붙어 들리는 것을 막는다.
+    min_interval_sec: 0.4
+
+    # 기동 시 고정 문구를 미리 합성해 캐시에 넣는다.
+    # 안 하면 각 문구의 첫 발화가 약 950 ms 늦는다 (piper 모델 로드 시간).
+    prewarm: true
+
+    # /emergency_stop 과 /mcu/state 를 직접 구독해 안전 사건을 알린다.
+    # 웹을 거치지 않으므로 백엔드가 죽어 있어도, 물리 버튼으로 눌려도 들린다.
+    announce_estop: true
