@@ -1,7 +1,7 @@
 # TODO — 남은 작업
 
 3D LIO 측위 전환(FAST-LIO2 매핑 + FAST-LIO-Localization) 이후 남은 작업 목록.
-최종 업데이트: 2026-08-10 (dev/fastlio2-sc: WebUI 명령 경로 Phase 3 — `alm_web_backend` + E-STOP 래치).
+최종 업데이트: 2026-08-11 (dev/fastlio2-sc: Nav2 경로 파이프라인 Hybrid-A* 전환 + 조향각 한계).
 
 ## ✅ 완료 (방식 A, 집에서 LiDAR 핸드헬드 검증)
 - 센서 UDP 직접 파싱 (per-point time 포함), 런치 통합
@@ -60,6 +60,33 @@
 - [ ] ⚠ **Phase 5 선행조건**: `base_control.yaml` 의 4WIS 상수 8개(`##CONFIRM##`)를
       실차로 확정. 미확정 상태에서 웹 twist 를 보내면 그대로 엉뚱한 rpm/조향각이 된다.
       웹 텔레옵과 `keyboard_teleop` 의 `/cmd_vel_teleop` 경쟁 해소 방식도 먼저 결정할 것.
+
+### 3.95 Nav2 경로계획 재구성 (2026-08-11)
+- [x] **Hybrid-A* 전환**. `NavFn+DWB` → `SmacPlannerHybrid(Reeds-Shepp)` +
+      `ConstrainedSmoother` + `MPPI`. `dev/sc-lio-sam` 의 `37f524b` 구조를 가져오되
+      파라미터는 이 브랜치의 STM32 CONS/URDF 에서 전부 재유도했다.
+      2D 격자 플래너가 아니라 Hybrid 를 고른 이유와 맵 타당성 근거 →
+      `docs/nav2_planning.md`.
+- [x] **조향각 한계**를 `command_manager` 에 구현 (`steer_limit_enabled`).
+      `|wz| ≤ |vx|/R_min`, R_min=1.643 m 는 `fourwis_encode.min_turn_radius()` 가
+      런타임 계산(후륜 50% 역조향 반영). 가속 램프 통과 후에도 재적용.
+- [x] `nav2_kinematic_check.py` — `base_control.yaml` 기구 상수와 `nav2.yaml` 의
+      유도값이 어긋나면 알려주는 읽기 전용 검사기. 상수를 바꿀 때마다 돌릴 것.
+- [x] `lookup_table_size` 20.0 → 10.0. planner configure 8.19 s → 2.40 s (개발 PC 실측).
+- [ ] **실제 경로 생성/주행 미검증.** 지금까지 확인한 것은 "설정이 받아들여지고
+      플러그인이 뜬다"까지다. TF·맵·측위가 붙은 전체 스택에서 `/plan` 이 나오는지,
+      MPPI 가 그 경로를 따라가는지 확인 필요.
+- [ ] Orin Nano 계획시간 측정. `max_planning_time: 2.0` 안에 안 끝나면
+      `downsample_costmap: true` + `downsampling_factor: 2` 부터 적용
+      (`docs/nav2_planning.md` §4 순서표).
+- [ ] ⚠ **저속 사각지대**: `vx < 0.03` 이면서 `|wz| < auto_spin_angular_threshold(0.35)`
+      인 구간은 wz 가 0 으로 접히고 spin 도 안 걸린다. MPPI 가 스스로 wz 를 키워
+      빠져나오는 것에 기대고 있다. 실차에서 이 구간에 머물면 임계값을 0.20 으로 낮출 것.
+- [ ] ⚠ **URDF vs STM32 CONS 지오메트리 불일치**. URDF 는 휠베이스 0.9116 m /
+      윤거 1.0 m (front_x 0.6106, rear_x -0.3010, half_track 0.5), CONS 는
+      B=1.0 m / T=0.919 m 로 **사실상 뒤바뀌어 있다.** 둘 다 '실측'이라 주장하므로
+      어느 쪽이 맞는지 확인해야 한다. 현재 nav2/조향 제한은 CONS 를 따르고
+      footprint 만 URDF 를 따른다 — R_min 과 footprint 가 서로 다른 출처인 셈이다.
 
 ### 4. TF/구조 정리
 - [ ] 매핑 모드에서 EKF 필요성 재검토 (맵에 무관 — 켤 이유 없으면 정리).

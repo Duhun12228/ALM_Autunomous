@@ -45,7 +45,10 @@ Livox MID-360 (3D LiDAR + 내장 6축 IMU)
         fastlio_localization → TF odom→base_link, /Odometry (실시간 추적)
         ※ AMCL + robot_localization EKF 를 대체
 
-Nav2 (planner/controller/bt, odom_topic=/Odometry) → /cmd_vel
+Nav2 (odom_topic=/Odometry) → /cmd_vel
+  ├ planner   SmacPlannerHybrid (Hybrid-A*, Reeds-Shepp, R_min=1.643 m)
+  ├ smoother  ConstrainedSmoother (Ceres 곡률/장애물 제약)
+  └ controller MPPI (샘플링 MPC) ※ 연결은 커스텀 BT(navigate_*_w_smoothing.xml)
 alm_base_control · command_manager: /cmd_vel + /drive_mode
       → 모드해석(auto→normal/spin/crab) + 안전게이팅 → /mcu/command (McuCommand)
 alm_mcu_interface · mcu_bridge: /mcu/command ⇄ STM32 (UART) → /wheel_odom, /mcu/state, /joint_states
@@ -128,7 +131,10 @@ GICP까지 진입하거나 `/icp_result`를 발행한 시도는 없었습니다.
   · **pcd2pgm**(3D→2D) · Nav2 설정/launch · EKF(매핑용) · map · rviz. `map_publisher.py`(맵 확인용).
   [방식 B] **FPFH+TEASER++**: `fpfh_map_builder`(맵 feature DB) ·
   `teaser_fpfh_localizer`(전역 정합/검증/지역 GICP).
+  **경로계획**: Hybrid-A* → ConstrainedSmoother → MPPI. 파라미터는 STM32 CONS 와
+  URDF 에서 유도하며 `nav2_kinematic_check.py` 가 정합성을 검사한다 → `docs/nav2_planning.md`
 - `alm_base_control`: `command_manager` — 모드 선택 + 속도/가속 제한 + e-stop
+  + **조향각 한계**(normal 모드 `|wz| ≤ |vx|/R_min`, R_min 은 `fourwis_encode` 가 런타임 계산)
 - `alm_mcu_interface`: `mcu_bridge` — Jetson↔STM32 UART, `docs/uart_protocol.md`
 - `alm_msgs`: `McuCommand`(다운링크), `McuState`(업링크, 2조향+4구동 피드백)
 - `alm_bringup`: robot/slam/navigation 최상위 launch
@@ -239,9 +245,16 @@ ros2 run alm_base_control keyboard_teleop.py
 `normal`(전후+회전) · `spin`(제자리 회전) · `crab`(게걸음, 기본 비활성) · `auto`(자동 선택).
 auto 는 Nav2 의 `/cmd_vel`(vx+wz)을 보고 normal↔spin 을 자동 전환합니다(참고 레포 로직 포팅).
 
+`normal` 모드는 자동차형이라 **최소 선회반경 1.643 m**(내측 전륜 30°, 후륜 50% 역조향
+포함) 아래로는 못 돕니다. 그보다 급한 요청은 `command_manager` 가
+`|wz| ≤ |vx|/R_min` 으로 접어 조향각이 포화되지 않게 합니다 — 그래야
+`/mcu/command` 의 `cmd_vel` 과 `steer_deg` 가 같은 이야기를 합니다.
+상세 → `docs/nav2_planning.md` §3
+
 ## 문서
 - **Jetson 처음부터 설치·실행 → `docs/JETSON_SETUP.md`**
 - 매핑→저장→자율주행 운영 → `docs/OPERATION_GUIDE.md`
+- **Nav2 경로계획(Hybrid-A*)·조향각 한계 → `docs/nav2_planning.md`**
 - **Jetson→STM32 UART 연동·확인 절차 → `docs/uart.md`** (변경사항 정리 + 제어단 점검 체크리스트)
 - UART 프로토콜 규격 v2 → `ALM_auto_ws/src/alm_mcu_interface/docs/uart_protocol.md`
 - 실차 전 확인/수정할 값 → `SETUP_CHECKLIST.md`
