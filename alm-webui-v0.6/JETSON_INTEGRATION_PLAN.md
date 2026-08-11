@@ -4,6 +4,7 @@
 
 > **갱신 이력**
 > - **2026-07-26 (초판)** — `index.html`/`assets/app.js`의 목업에 등장하는 노드·토픽 이름을 설계 의도로 간주하고 작성. 워크스페이스 실물과 대조하지 않음.
+> - **2026-08-07 (맵 자산)** — 맵을 **폴더 단위**로 재편(`maps/<맵이름>/`)하고 `map_manager`(`/alm/map_inventory`)를 추가. UI의 하드코딩 맵 목록과 Scan Context·방식 A/B/C 잔재를 전부 제거. §0.1 신설.
 > - **2026-08-06 (개정)** — `ALM_auto_ws/src` 실물과 전면 대조. 초판이 가정한 `command_gateway`가 실제로는 **`cmd_arbiter` + `command_manager` + `mcu_bridge` 3단 체인**으로 이미 구현돼 있음을 반영. §2 아키텍처, §3.5, §3.6, §4 인벤토리, §6 매핑표를 실측값으로 교체하고 §12(불일치 목록)를 신설.
 
 ---
@@ -18,6 +19,64 @@
 
 ---
 
+## 0.1 맵 자산 레이아웃 (2026-08-07 신설)
+
+**폴더 하나 = 맵 하나.** `manifest.yaml` 이 있는 디렉터리만 맵으로 인정한다
+(실험 잔재 폴더가 목록에 섞이는 것을 막기 위해서다).
+
+```
+ALM_auto_ws/src/alm_navigation/maps/
+├── active.yaml                 active: alm_lab   ← launch 와 map_manager 가 읽는다
+├── alm_lab/
+│   ├── manifest.yaml           이름·라벨·생성일 (자산 '사실'은 적지 않는다)
+│   ├── cloud.pcd               3D 점군   — FAST-LIO /map_save
+│   ├── grid.pgm  grid.yaml     2D 격자   — pcd2pgm.py
+│   └── fpfh_map.meta  fpfh_map_{points,normals,fpfh}.pcd   — fpfh_map_builder
+└── empty_test/                 자산 없는 맵 (placeholder 화면 확인용, 지워도 됨)
+```
+
+### 왜 이렇게 했나
+
+평평한 구조에서는 맵이 둘 이상이 되는 순간 **"이 pgm 이 어느 pcd 의 자식인가"**
+를 알 수 없었다. 새 구조에서는 폴더가 곧 그 답이다.
+
+### 짝 맞음(stale) 판정 — 이미 파일에 근거가 있었다
+
+`fpfh_map.meta` 에는 부모 PCD 의 지문이 들어 있고(`map_fingerprint`),
+`teaser_fpfh_localizer` 는 기동할 때 이것을 실제로 검증한다
+(`verify_map_fingerprint`, `src/teaser_fpfh_localizer.cpp:225`).
+`map_manager` 는 같은 근거로 **미리** 판정해 화면에 띄운다.
+
+| 검사 | 근거 | 비용 |
+|---|---|---|
+| 점 개수 대조 | `meta.map_input_points` vs `cloud.pcd` 헤더 `POINTS` | 헤더 4 KB만 읽음 |
+| mtime 역전 | `cloud.pcd` 가 `grid.pgm`/`fpfh_map.meta` 보다 최신인가 | stat 3회 |
+| 지문 대조 | FNV-1a 64 | 52 MB ≈ 14초 → **기본 off**, 켜면 백그라운드 + 캐시 |
+
+> ⚠ **지문 상수 함정.** `icp_relocalization` 의 FNV-1a 오프셋은
+> `1469598103934665603` 으로, 교과서 값(`14695981039346656037`)에서 한 자리가
+> 빠진 오타다. builder 와 localizer 가 같은 함수를 쓰므로 체크섬으로는 일관되게
+> 동작하지만, 다른 구현에서 교과서 값을 쓰면 **멀쩡한 DB 를 전부 불일치로
+> 오판한다.** `map_manager.py` 는 이 값을 그대로 맞춰 두었다.
+
+### 경로 조립
+
+`alm_navigation/launch/map_layout.py`(공용 헬퍼)가 `active.yaml` 을 읽어
+`cloud` / `grid_yaml` / `fpfh_prefix` 경로를 만든다. launch 들은 인자를 비우면
+활성 맵을 자동으로 쓰고, 인자로 덮어쓸 수도 있다.
+
+> ⚠ **`--symlink-install` 함정.** colcon 은 `maps/` 를 실제 디렉터리로 만들고
+> 그 안의 항목만 심링크한다. 그래서 share 경로를 그대로 쓰면 매핑으로 소스 쪽에
+> 새 맵 폴더가 생겨도 `colcon build` 전까지 보이지 않는다. `maps_root()` 가
+> 심링크를 따라 원본 디렉터리로 되돌리는 이유다.
+
+> ⚠ **절대경로 2곳.** `fastlio_mid360.yaml` 의 `map_file_path` 와
+> `fastlio_relocalization.yaml` 의 `prior_map_path` 는 fast_lio 자신의
+> 파라미터라 launch 치환이 닿지 않는다. **새 맵으로 매핑하기 전에 직접 바꿔야**
+> 기존 맵을 덮어쓰지 않는다.
+
+---
+
 ## 1. 지금 상태 요약 — 무엇이 진짜고 무엇이 가짜인가
 
 ### 1.1 브라우저 쪽 (전부 mock)
@@ -27,7 +86,7 @@
 | 3D 포인트클라우드 뷰포트 | `drawPointCloud()`가 sin/cos 공식으로 매 프레임 점을 생성하는 Canvas 2D 눈속임 | 실제 `PointCloud2` 메시지 구독 + WebGL 3D 렌더러로 전면 교체 |
 | 2D 운용 지도 | SVG에 좌표가 하드코딩된 고정 도형 | 실제 PGM/YAML 지도 이미지 + OccupancyGrid 코스트맵 |
 | SLAM 시작/종료, 저장, 변환, DB 생성 | `setTimeout` 기반 진행률 시뮬레이션 | launch 기동 RPC + `/map_save` 서비스 + **CLI 스크립트 실행 래핑**(§3.3 참조) |
-| 초기위치/측위 | 정해진 시나리오대로 상태가 자동 전환 | `sc_localizer` 노드의 실제 진행 상황 구독 |
+| 초기위치/측위 | 정해진 시나리오대로 상태가 자동 전환 | `teaser_fpfh_localizer` 노드의 실제 진행 상황 구독 |
 | 웨이포인트 · 자율주행 | 클라이언트에서 진행률을 랜덤 증가시킴 | Nav2 `FollowWaypoints` 액션 연동 |
 | 수동주행(데드맨) | `commandFor()`가 계산한 값을 화면에만 표시 | `/cmd_vel_teleop` 발행 + `/mcu/state` 피드백 구독 |
 | 모니터링(CPU/GPU/온도/네트워크 등) | `updateMetrics()`가 매초 랜덤값 생성 | Jetson 실측 통계를 토픽으로 발행받아 구독 |
@@ -45,7 +104,7 @@
 | `alm_web_backend` | ❌ 없음 | 신규 작성 필요 (§3.7) |
 | `foxglove_bridge` | ❌ 미설치 | 신규 도입 필요 (§3.8) |
 | `jetson_stats_publisher` | ❌ 없음 | 신규 작성 필요 (§3.9) |
-| `sc_localizer` | ✅ 존재 | `alm_navigation/scripts/sc_localizer.py` |
+| `teaser_fpfh_localizer` | ✅ 존재 | `alm_navigation/scripts/teaser_fpfh_localizer` |
 | `livox_udp_pointcloud2` | ✅ 존재 | `alm_sensors/scripts/livox_udp_pointcloud2.py` |
 | `/map_save` | ✅ 존재 | FAST-LIO 서비스, 경로는 `fastlio_mid360.yaml`의 `map_file_path` 고정 |
 | `pcd2pgm` / `sc_build_db` | ⚠ 스크립트만 | **ROS 서비스가 아니라 argparse CLI 오프라인 스크립트** |
@@ -64,7 +123,7 @@
 │          pointcloud_to_scan ─▶ /scan                                         │
 │                                                                              │
 │  [매핑]  fast_lio/fastlio_mapping ─▶ /Odometry, 등록점군, 서비스 /map_save   │
-│  [측위]  sc_localizer ─▶ /initialpose, /sc_candidates                        │
+│  [측위]  teaser_fpfh_localizer ─▶ /initialpose, /sc_candidates                        │
 │          icp_relocalization(transform_publisher) ─▶ TF map→odom              │
 │  [주행]  Nav2 ─▶ costmap, /plan, FollowWaypoints 액션, /cmd_vel              │
 │                                                                              │
@@ -161,14 +220,15 @@ UI의 HUD 제어권 배지와 `cmd_arbiter`의 동작권은 **서로 다른 축*
   - **(권장) backend가 subprocess로 실행**하고 stdout을 진행률로 파싱 — 스크립트를 건드리지 않아 CLI 운용과 웹 운용이 갈라지지 않음
   - 스크립트를 ROS 서비스 노드로 감싸기 — 인터페이스는 깔끔하나 코드가 이중화됨
 - [ ] `pcd2pgm.py` 파라미터(`--z-min`/`--z-max`/`--resolution`/`--min-points`)를 UI 변환 모달의 입력 필드와 이름·단위까지 맞출 것. z 밴드는 라이다 마운트 높이에 따라 조정이 필요하다는 점을 UI 도움말에 넣어야 함(스크립트 docstring 참조)
-- [x] `sc_localizer.py` 확인 완료 — 파라미터 `db_path`, `lidar_topic`(`/livox/lidar`), `accum_frames`(10), `topk`(25), `max_candidates`(5), `icp_wait_sec`(12.0). 발행 `/initialpose`, `/sc_candidates`(PoseArray). 구독 `/livox/lidar`, `/icp_result`
+- [x] `teaser_fpfh_localizer` 확인 완료 — 파라미터 `map_pcd`, `fpfh_db_prefix`, `accum_frames`(10), `verify_map_fingerprint`(true). 발행 `/icp_result`. 구독 `/livox/lidar`.
+      ※ `sc_localizer.py` / `sc_build_db.py` / `scan_context.py` 는 `bbc6dad` 에서 **삭제**됐다 — 이 문서의 예전 SC 서술은 더 이상 유효하지 않다.
   - [ ] ⚠ **상태 머신(COLLECT→MATCH→WAIT)을 토픽으로 노출하지 않습니다.** UI 측위 패널의 단계별 진행 표시를 쓰려면 상태 발행을 추가하거나(권장, 소규모 수정), UI를 "탐색 중/성공/실패" 3단계로 단순화해야 함
   - [ ] ⚠ **성공 시 노드가 스스로 종료합니다(일회성).** `icp_node`도 마찬가지. UI의 "재측위" 버튼은 노드 재기동을 의미하므로 backend가 재실행을 담당해야 함
-- [ ] 방식 A/B/C별 launch 조합 정리 — `localization.launch.py`가 `transform_publisher` + `teaser_fpfh_localizer` + `fastlio_localization`을 기동. 프로필 선택이 어떤 인자로 갈리는지 문서화
+- [x] 측위 방식은 **FPFH+TEASER++ 하나로 확정**(bbc6dad). `localization.launch.py`가 `transform_publisher` + `teaser_fpfh_localizer` + `fastlio_localization`을 기동하며, 맵·DB 경로는 인자를 비우면 `maps/active.yaml`에서 조립된다. UI의 방식 A/B/C 선택은 제거했다.
 
 ### 3.4 자율주행(Nav2) 스택
 - [ ] Nav2 설치 및 파라미터 구성 (`alm_navigation/config/nav2.yaml` 존재, 실기 검증 필요)
-- [ ] `/initialpose`(`geometry_msgs/PoseWithCovarianceStamped`)로 수동 초기위치 지정 가능한지 확인 — `sc_localizer`가 이미 이 토픽을 쓰므로 규약 일치
+- [ ] `/initialpose`(`geometry_msgs/PoseWithCovarianceStamped`)로 수동 초기위치 지정 가능한지 확인 — `teaser_fpfh_localizer`가 이미 이 토픽을 쓰므로 규약 일치
 - [ ] `FollowWaypoints` 액션 서버 정상 동작 및 웨이포인트 배열 전달 형식 확인
 - [ ] `/global_costmap/costmap`, `/local_costmap/costmap` (`nav_msgs/OccupancyGrid`) 실제 발행 확인
 - [ ] 글로벌/로컬 경로 토픽(`/plan`, 로컬 컨트롤러의 경로 토픽) 확인
@@ -225,9 +285,27 @@ UI의 HUD 제어권 배지와 `cmd_arbiter`의 동작권은 **서로 다른 축*
 - [ ] **물리 E-STOP과 소프트웨어 E-STOP의 관계 확정** — 웹 UI 장애가 로봇을 못 멈추게 해서는 안 되고, 반대로 웹 UI만으로 물리 스위치를 대체해서도 안 됨
 - [ ] UI가 표시하는 "감독 하트비트 5 Hz"의 실체 확정 — 현재 워크스페이스에 브라우저 하트비트 개념이 없음. `command_manager`의 `cmd_timeout_sec` 0.5초가 사실상의 하트비트 감시이므로, **UI 문구를 실물에 맞추거나** backend가 별도 하트비트를 구현할 것
 
-### 3.7 웹 연동 백엔드 (alm_web_backend) — 역할 축소
+### 3.7 웹 연동 백엔드 (alm_web_backend) — ✅ 구현됨 (2026-08-10)
 
-- [ ] 역할 확정: rclpy 기반 ROS2 노드 + REST/WebSocket 서버. **얇은 어댑터**로 한정
+**실물**: `ALM_auto_ws/src/alm_web_backend/` · 기본 포트 `8081` · `webui_dev.launch.py` 가 함께 띄운다.
+
+```
+alm_web_backend/
+  http_server.py   ThreadingHTTPServer + 라우팅 + Bearer 인증 + CORS + SSE
+  session.py       웹 세션 락 (리스 15초, 하트비트로 갱신)
+  processes.py     launch 슬롯 (allowlist + 프로세스그룹 단계 종료)
+  jobs.py          subprocess 작업 + stdout 링버퍼(500줄)
+  maps_write.py    maps/ 쓰기 (manifest, active.yaml, 매핑 타깃)
+  ros_iface.py     rclpy 노드 — 퍼블리셔 · 서비스 클라이언트
+```
+
+설계 결정 셋:
+
+- **표준 라이브러리만.** 젯슨에 fastapi/uvicorn/aiohttp/flask 가 하나도 없다. 로봇 온보드에 pip 의존성을 새로 심으면 재현성이 나빠지고, 이건 엔드포인트 열댓 개짜리 어댑터지 웹앱이 아니다. uvicorn 의 asyncio 루프와 rclpy 실행기를 한 프로세스에 엮는 것보다 **실행기(메인) + HTTP 스레드풀** 이 단순하다.
+- **fail-closed 인증.** `ALM_WEB_TOKEN` 이 없으면 기동을 **거부**한다. `--allow-no-auth` 를 명시해야만 예외.
+- **HTTP 스레드에서 `spin_until_future_complete` 금지.** 같은 노드를 두 곳에서 spin 하면 콜백이 유실된다. `call_async` + `future.done()` 폴링을 쓴다 (`ros_iface._call`).
+
+- [x] 역할 확정: rclpy 기반 ROS2 노드 + REST 서버. **얇은 어댑터**로 한정
   - 웹 세션 제어권 관리 (§2.1의 축 하나)
   - `set_owner` 서비스 / `FollowWaypoints` 액션 / `/map_save` 서비스 중계
   - `pcd2pgm.py`·`sc_build_db.py` subprocess 실행 및 진행률 스트리밍
@@ -266,8 +344,8 @@ UI의 HUD 제어권 배지와 `cmd_arbiter`의 동작권은 **서로 다른 축*
 | `/scan` | `sensor_msgs/LaserScan` | — | `pointcloud_to_scan` | 2D 지도 레이어 |
 | `/Odometry` | `nav_msgs/Odometry` | 10 Hz | FAST-LIO | 로봇 위치, odom 워치독 |
 | `/wheel_odom` | `nav_msgs/Odometry` | 10 Hz | `mcu_bridge` | EKF 입력 |
-| `/initialpose` | `geometry_msgs/PoseWithCovarianceStamped` | on-demand | `sc_localizer` / UI | 수동 초기위치 |
-| `/sc_candidates` | `geometry_msgs/PoseArray` | 탐색 중 | `sc_localizer` | 측위 후보 레이어 |
+| `/initialpose` | `geometry_msgs/PoseWithCovarianceStamped` | on-demand | `teaser_fpfh_localizer` / UI | 수동 초기위치 |
+| ~~`/sc_candidates`~~ | — | — | — | **폐기** — Scan Context 제거로 발행자 없음. allowlist에서도 제거 |
 | `/icp_result` | (icp_relocalization) | on-demand | `icp_node` | 측위 수렴 판정 |
 | `/cmd_vel` | `geometry_msgs/Twist` | 20 Hz | Nav2 → arbiter | 자율 소스 |
 | `/drive_mode` | `std_msgs/String` | on-demand | → arbiter | 자율 모드 |
@@ -289,7 +367,7 @@ UI의 HUD 제어권 배지와 `cmd_arbiter`의 동작권은 **서로 다른 축*
 | 이름 | 타입 | UI 매핑 | 상태 |
 |---|---|---|---|
 | 등록 점군 (`/cloud_registered` 추정) | `PointCloud2` | 3D 뷰포트 누적 맵 | **실기에서 토픽명 확정 필요** |
-| `sc_localizer` 진행 상태 | 신규 토픽 | 측위 상태 패널 | 노드에 발행 추가 or UI 단순화 |
+| `teaser_fpfh_localizer` 진행 상태 | 신규 토픽 | 측위 상태 패널 | 노드에 발행 추가 or UI 단순화 |
 | `pcd2pgm` 실행 | 서비스 아님 (CLI) | "변환" 버튼 | backend subprocess 래핑 |
 | `sc_build_db` 실행 | 서비스 아님 (CLI) | "생성" 버튼 | backend subprocess 래핑 |
 | `FollowWaypoints` | `nav2_msgs/action` | 자율주행 시작/진행률 | Nav2 기동 확인 필요 |
@@ -322,7 +400,7 @@ UI의 HUD 제어권 배지와 `cmd_arbiter`의 동작권은 **서로 다른 축*
 - [ ] **현재 `drawPointCloud()`는 탭과 무관하게 매 프레임 1700 포인트를 그립니다.** 실연동 전에 비활성 탭에서 rAF를 멈추도록 수정 — Jetson CPU 예산과 직접 충돌
 
 ### 5.4 2D 지도/코스트맵 렌더링
-- [ ] SVG에 하드코딩된 정적 맵 경로를 실제 PGM/YAML 기반 이미지로 교체. 실물 맵은 `alm_navigation/maps/`(`alm_map.pgm`/`alm_map.yaml`, `sc_lio_sam_mid360_test/`)에 있음
+- [x] 2D 지도는 `/map`(OccupancyGrid) → 캔버스로 교체 완료. 맵 자산은 `maps/<맵이름>/`(§0 참조)에 있고, 존재 여부는 `/alm/map_inventory`가 알려준다
 - [ ] OccupancyGrid → 캔버스/이미지 변환 로직 (코스트맵 실시간 갱신)
 - [ ] 좌표 변환 함수(`svgPoint` [assets/app.js:425](assets/app.js#L425), `pixelToMap` [assets/app.js:432](assets/app.js#L432))를 실제 지도 `resolution`·`origin`에 맞게 일반화 — 지금은 900×620 뷰박스에 `* 0.02` 하드코딩
 
@@ -363,9 +441,9 @@ UI의 HUD 제어권 배지와 `cmd_arbiter`의 동작권은 **서로 다른 축*
 
 | 현재 목업 함수 | 실제로 필요한 것 |
 |---|---|
-| `autoLocalization()` | backend가 `sc_localizer` 기동 → 진행 상태 구독(발행 추가 시) 또는 `/icp_result` 수신으로 성공 판정. **일회성 노드이므로 재시도 = 재기동** |
+| `autoLocalization()` | backend가 `teaser_fpfh_localizer` 기동 → 진행 상태 구독(발행 추가 시) 또는 `/icp_result` 수신으로 성공 판정. **일회성 노드이므로 재시도 = 재기동** |
 | `manualInitialPose()` + `mapClick()` | 클릭 좌표를 `/initialpose`로 발행 |
-| `relocalize()` | `sc_localizer` + `icp_node` 재기동 (둘 다 성공 시 자동 종료되므로) |
+| `relocalize()` | `teaser_fpfh_localizer` + `icp_node` 재기동 (둘 다 성공 시 자동 종료되므로) |
 | `startNavigation()` | `FollowWaypoints` 액션 목표 전송, 피드백으로 진행률/남은 거리 갱신 |
 | `pauseNavigation()`/`cancelNavigation()` | 액션 취소(cancel goal) 호출 |
 | 반복 횟수·순환 주행 옵션 | Nav2 자체 기능이 아니므로 backend가 액션을 반복 호출 |
@@ -430,8 +508,8 @@ UI의 HUD 제어권 배지와 `cmd_arbiter`의 동작권은 **서로 다른 축*
 | **0. 준비** | 빌드 도구 결정(§5.2), 등록 점군 토픽명 확정, `fast_lio` 설치 위치 확인, E-STOP 래치 방식 결정(§3.6), 웹/키보드 텔레옵 경쟁 해소 방식 결정(§3.5), **XSS 이스케이프 수정**, 비활성 탭 rAF 정지, 폰트 로컬화 | §4.2 "미확정" 표에 확인 필요 항목이 남지 않음 |
 | **1. 읽기 전용 연동** | foxglove_bridge 도입. 모니터링 탭 + `/mcu/state` + `/cmd_arbiter/owner` + `/drive_mode/effective` + `/rosout` 표시. 조작은 여전히 mock | 모니터링 탭 수치가 실측값과 일치, HUD 동작권 배지가 실제 owner를 따라감 |
 | **2. 시각화 연동** | 포인트클라우드/지도/로봇 위치/코스트맵을 실데이터로 표시 (뷰어 모드) | 실제 SLAM 세션에서 화면이 RViz와 동일한 위치·형태로 갱신됨 |
-| **3. 저위험 명령 연동** | backend 최초 투입. 맵 저장(`/map_save`), pcd2pgm·sc_build_db subprocess 실행, 맵 목록 조회 | 버튼 클릭만으로 실제 PCD/PGM/SC DB 파일이 생성됨 |
-| **4. 측위/자율주행 명령 연동** | `sc_localizer` 기동/재기동, `/initialpose` 발행, `FollowWaypoints` 액션 | 실제 로봇이 웹 UI로 지정한 웨이포인트를 따라 이동 |
+| **3. 저위험 명령 연동** ✅ **완료 (2026-08-10)** | `alm_web_backend` 신설. E-STOP 래치, 웹 세션 제어권, 맵 저장(`/map_save`), `pcd2pgm`·`fpfh_map_builder` subprocess, 맵 폴더 생성·활성 전환, SLAM launch 기동·종료 | 버튼 클릭만으로 실제 grid.pgm / fpfh_map* 이 생성됨을 확인. `cloud.pcd` 생성(=`/map_save`)만 실센서 필요 |
+| **4. 측위/자율주행 명령 연동** | `teaser_fpfh_localizer` 기동/재기동, `/initialpose` 발행, `FollowWaypoints` 액션 | 실제 로봇이 웹 UI로 지정한 웨이포인트를 따라 이동 |
 | **5. 수동주행(데드맨) 연동** | `set_owner` + `/cmd_vel_teleop` 발행. **가장 안전 critical — 반드시 마지막.** 선행 조건: `base_control.yaml`의 `##CONFIRM##` 확정, 데드맨 키보드 지원, `teleop(held)` UI | §7 전항목 통과 + 잭업 검증 + 통제 환경 저속 검증 후에만 배포 |
 
 각 Phase 종료 시 §7 안전 체크리스트를 재확인합니다.
@@ -456,12 +534,12 @@ UI의 HUD 제어권 배지와 `cmd_arbiter`의 동작권은 **서로 다른 축*
 - [x] ~~데드맨 명령의 검증 계층을 어디에 둘지~~ → **`cmd_arbiter` + `command_manager`가 이미 담당. backend는 얇게 유지** (2026-08-06 해결)
 - [x] ~~`/mcu/state` 메시지 필드 정의~~ → **`alm_msgs/msg/McuState`로 확정됨** (2026-08-06 해결)
 - [ ] `/alm/safety_status`를 별도 메시지로 만들지, `/mcu/state` + `/cmd_arbiter/owner` 조합으로 대신할지
-- [ ] E-STOP 래치를 `command_manager`에 넣을지 backend에 둘지 (§3.6)
-- [ ] 웹 텔레옵을 `/cmd_vel_teleop` 공유로 갈지, arbiter에 `web` owner를 추가할지 (§3.5)
+- [x] ~~E-STOP 래치를 `command_manager`에 넣을지 backend에 둘지~~ → **`command_manager` 에 넣음** (`estop_latch: true` + `alm_msgs/srv/ReleaseEstop`). backend 가 죽어도 정지가 유지되어야 하므로 (2026-08-10 해결)
+- [ ] 웹 텔레옵을 `/cmd_vel_teleop` 공유로 갈지, arbiter에 `web` owner를 추가할지 (§3.5) — **Phase 5 착수 전 필수**
 - [ ] FAST-LIO의 정확한 등록 점군 출력 토픽명 (실기 `ros2 topic list` 필요)
 - [ ] `fast_lio` 패키지의 설치 위치 — 이 워크스페이스 의존성으로 명시할지
 - [ ] `/map_save`의 맵 이름별 경로 처리 방식 (config 파라미터 변경 vs 저장 후 이동)
-- [ ] `sc_localizer`에 진행 상태 발행을 추가할지, UI를 3단계로 단순화할지
+- [ ] `teaser_fpfh_localizer`에 진행 상태 발행을 추가할지, UI를 3단계로 단순화할지
 - [ ] 웨이포인트 반복/순환을 backend가 반복 호출로 구현 (Nav2 기본 기능 아님 — 확정)
 - [ ] §5.2 빌드 도구 도입 여부 최종 결정
 - [ ] 원격(외부 네트워크) 접속 지원 여부
@@ -476,16 +554,16 @@ UI의 HUD 제어권 배지와 `cmd_arbiter`의 동작권은 **서로 다른 축*
 |---|---|---|---|
 | 1 | `command_gateway` 단일 노드 | `cmd_arbiter` + `command_manager` + `mcu_bridge` | UI 로그 문구·프로세스 목록을 실물 이름으로 교체 |
 | 2 | `safety_supervisor`가 안전을 판단 | `command_manager` 안에 게이팅이 들어 있음 | 별도 노드 만들지 말 것. 집계 발행만 검토 |
-| 3 | E-STOP이 래치 (문구 입력으로 해제) | `command_manager`는 토픽 값 추종, 래치 아님 | §3.6 (a)~(c) 중 결정 |
-| 4 | 제어권 = 단일 개념 | 웹 세션 제어권 / 동작권 2축 | §2.1대로 분리 |
+| 3 | ~~E-STOP이 래치 (문구 입력으로 해제)~~ | ~~`command_manager`는 토픽 값 추종~~ | ✅ **해소 (2026-08-10)** — `estop_latch: true`. 토픽 `false` 는 무시, 해제는 `/emergency_stop/release` 서비스로만. MCU fault 유지 중이면 거부 |
+| 4 | ~~제어권 = 단일 개념~~ | 웹 세션 제어권 / 동작권 2축 | ✅ **해소 (2026-08-10)** — 웹 세션 락은 `alm_web_backend`(리스 15초), 동작권은 `cmd_arbiter` 로 분리 |
 | 5 | 동작권 상태 2가지 (보유/관전) | `auto` / `teleop` / **`teleop(held)`** | `held` 표시 UI 신규 추가 |
 | 6 | 바퀴 4개 조향각 개별 표시 | `steer_angle[2]` (앞축/뒤축) | UI를 축 단위로 수정 |
-| 7 | 속도 한계 `0.45` / `-0.15` / `0.8` / `0.3`이 JS에 하드코딩 ([app.js:728](assets/app.js#L728)) | `command_manager`의 `max_linear_x` / `min_linear_x` / `max_angular_z` / `max_linear_y`와 **우연히 일치** | 값이 맞더라도 서버 파라미터를 읽어 오도록 교체 — 로봇 쪽만 바꾸면 UI가 조용히 어긋남 |
+| 7 | ~~속도 한계가 JS에 하드코딩~~ | `command_manager`의 파라미터와 **우연히 일치**했을 뿐 | ✅ **해소 (2026-08-10)** — `GET /api/limits` 가 `command_manager` 의 실제 파라미터를 읽어 내려주고, `commandFor()` 와 설정 드로어가 그 값을 쓴다 |
 | 8 | Crab 비활성 = 고정 문구 | `auto_crab_enabled: false` 파라미터 | 파라미터 조회로 동적 판정 |
 | 9 | "감독 하트비트 5 Hz" | 그런 개념 없음. cmd timeout 0.5s가 실질 감시 | UI 문구 수정 또는 하트비트 구현 |
 | 10 | `pcd2pgm`/`sc_build_db`가 서비스 | argparse CLI 스크립트 | backend subprocess 래핑 |
 | 11 | `/map_save`가 맵 이름별 경로에 저장 | config 고정 경로 | backend가 이동 또는 파라미터 변경 |
-| 12 | 측위가 단계별 진행률을 준다 | `sc_localizer`는 상태 미발행 + 성공 시 자체 종료 | 발행 추가 or UI 단순화. "재측위 = 재기동" 반영 |
+| 12 | 측위가 단계별 진행률을 준다 | `teaser_fpfh_localizer`는 상태 미발행 + 성공 시 자체 종료 | 발행 추가 or UI 단순화. "재측위 = 재기동" 반영 |
 | 13 | 매핑 중 탭 잠금이 동작 | `switchTab()`이 토스트만 띄우고 전환됨 | 실제 차단으로 수정 |
 | 14 | 데드맨을 키보드로도 조작 가능 | pointer 전용, `pointerleave` 폴백도 무력 | Phase 5 전 필수 수정 |
 

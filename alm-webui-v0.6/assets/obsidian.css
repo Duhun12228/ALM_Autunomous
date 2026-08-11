@@ -72,6 +72,10 @@ ol{list-style:none;padding:0}
 .dim{font-style:italic;font-weight:300}
 .status-dot{width:5px;height:5px;border-radius:99px;background:var(--txt-3);flex:none;display:inline-block}
 .status-dot.ok{background:var(--ok);box-shadow:0 0 0 3px rgba(74,222,155,.13)}
+/* danger/warn 은 이름만 쓰이고 정의가 없어 회색으로 떨어지고 있었다.
+   HUD 의 bridge/backend/mcu 점이 "끊김"을 표현하지 못하던 원인. */
+.status-dot.danger{background:var(--danger);box-shadow:0 0 0 3px rgba(255,77,79,.15)}
+.status-dot.warn{background:var(--warn);box-shadow:0 0 0 3px rgba(245,165,36,.15)}
 .tag{font-family:var(--mono);font-size:9.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--txt-3)}
 .tag.ok{color:var(--ok)}
 .count-badge{font-family:var(--mono);font-size:11px;color:var(--brass)}
@@ -170,6 +174,10 @@ ol{list-style:none;padding:0}
 .role-dot{width:6px;height:6px;border-radius:99px;background:var(--ok);box-shadow:0 0 0 3px rgba(74,222,155,.14);flex:none}
 .control-role.owned .role-dot{background:var(--ok);box-shadow:0 0 0 3px rgba(74,222,155,.14)}
 .control-role.spectator .role-dot{background:var(--warn);box-shadow:0 0 0 3px rgba(245,165,36,.14)}
+.control-role.is-busy{opacity:.55;cursor:progress}
+/* 구조가 있는 버튼(E-STOP 등)은 라벨을 못 바꾸므로 상태를 이걸로 보여준다 */
+button.is-busy{cursor:progress}
+button.is-busy:not(.control-role){opacity:.6}
 /* 아직 실연동되지 않은 조작 버튼. 읽기 전용 단계에서 실데이터 패널과 섞여
    있으면 "눌렀으니 로봇이 반응했겠지"로 읽힌다. 비활성처럼 보이게 하지는
    않는다 — 목업 흐름은 여전히 밟아볼 수 있어야 하므로 표식만 남긴다. */
@@ -324,6 +332,26 @@ body.estop-on .hud{border-bottom-color:rgba(255,77,79,.3)}
 .viewport-overlay span{display:block;font-family:var(--mono);font-size:9px;letter-spacing:.18em;text-transform:uppercase;color:var(--txt-3)}
 .viewport-overlay strong{display:block;font-family:var(--mono);font-size:22px;font-weight:200;letter-spacing:-.02em;margin-top:4px}
 .viewport-overlay small{display:block;font-family:var(--mono);font-size:10px;color:var(--txt-3);margin-top:2px}
+/* 재생본 경고띠 — 화면 한가운데 위쪽. 눈에 안 띄면 존재 의미가 없다.
+   주황(--warn)을 쓴다: 고장이 아니라 '지금 보는 것이 실측이 아니다'라는 뜻이라
+   빨강(--danger)과 섞이면 안 된다. */
+.replay-banner{
+  position:absolute;top:18px;left:50%;transform:translateX(-50%);z-index:3;
+  display:flex;align-items:center;gap:10px;
+  padding:7px 14px;border-radius:4px;
+  background:rgba(245,165,36,.14);border:1px solid rgba(245,165,36,.45);
+  backdrop-filter:blur(6px);max-width:calc(100% - var(--pad) * 2)
+}
+.replay-banner[hidden]{display:none}
+.replay-banner strong{
+  font-family:var(--mono);font-size:9px;letter-spacing:.18em;text-transform:uppercase;
+  color:var(--warn);white-space:nowrap
+}
+.replay-banner span{font-size:11.5px;color:var(--txt-2);line-height:1.35}
+@media (max-width:720px){
+  .replay-banner{flex-direction:column;gap:3px;align-items:flex-start;text-align:left}
+}
+
 .viewport-footer{
   position:absolute;left:0;right:0;bottom:0;z-index:2;
   display:flex;gap:38px;padding:14px var(--pad);
@@ -713,6 +741,14 @@ body.estop-on .hud{border-bottom-color:rgba(255,77,79,.3)}
 .modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:22px}
 .modal-progress{height:2px;background:var(--hair-2);overflow:hidden}
 .modal-progress i{display:block;height:100%;width:0;background:var(--brass);transition:width .4s var(--ease)}
+/* 작업 로그. 진행률 막대를 대신한다 — pcd2pgm/fpfh_map_builder 는 퍼센트를
+   내지 않으므로 지어내지 않고 실제 stdout 을 그대로 보여준다. */
+.job-log{
+  margin-top:12px;max-height:190px;overflow:auto;
+  background:var(--bg-1);border:1px solid var(--hair-2);border-radius:8px;
+  padding:10px 12px;font-family:var(--mono);font-size:11px;line-height:1.65;
+  color:var(--txt-2);white-space:pre-wrap;word-break:break-all;
+}
 .preview-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 .preview-grid small{display:block;font-family:var(--mono);font-size:9.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--txt-3);margin-bottom:7px}
 .preview-map{
@@ -853,4 +889,119 @@ body.estop-on .hud{border-bottom-color:rgba(255,77,79,.3)}
 
 @media (prefers-reduced-motion:reduce){
   *{animation-duration:.01ms !important;transition-duration:.01ms !important}
+}
+
+/* ── 22. 맵 자산 상태 & 빈 맵 placeholder ───────────────────
+   map_manager 가 보내는 실제 파일 상태를 그대로 비춘다. 없으면 없다고,
+   짝이 안 맞으면 안 맞는다고 — 화면이 사실보다 좋아 보이지 않게 한다. */
+
+.map-manager-item .cap.missing{opacity:.38;text-decoration:line-through}
+.map-manager-item .cap.stale{color:var(--warn);border-color:rgba(245,165,36,.4)}
+/* 활성 맵 줄을 왼쪽 표시선으로 구분한다. '활성' 알약만으로는 목록이 길어질수록
+   어느 것이 지금 쓰이는지 눈에 안 들어온다. */
+.map-manager-item.is-active{
+  margin-left:-12px;padding-left:12px;
+  border-left:2px solid var(--brass);background:rgba(198,160,92,.04)
+}
+/* 삭제될 파일 목록. 무엇이 사라지는지 파일 단위로 보여준다. */
+.wipe-list{
+  margin:12px 0;padding:12px 14px;list-style:none;
+  border:1px solid rgba(255,77,79,.28);border-radius:8px;background:rgba(255,77,79,.05)
+}
+.wipe-list li{font-size:12.5px;line-height:1.9}
+.wipe-list code{font-family:var(--mono);font-size:10.5px;color:var(--txt-2)}
+.wipe-list small{font-family:var(--mono);font-size:10px;color:var(--txt-3);margin-left:4px}
+
+.map-manager-item>.ghost-button{flex:none;padding:7px 12px;font-size:11.5px}
+.map-manager-item>.ghost-button:disabled{opacity:.4;cursor:default}
+
+.map-status{
+  font-family:var(--mono);font-size:8.5px;letter-spacing:.1em;font-weight:400;
+  padding:2px 7px;border-radius:99px;margin-left:8px;vertical-align:middle;
+  border:1px solid var(--hair-2);color:var(--txt-3)
+}
+.map-status.ok{color:var(--ok);border-color:rgba(74,222,155,.34)}
+.map-status.pending{color:var(--warn);border-color:rgba(245,165,36,.34)}
+.map-status.active{color:var(--brass);border-color:rgba(216,196,160,.4)}
+
+/* 자산 카드가 stale 일 때 — 숫자는 맞지만 쓰면 안 되는 상태 */
+.asset-row.is-stale .asset-icon{color:var(--warn);border-color:rgba(245,165,36,.4)}
+.asset-row.is-stale small{color:var(--warn)}
+.asset-row.is-missing{opacity:.55}
+
+/* 매핑 중 '지금 눌러야 할 칸'. 카드 셋이 똑같이 생겨서 다음 행동이 안 보였다.
+   --ice(파랑)를 쓴다: 경고가 아니라 안내라서 주황·빨강과 섞이면 안 된다. */
+.asset-row.is-next{
+  margin:0 calc(var(--pad) * -0.4);padding-left:calc(var(--pad) * 0.4);
+  padding-right:calc(var(--pad) * 0.4);border-radius:8px;
+  background:rgba(111,168,255,.07);
+  box-shadow:inset 0 0 0 1px rgba(111,168,255,.28);
+  animation:next-pulse 2.4s var(--ease) infinite
+}
+.asset-row.is-next .asset-icon{color:var(--ice);border-color:rgba(111,168,255,.5)}
+.asset-row.is-next .small-button{
+  border-color:rgba(111,168,255,.55);color:var(--ice);background:rgba(111,168,255,.1)
+}
+@keyframes next-pulse{
+  0%,100%{box-shadow:inset 0 0 0 1px rgba(111,168,255,.28)}
+  50%{box-shadow:inset 0 0 0 1px rgba(111,168,255,.62),0 0 16px rgba(111,168,255,.18)}
+}
+/* 애니메이션을 꺼 둔 사용자에게는 테두리만 남긴다 (정보는 잃지 않는다) */
+@media (prefers-reduced-motion:reduce){
+  .asset-row.is-next{animation:none;box-shadow:inset 0 0 0 1px rgba(111,168,255,.5)}
+}
+
+/* 완성된 맵 안내 배너 */
+.map-ready-banner{
+  display:flex;align-items:center;gap:10px;margin:0 0 14px;padding:10px 13px;
+  border:1px solid rgba(74,222,155,.28);border-radius:10px;
+  background:rgba(74,222,155,.06);font-size:12px;color:var(--txt-2);line-height:1.5
+}
+.map-ready-banner b{color:var(--ok);font-weight:500}
+.map-ready-banner.warn{border-color:rgba(245,165,36,.3);background:rgba(245,165,36,.06)}
+.map-ready-banner.warn b{color:var(--warn)}
+
+/* ── 빈 맵 placeholder ─────────────────────────────────── */
+.alm-placeholder{
+  position:absolute;inset:0;z-index:3;display:flex;
+  flex-direction:column;align-items:center;justify-content:center;gap:3px;
+  background:radial-gradient(ellipse at 50% 45%,rgba(23,27,33,.92),rgba(10,12,15,.97));
+  text-align:center;padding:20px
+}
+.alm-placeholder.in-svg{position:static;width:100%;height:100%;background:#0B0E13}
+.alm-ph-art{width:min(220px,58%);height:auto;margin-bottom:6px}
+.alm-ph-title{font-size:14px;font-weight:500;color:var(--txt)}
+.alm-ph-detail{font-size:11.5px;color:var(--txt-3);margin-top:2px}
+.alm-ph-path{
+  font-family:var(--mono);font-size:9.5px;letter-spacing:.06em;color:var(--txt-3);
+  margin-top:9px;padding:4px 9px;border-radius:99px;border:1px solid var(--hair)
+}
+
+.alm-ph-scanring{fill:none;stroke:var(--hair-2);stroke-width:1;stroke-dasharray:4 7}
+.alm-ph-scanring.d2{stroke-dasharray:2 6;opacity:.6}
+.alm-ph-sweep path{fill:var(--ice);opacity:.10}
+.alm-ph-bot rect{fill:var(--raise-2);stroke:var(--hair-2);stroke-width:1}
+.alm-ph-eye{fill:var(--ice)}
+.alm-ph-lidar{fill:var(--raise);stroke:var(--hair-2);stroke-width:1}
+.alm-ph-ant{stroke:var(--hair-2);stroke-width:1.2}
+.alm-ph-ping{fill:var(--brass)}
+.alm-ph-wheel{fill:var(--raise);stroke:var(--hair-2);stroke-width:1}
+.alm-ph-bubble rect{fill:var(--raise-2);stroke:var(--hair-2);stroke-width:1}
+.alm-ph-bubble text{
+  font-family:var(--mono);font-size:12px;fill:var(--brass);font-weight:500
+}
+
+@keyframes alm-ph-sweep{to{transform:rotate(360deg)}}
+@keyframes alm-ph-blink{0%,42%,52%,100%{opacity:1}46%,48%{opacity:.15}}
+@keyframes alm-ph-ping{0%{opacity:1;r:3}70%,100%{opacity:0;r:9}}
+@keyframes alm-ph-hover{0%,100%{transform:translateY(0)}50%{transform:translateY(-3px)}}
+
+.alm-ph-sweep{animation:alm-ph-sweep 5.5s linear infinite}
+.alm-ph-eye{animation:alm-ph-blink 4.2s var(--ease) infinite}
+.alm-ph-eye.d2{animation-delay:.08s}
+.alm-ph-ping{animation:alm-ph-ping 2.4s var(--ease) infinite}
+.alm-ph-bot{animation:alm-ph-hover 3.6s var(--ease) infinite}
+
+@media (prefers-reduced-motion:reduce){
+  .alm-ph-sweep,.alm-ph-eye,.alm-ph-ping,.alm-ph-bot{animation:none}
 }

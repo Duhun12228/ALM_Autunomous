@@ -7,6 +7,7 @@
  * window.ALM_LIVE 를 세워 두면 init() 이 목업 루프를 띄우지 않는다.
  */
 import { RosBridge, resolveBridgeUrl } from './bridge/ros-bridge.js';
+import { Commands } from './commands.js';
 import { Ingest } from './ingest.js';
 import { Map2D } from './render/map2d.js';
 import { Renderer3D } from './render/renderer3d.js';
@@ -26,8 +27,23 @@ function start() {
   const ingest = new Ingest(bridge, alm);
   const map2d = new Map2D();
 
+  // 쓰기 경로. 읽기(bridge)와 완전히 다른 포트·프로토콜이다.
+  const commands = new Commands(alm, {
+    onSessionChange: (held) => {
+      // state.hasControl 은 서버 판정의 캐시다 — 여기서만 갱신한다.
+      alm.state.hasControl = held;
+      alm.renderGlobal();
+      alm.renderManual();
+    },
+  });
+  window.ALM_CMD = commands;
+  // 서버가 제어권을 주기 전까지는 관전 모드다. 목업 기본값(true)을 내린다.
+  alm.state.hasControl = false;
+
   const canvas = document.querySelector('#pointCloudCanvas');
   const renderer3d = canvas ? new Renderer3D(canvas) : null;
+  // ingest 가 placeholder 를 띄울 때 렌더 루프를 멈추기 위해 참조를 남긴다
+  window.ALM_RENDERER3D = renderer3d;
 
   ingest.start();
 
@@ -39,8 +55,15 @@ function start() {
   bridge.subscribe('/scan', (msg) => map2d.onLaserScan(msg, ingest.latestPose));
 
   if (renderer3d) {
-    bridge.subscribe('/livox/lidar', (msg) => renderer3d.onPointCloud(msg));
-    bridge.subscribe('/cloud_registered', (msg) => renderer3d.onPointCloud(msg));
+    // 원본은 '현재 스캔'만, 정합된 것은 '현재 스캔 + 누적 맵'.
+    // 누적이 /cloud_registered 전용인 이유는 renderer3d.js 도입부 참조.
+    bridge.subscribe('/livox/lidar', (msg) => renderer3d.onLiveCloud(msg));
+    bridge.subscribe('/cloud_registered', (msg) => renderer3d.onRegisteredCloud(msg));
+    // 활성 맵에 저장된 점군. latched 라 늦게 붙어도 즉시 받는다.
+    bridge.subscribe('/alm/prior_cloud', (msg) => renderer3d.onPriorCloud(msg));
+    bridge.subscribe('/alm/prior_cloud_map', (msg) => {
+      renderer3d.priorMapName = msg.data ?? '';
+    });
 
     // 목업에서 토스트만 띄우던 두 버튼을 실제 카메라 조작으로 바꾼다
     document.querySelector('#reset3d')?.addEventListener(
@@ -48,10 +71,30 @@ function start() {
     document.querySelector('#topView3d')?.addEventListener(
       'click', () => renderer3d.topView(), { capture: true });
 
+    // 툴바의 '누적 맵' / '현재 스캔' 을 실제 레이어에 연결한다.
+    // (app.js 는 .active 클래스만 토글하고 있었다 — 화면상 장식이었다)
+    document.querySelectorAll('.viewport-toolbar .tool').forEach((button) => {
+      button.addEventListener('click', () => setTimeout(() => {
+        renderer3d.setLayerVisible(button.dataset.layer,
+          button.classList.contains('active'));
+      }, 0));
+    });
+
+    // 누적 점 수와 '지금 무엇을 보고 있는지' 를 화면에 올린다.
+    // (#pointCount 는 목업 숫자를, top-right 는 고정 문구를 그리고 있었다)
+    const countNode = document.querySelector('#pointCount');
+    const capNode = countNode?.nextElementSibling;
+    const sourceNode = document.querySelector('#streamSource');
+    const rateNode = document.querySelector('#streamRate');
+    const detailNode = document.querySelector('#streamDetail');
+    if (capNode) capNode.textContent = `/ ${renderer3d.maxAccumulated.toLocaleString()}`;
+
     // 매핑 탭이 보일 때만 렌더한다
     const syncViewport = () => {
       const visible = document.querySelector('#tab-mapping')?.classList.contains('active')
-        && !document.hidden;
+        && !document.hidden
+        // placeholder 가 떠 있으면(= 그릴 것이 하나도 없으면) rAF 를 돌릴 이유가 없다
+        && !ingest.placeholder3dActive;
       renderer3d.setActive(Boolean(visible));
     };
     document.querySelectorAll('.nav-item').forEach((button) => {
@@ -59,6 +102,34 @@ function start() {
     });
     document.addEventListener('visibilitychange', syncViewport);
     syncViewport();
+
+    setInterval(() => {
+      // placeholder 는 인벤토리(5초)보다 빠르게 바뀌는 조건에 걸려 있다.
+      // 매핑을 시작하면 저장된 cloud.pcd 가 없어도 그릴 것이 생기므로,
+      // 여기서 다시 판단하고 렌더러를 깨운다.
+      ingest.refreshPlaceholders();
+      syncViewport();
+
+      const { source, detail } = renderer3d.describeSource();
+      if (sourceNode) {
+        sourceNode.textContent = renderer3d.priorMapName
+          ? `${source} · ${renderer3d.priorMapName}` : source;
+      }
+      if (rateNode) {
+        rateNode.textContent = Number.isFinite(renderer3d.pointsPerSecond)
+          ? `${Math.round(renderer3d.pointsPerSecond).toLocaleString()} pts/s` : '—';
+      }
+      if (detailNode) detailNode.textContent = detail;
+      if (!countNode) return;
+      countNode.textContent = renderer3d.accumulatedCount.toLocaleString();
+      countNode.classList.toggle('text-warning', renderer3d.accumulationSaturated);
+      if (renderer3d.accumulationSaturated && !renderer3d.saturationReported) {
+        renderer3d.saturationReported = true;
+        alm.addAlarm('warning', '누적 맵 버퍼가 찼습니다',
+          `${renderer3d.maxAccumulated.toLocaleString()}점(복셀 ${renderer3d.voxelSize} m)에 도달해 `
+          + '화면 누적을 멈췄습니다. 로봇 쪽 매핑은 계속 진행됩니다.');
+      }
+    }, 1000);
 
     setInterval(() => ingest.setPointsRate(renderer3d.pointsPerSecond), 1000);
   }
@@ -77,12 +148,47 @@ function start() {
     }
   });
 
-  // backend 는 Phase 3 에서 생긴다. 지금은 없는 게 정상이므로 회색으로 둔다.
-  if (backendDot) {
-    backendDot.className = 'status-dot';
-    backendDot.closest('.hud-item')?.setAttribute(
-      'title', 'alm_web_backend 는 Phase 3(명령 연동)에서 추가됩니다');
-  }
+  // backend 는 명령 경로다. 3초마다 health 로 생존을 확인한다.
+  // 토큰이 없으면 '연결 실패'가 아니라 '설정 필요'라고 말해야 한다 — 조작자가
+  // 네트워크를 의심하며 시간을 버리게 만들지 않는다.
+  const pollBackend = async () => {
+    if (!backendDot) return;
+    const item = backendDot.closest('.hud-item');
+    if (!commands.hasToken()) {
+      backendDot.className = 'status-dot warn';
+      item?.setAttribute('title', '백엔드 토큰이 없습니다 — 설정에서 입력하세요');
+      return;
+    }
+    try {
+      const health = await commands.health();
+      backendDot.className = 'status-dot ok';
+      item?.setAttribute('title', `alm_web_backend 정상 · 활성 맵 ${health.active_map}`);
+      // 매핑 프로세스의 진실은 서버가 갖고 있다. 이 탭에서 시작하지 않았어도
+      // (다른 브라우저, CLI, 재접속 전에 시작된 경우) 화면이 알아야 한다.
+      // 점군이 실측인지 재생본인지. 토픽 이름으로는 구분이 안 되므로 백엔드가
+      // 발행 노드를 조회해 알려준다.
+      alm.setLidarSource?.(health.lidar_source);
+      const slam = (health.processes || []).find((p) => p.slot === 'slam');
+      const running = Boolean(slam?.running);
+      if (running !== alm.state.slamRunning) {
+        alm.state.slamRunning = running;
+        alm.onSlamRunningChange?.(running, slam);
+      }
+    } catch (error) {
+      backendDot.className = 'status-dot danger';
+      item?.setAttribute('title', `alm_web_backend: ${error.message}`);
+    }
+  };
+  pollBackend();
+  setInterval(pollBackend, 3000);
+
+  // command_manager 의 실제 속도 한계로 UI 하드코딩을 덮는다 (§12-7)
+  commands.limits()
+    .then((result) => alm.applyLimits(result.limits))
+    .catch(() => { /* 백엔드가 아직 없으면 기본값을 그대로 쓴다 */ });
+
+  // 탭을 닫을 때 제어권을 반납한다 (실패해도 서버 리스가 정리한다)
+  window.addEventListener('pagehide', () => commands.releaseControlOnUnload());
 
   // /mcu/state 가 실제로 갱신되는지로 MCU 생존을 판정한다
   setInterval(() => {
@@ -98,21 +204,29 @@ function start() {
 
 /**
  * 아직 mock 인 조작 계열에 배지를 붙인다.
- * 읽기 전용 단계에서 이 버튼들은 화면 안에서만 동작한다 — 실데이터 패널과
- * 섞여 있으면 조작자가 "눌렀으니 로봇이 반응했겠지"로 오해한다.
+ *
+ * 매핑 5개와 E-STOP 은 이제 실제로 로봇에 나간다(Phase 3). 여기 남은 것들은
+ * 여전히 화면 안에서만 도는 것들이다 — 실데이터 패널과 섞여 있으면 조작자가
+ * "눌렀으니 로봇이 반응했겠지"로 오해하므로 배지를 유지한다.
+ *
+ * ⚠ 수동주행(enterManual/exitManual)은 단순히 '아직 안 붙였다'가 아니다.
+ *   base_control.yaml 의 4WIS 변환 상수 8개가 ##CONFIRM## 미확정이라, 지금
+ *   twist 를 보내면 그대로 엉뚱한 rpm/조향각이 된다. 실차 확정 전에는 붙이면
+ *   안 되는 순서다 (JETSON_INTEGRATION_PLAN.md §9 Phase 5).
  */
 function markMockControls() {
   const mockSelectors = [
-    '#startMapping', '#stopMapping', '#savePcd', '#openPcd2Pgm', '#buildScDb',
-    '#autoLocalization', '#manualInitialPose', '#relocalize',
-    '#startNavigation', '#pauseNavigation', '#cancelNavigation',
-    '#enterManual', '#exitManual',
+    ['#autoLocalization', 4], ['#manualInitialPose', 4], ['#relocalize', 4],
+    ['#startNavigation', 4], ['#pauseNavigation', 4], ['#cancelNavigation', 4],
+    ['#enterManual', 5], ['#exitManual', 5],
   ];
-  for (const selector of mockSelectors) {
+  for (const [selector, phase] of mockSelectors) {
     const node = document.querySelector(selector);
     if (!node) continue;
     node.classList.add('is-mock');
-    node.title = '아직 목업입니다 — 명령 연동은 Phase 3부터';
+    node.title = phase === 5
+      ? '아직 목업입니다 — 수동주행은 4WIS 변환 상수를 실차로 확정한 뒤에 붙입니다'
+      : '아직 목업입니다 — 측위·자율주행 연동은 다음 단계입니다';
   }
 }
 

@@ -51,7 +51,7 @@
   <section class="cs-section cs-identity reveal-stagger" data-check="1">
     <p class="cs-eyebrow">01</p>
     <h2>하나의 로봇을 매핑부터 자율주행까지,<br /><b>한 화면에서 통제합니다.</b></h2>
-    <p>SLAM으로 공간을 그리고, Scan Context로 스스로 위치를 찾고, Nav2로 주행하고, 필요할 땐 데드맨 방식으로 직접 몹니다. 모든 계통의 상태는 언제나 한눈에 들어옵니다.</p>
+    <p>SLAM으로 공간을 그리고, FPFH+TEASER++로 스스로 위치를 찾고, Nav2로 주행하고, 필요할 땐 데드맨 방식으로 직접 몹니다. 모든 계통의 상태는 언제나 한눈에 들어옵니다.</p>
   </section>
 
   <!-- 02 SUBSYSTEMS -->
@@ -63,7 +63,7 @@
         <span class="idx">01 / SLAM</span>
         <h3>실시간 3D 매핑</h3>
         <p>FAST-LIO와 SC-LIO-SAM으로 라이다 포인트클라우드를 누적해 3D 맵을 만듭니다.</p>
-        <ul><li>PCD → PGM 2D 변환</li><li>Scan Context DB 자동 생성</li><li>외부 조이스틱 주행</li></ul>
+        <ul><li>PCD → PGM 2D 변환</li><li>FPFH 측위 DB 생성</li><li>외부 조이스틱 주행</li></ul>
       </div>
       <div class="subsys-demo">
         <span class="demo-tag">pointcloud</span><span class="demo-live"><i></i>live</span>
@@ -75,7 +75,7 @@
       <div class="subsys-copy">
         <span class="idx">02 / NAV</span>
         <h3>측위 · 자율주행</h3>
-        <p>Scan Context로 초기위치를 자동으로 찾고, 웨이포인트를 따라 순찰합니다.</p>
+        <p>FPFH+TEASER++로 초기위치를 자동으로 찾고, 웨이포인트를 따라 순찰합니다.</p>
         <ul><li>수동 · 자동 초기위치</li><li>웨이포인트 미션</li><li>글로벌 · 로컬 경로</li></ul>
       </div>
       <div class="subsys-demo">
@@ -164,8 +164,8 @@
   </div>
 
   <div class="hud-right">
-    <button class="context-pill" id="profilePill"><span class="pill-label">프로필</span><strong>방식 <b id="profileText">B</b></strong></button>
-    <button class="context-pill" id="mapPill"><span class="pill-label">활성 맵</span><strong id="activeMapText">lab_main</strong></button>
+    <button class="context-pill" id="profilePill"><span class="pill-label">측위</span><strong>FPFH + TEASER++</strong></button>
+    <button class="context-pill" id="mapPill"><span class="pill-label">활성 맵</span><strong id="activeMapText">—</strong></button>
 
     <span class="hud-sep"></span>
 
@@ -248,13 +248,17 @@
     <div class="pointcloud-stage">
       <canvas id="pointCloudCanvas"></canvas>
       <div class="viewport-toolbar">
+        <button class="tool active" data-layer="prior">저장된 맵</button>
         <button class="tool active" data-layer="map">누적 맵</button>
         <button class="tool active" data-layer="scan">현재 스캔</button>
-        <button class="tool active" data-layer="path">경로</button>
-        <button class="tool active" data-layer="robot">로봇</button>
       </div>
-      <div class="viewport-overlay top-left"><span>points</span><strong class="mono" id="pointCount">128,420</strong><small>/ 200,000</small></div>
-      <div class="viewport-overlay top-right"><span>stream</span><strong class="mono">5.0 Hz</strong><small>4,820 pts/frame</small></div>
+      <div class="viewport-overlay top-left"><span>누적</span><strong class="mono" id="pointCount">0</strong><small>/ 600,000</small></div>
+      <div class="viewport-overlay top-right"><span id="streamSource">—</span><strong class="mono" id="streamRate">—</strong><small id="streamDetail">—</small></div>
+      <!-- 재생본이 실측인 척 흐르는 것을 막는 마지막 방어선. 평소에는 숨어 있다. -->
+      <div class="replay-banner" id="replayBanner" hidden>
+        <strong>재생본</strong>
+        <span>저장된 pcd 를 스캔처럼 재생 중입니다 — 센서 출력이 아닙니다</span>
+      </div>
       <div class="viewport-footer">
         <div><span>현재 위치</span><strong class="mono">x 2.14 · y −0.86 · 14°</strong></div>
         <div><span>이동 거리</span><strong class="mono">128.4 m</strong></div>
@@ -270,16 +274,11 @@
       <div class="col-head">
         <span class="lbl">매핑 워크플로</span>
         <div class="head-actions">
-          <select id="mappingProfile" class="select-control">
-            <option value="A">방식 A</option>
-            <option value="B" selected>방식 B</option>
-            <option value="C">방식 C</option>
-          </select>
           <button class="text-button" id="newMapButton">＋ 새 맵</button>
         </div>
       </div>
       <p class="helper" id="profileDesc" style="margin-bottom:14px"></p>
-      <div class="row"><span>활성 맵</span><i class="lead"></i><strong class="mono" id="mappingActiveMapText">lab_main</strong></div>
+      <div class="row"><span>활성 맵</span><i class="lead"></i><strong class="mono" id="mappingActiveMapText">—</strong></div>
       <div class="row"><span>현재 상태</span><i class="lead"></i><strong id="mappingStateLabel">대기 중</strong></div>
       <div class="row"><span>경과 시간</span><i class="lead"></i><strong class="mono" id="mappingElapsed">00:00</strong></div>
       <ol class="stepper" id="mappingStepper"></ol>
@@ -306,18 +305,18 @@
       <div class="col-head"><span class="lbl">맵 후처리</span><button class="text-button" id="openMapManager">맵 관리</button></div>
       <div class="asset-row">
         <span class="asset-icon">PCD</span>
-        <div><strong>3D 맵 저장</strong><small id="pcdAssetText">아직 저장되지 않음</small></div>
+        <div><strong>3D 맵 (cloud.pcd)</strong><small id="pcdAssetText">자산 상태를 읽는 중…</small></div>
         <button class="small-button" id="savePcd">저장</button>
       </div>
       <div class="asset-row">
         <span class="asset-icon">2D</span>
-        <div><strong>PCD → PGM</strong><small id="pgmAssetText">resolution 0.05 m</small></div>
+        <div><strong>2D 맵 (grid.pgm)</strong><small id="pgmAssetText">자산 상태를 읽는 중…</small></div>
         <button class="small-button" id="openPcd2Pgm">변환</button>
       </div>
       <div class="asset-row">
-        <span class="asset-icon">SC</span>
-        <div><strong>Scan Context DB</strong><small id="scAssetText">B/C 자동 측위용</small></div>
-        <button class="small-button" id="buildScDb">생성</button>
+        <span class="asset-icon">DB</span>
+        <div><strong>FPFH 측위 DB</strong><small id="fpfhAssetText">자산 상태를 읽는 중…</small></div>
+        <button class="small-button" id="buildFpfhDb">생성</button>
       </div>
     </section>
   </div>
@@ -345,7 +344,7 @@
     <div class="nav-main">
       <div class="hero-head">
         <span class="lbl">2D 운용 지도</span>
-        <em id="navMapTitle">lab_main · revision 3</em>
+        <em id="navMapTitle">—</em>
         <div class="hero-actions">
           <button class="icon-button" id="fitMap">화면 맞춤</button>
           <button class="icon-button" id="resetRotation">회전 리셋</button>
@@ -438,14 +437,14 @@
           <div class="radar"><i></i><i></i><i></i><span>▲</span></div>
           <div class="localization-copy">
             <strong id="localizationTitle">초기위치가 필요합니다</strong>
-            <small id="localizationDetail">방식 B · Scan Context 자동 초기화 가능</small>
+            <small id="localizationDetail">FPFH + TEASER++ 자동 초기화 가능</small>
           </div>
         </div>
         <div class="localization-progress hidden" id="localizationProgress">
           <div class="progress-track"><i id="localizationProgressBar"></i></div>
           <span class="mono" id="localizationProgressText">프레임 0 / 10 누적</span>
         </div>
-        <div class="row"><span>모드</span><i class="lead"></i><strong id="localizationModeText">Scan Context</strong></div>
+        <div class="row"><span>모드</span><i class="lead"></i><strong id="localizationModeText">FPFH + TEASER++</strong></div>
         <div class="row"><span>fitness</span><i class="lead"></i><strong class="mono" id="fitnessText">—</strong></div>
         <div class="row"><span>pose</span><i class="lead"></i><strong class="mono" id="poseText">미확정</strong></div>
         <div class="row"><span>신뢰도</span><i class="lead"></i><strong id="confidenceText">—</strong></div>
@@ -721,36 +720,34 @@
   </div>
 
   <section>
-    <h3 class="lbl">운용 프로필</h3>
-    <div class="profile-cards" id="profileCards">
-      <button data-profile="A"><strong>A</strong><span>수동 초기위치</span><small>PCD</small></button>
-      <button data-profile="B" class="active"><strong>B</strong><span>SC 자동 측위</span><small>PCD + SC DB</small></button>
-      <button data-profile="C"><strong>C</strong><span>SC-LIO-SAM</span><small>PCD + SC DB + GTSAM</small></button>
-    </div>
+    <h3 class="lbl">측위 파이프라인</h3>
+    <p class="helper">FPFH 전역 대응점 → TEASER++ → 지역 GICP. 이 브랜치의 고정 구성이며 선택 항목이 아닙니다.</p>
   </section>
 
   <section>
     <h3 class="lbl">활성 맵</h3>
-    <select id="settingsMapSelect" class="select-control wide">
-      <option>lab_main</option><option>office_floor_1</option><option>outdoor_loop</option>
-    </select>
-    <div class="map-capabilities"><span class="ok">수동 측위</span><span class="ok">SC 측위</span><span class="ok">Navigation</span></div>
+    <select id="settingsMapSelect" class="select-control wide"></select>
+    <p class="helper">로봇의 <code>maps/active.yaml</code>을 바꿉니다. 이미 실행 중인 노드에는 다음 기동부터 반영됩니다.</p>
+    <div class="map-capabilities" id="mapCapabilities"></div>
   </section>
 
   <section>
     <h3 class="lbl">연결 엔드포인트</h3>
-    <label class="setting-field"><span>Backend</span><input value="https://192.168.1.110" /></label>
-    <label class="setting-field"><span>Foxglove WSS</span><input value="wss://192.168.1.110/foxglove" /></label>
+    <label class="setting-field"><span>Backend</span><input id="backendUrl" autocomplete="off" placeholder="http://로봇주소:8081" /></label>
+    <label class="setting-field"><span>토큰</span><input id="backendToken" type="password" autocomplete="off" placeholder="토큰을 입력하세요" /></label>
+    <p class="helper">명령 경로(<code>alm_web_backend</code>)의 공유 토큰입니다. 로봇에서 <code>ALM_WEB_TOKEN</code> 으로 설정한 값을 넣으세요.
+    이 탭에서만 유지되며(<code>sessionStorage</code>) 탭을 닫으면 지워집니다.<br>
+    텔레메트리(<code>foxglove_bridge</code>)는 별도 경로라 토큰이 필요 없고, 읽기만 가능합니다.</p>
   </section>
 
   <section>
     <h3 class="lbl">제어 제한값</h3>
     <div class="limit-grid">
-      <div><span>전진</span><strong class="mono">0.45 m/s</strong></div>
-      <div><span>후진</span><strong class="mono">−0.15 m/s</strong></div>
-      <div><span>횡이동</span><strong class="mono">0.30 m/s</strong></div>
-      <div><span>회전</span><strong class="mono">0.80 rad/s</strong></div>
-      <div><span>cmd timeout</span><strong class="mono">0.50 s</strong></div>
+      <div><span>전진</span><strong class="mono" id="limitForward">—</strong></div>
+      <div><span>후진</span><strong class="mono" id="limitReverse">—</strong></div>
+      <div><span>횡이동</span><strong class="mono" id="limitLateral">—</strong></div>
+      <div><span>회전</span><strong class="mono" id="limitAngular">—</strong></div>
+      <div><span>cmd timeout</span><strong class="mono" id="limitCmdTimeout">—</strong></div>
       <div><span>nav supervision</span><strong class="mono">1.00 s</strong></div>
     </div>
   </section>

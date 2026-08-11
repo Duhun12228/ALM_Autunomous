@@ -10,6 +10,7 @@
  * alm_web_backend 가 생기기 전까지 존재하지 않는다.
  */
 import { quaternionToYaw } from './bridge/decoders.js';
+import { toggleMapPlaceholder, toggleSvgMapPlaceholder } from './render/placeholder.js';
 
 // rcl_interfaces/msg/Log 의 레벨 상수
 const ROS_LOG_LEVEL = { 10: 'DEBUG', 20: 'INFO', 30: 'WARN', 40: 'ERROR', 50: 'ERROR' };
@@ -19,6 +20,19 @@ const BATTERY_EMPTY_V = 21.0;
 const BATTERY_FULL_V = 25.2;
 
 const $ = (selector) => document.querySelector(selector);
+
+/** 자산 종류 → 화면의 자산 카드. map_manager 의 kind 와 1:1 이다. */
+const ASSET_CARD = {
+  cloud: { text: '#pcdAssetText', label: '3D 맵' },
+  grid: { text: '#pgmAssetText', label: '2D 맵' },
+  fpfh: { text: '#fpfhAssetText', label: '측위 DB' },
+};
+
+const bytesToText = (bytes) => {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '';
+  const mb = bytes / (1024 * 1024);
+  return mb >= 1 ? `${mb.toFixed(1)} MB` : `${(bytes / 1024).toFixed(0)} KB`;
+};
 
 const setText = (selector, text) => {
   const node = $(selector);
@@ -44,11 +58,13 @@ export class Ingest {
     this.lastEstop = false;
     this.lastOwner = null;
     this.logBudget = 0;
+    this.lastStaleKey = null;
   }
 
   start() {
     const { bridge } = this;
     bridge.subscribe('/alm/jetson_stats', (msg) => this.onJetsonStats(msg));
+    bridge.subscribe('/alm/map_inventory', (msg) => this.onMapInventory(msg));
     bridge.subscribe('/mcu/state', (msg) => this.onMcuState(msg));
     bridge.subscribe('/mcu/command', (msg) => this.onMcuCommand(msg));
     bridge.subscribe('/cmd_arbiter/owner', (msg) => this.onOwner(msg));
@@ -91,6 +107,194 @@ export class Ingest {
     // 네트워크는 통째로 난수였다
     setText('#netTx', num(msg.net_tx_mbps, 1, ' Mbps'));
     setText('#netRx', num(msg.net_rx_mbps, 1, ' Mbps'));
+  }
+
+  // ── 맵 자산 (maps/ 실제 상태) ───────────────────────────────────────
+  /**
+   * map_manager 가 파일시스템에서 본 것을 그대로 화면에 옮긴다.
+   * 여기서 값을 지어내지 않는 것이 요점이다 — 목업 시절 이 화면은 맵이 이미
+   * 다 있는데도 "아직 저장되지 않음"이라고 말하고 있었다.
+   */
+  onMapInventory(msg) {
+    const { state } = this.alm;
+    const maps = msg.maps ?? [];
+    state.mapInventory = { root: msg.root, fingerprintVerified: msg.fingerprint_verified };
+    state.maps = maps;
+    state.activeMap = msg.active_map || '—';
+
+    const active = maps.find((map) => map.active) ?? null;
+    this.activeMapEntry = active;
+
+    this._renderAssetCards(active);
+    this._renderCapabilities(active);
+    this._renderReadyBanner(active);
+    this._renderStepper(active);
+    this._syncPlaceholders(active);
+    this._announceStale(active);
+
+    this.alm.renderGlobal();
+    this.alm.renderMapOptions?.();
+    setText('#navMapTitle', active
+      ? `${active.label || active.name}${active.complete ? '' : ' · 미완성'}`
+      : '맵 없음');
+  }
+
+  asset(entry, kind) {
+    return entry?.assets?.find((item) => item.kind === kind) ?? null;
+  }
+
+  _renderAssetCards(entry) {
+    for (const [kind, card] of Object.entries(ASSET_CARD)) {
+      const node = $(card.text);
+      if (!node) continue;
+      const row = node.closest('.asset-row');
+      const asset = this.asset(entry, kind);
+
+      if (!entry) {
+        node.textContent = '맵 목록을 읽는 중…';
+      } else if (!asset || !asset.present) {
+        node.textContent = asset?.issue || '아직 만들어지지 않음';
+      } else if (asset.stale) {
+        node.textContent = asset.issue || '부모 PCD와 짝이 맞지 않음';
+      } else {
+        const size = bytesToText(Number(asset.size_bytes));
+        node.textContent = [asset.detail, size].filter(Boolean).join(' · ');
+      }
+      if (row) {
+        row.classList.toggle('is-missing', Boolean(entry) && !asset?.present);
+        row.classList.toggle('is-stale', Boolean(asset?.present && asset.stale));
+      }
+    }
+  }
+
+  /** 이 맵으로 실제 무엇을 할 수 있는가 — 자산이 있어야 되는 일만 켠다. */
+  _renderCapabilities(entry) {
+    const node = $('#mapCapabilities');
+    if (!node) return;
+    const usable = (kind) => {
+      const asset = this.asset(entry, kind);
+      return Boolean(asset?.present && !asset.stale);
+    };
+    const items = [
+      ['자동 측위', usable('cloud') && usable('fpfh')],
+      ['Nav2 주행', usable('grid')],
+      ['3D 뷰', usable('cloud')],
+    ];
+    node.innerHTML = items.map(([label, ok]) =>
+      `<span class="${ok ? 'ok' : ''}">${this.alm.esc(label)}</span>`).join('');
+  }
+
+  /** 이미 완성된 맵이라는 사실과, 재매핑이 파괴적이라는 사실을 같이 알린다. */
+  _renderReadyBanner(entry) {
+    const anchor = $('#mappingStepper');
+    if (!anchor) return;
+    let banner = document.querySelector('#mapReadyBanner');
+    if (!entry) {
+      if (banner) banner.remove();
+      return;
+    }
+    if (!banner) {
+      banner = document.createElement('p');
+      banner.id = 'mapReadyBanner';
+      anchor.parentNode.insertBefore(banner, anchor);
+    }
+    const stale = (entry.assets ?? []).filter((a) => a.present && a.stale);
+    if (entry.complete) {
+      banner.className = 'map-ready-banner';
+      banner.innerHTML = '<b>이 맵은 이미 완성되어 있습니다.</b> '
+        + '다시 매핑하면 기존 cloud.pcd 를 덮어씁니다.';
+    } else if (stale.length) {
+      banner.className = 'map-ready-banner warn';
+      banner.textContent = stale[0].issue;
+    } else {
+      banner.className = 'map-ready-banner warn';
+      const missing = (entry.assets ?? []).filter((a) => !a.present)
+        .map((a) => ASSET_CARD[a.kind]?.label ?? a.kind);
+      banner.innerHTML = `<b>아직 완성되지 않은 맵입니다.</b> 없는 자산: ${missing.join(' · ')}`;
+    }
+  }
+
+  /**
+   * 이미 만들어진 자산에 해당하는 워크플로 단계는 done 으로 시작한다.
+   * (mappingSteps 는 app.js 가 소유하므로 status 만 손대고 렌더는 맡긴다.)
+   */
+  _renderStepper(entry) {
+    const steps = this.alm.state.mappingSteps ?? [];
+    if (!steps.length) return;
+    const done = {
+      save_pcd: Boolean(this.asset(entry, 'cloud')?.present),
+      pcd2pgm: Boolean(this.asset(entry, 'grid')?.present),
+      fpfh_db: Boolean(this.asset(entry, 'fpfh')?.present),
+    };
+    let touched = false;
+    for (const step of steps) {
+      if (!(step.key in done)) continue;
+      const next = done[step.key] ? 'done' : 'pending';
+      // 진행 중인 작업의 상태는 건드리지 않는다
+      if (step.status === 'running') continue;
+      if (step.status !== next) { step.status = next; touched = true; }
+    }
+    if (touched) this.alm.renderMappingSteps?.();
+  }
+
+  /** 인벤토리에서 온 사실만 기록한다. 실제 표시 판단은 refreshPlaceholders(). */
+  _syncPlaceholders(entry) {
+    this._placeholder = {
+      hasEntry: Boolean(entry),
+      hasCloud: Boolean(this.asset(entry, 'cloud')?.present),
+      hasGrid: Boolean(this.asset(entry, 'grid')?.present),
+      name: entry?.name ?? '',
+    };
+    this.refreshPlaceholders();
+  }
+
+  /**
+   * placeholder 표시 여부를 다시 판단한다. 매핑 상태가 인벤토리(5초)보다 빠르게
+   * 바뀌므로 main.js 가 1초마다 다시 부른다.
+   *
+   * 규칙은 두 줄이다.
+   *
+   *   활성 맵에 cloud.pcd 가 없으면  →  placeholder
+   *   단, SLAM 이 도는 중이면        →  누적 점군을 보여준다 (placeholder 없음)
+   *
+   * 예외가 SLAM 하나뿐인 이유: 그때만 화면에 '만들어지고 있는 맵'이 있다.
+   * 라이다가 켜져 있다는 것만으로는 예외가 안 된다 — 실운용에서 라이다는 늘
+   * 켜져 있으므로, 그걸 조건에 넣으면 placeholder 가 영영 안 뜬다.
+   * (실제로 그렇게 만들었다가 빈 맵으로 바꿔도 안 뜨는 상태가 됐다)
+   *
+   * 저장하지 않고 SLAM 을 끝내면 누적은 버려지고 다시 placeholder 가 뜬다.
+   * 저장했다면 cloud.pcd 가 생겼으므로 애초에 조건에 안 걸린다.
+   */
+  refreshPlaceholders() {
+    const info = this._placeholder;
+    if (!info) return;
+    const state = this.alm.state;
+    const mapping = state.slamRunning === true || state.systemState === 'MAPPING';
+    const show3d = info.hasEntry && !info.hasCloud && !mapping;
+
+    const stage = document.querySelector('.pointcloud-stage');
+    const showing3d = toggleMapPlaceholder(stage, show3d, 'cloud', info.name);
+    // placeholder 가 떠 있으면 three.js 는 그릴 것이 없다 — rAF 를 돌릴 이유도 없다
+    if (showing3d) window.ALM_RENDERER3D?.setActive(false);
+    this.placeholder3dActive = showing3d;
+
+    // 2D 는 사정이 다르다. pcd2pgm 을 돌리기 전까지 실시간으로 채워지는 것이
+    // 없으므로, grid 가 없으면 그대로 placeholder 가 맞다.
+    toggleSvgMapPlaceholder(
+      document.querySelector('#navigationMap'),
+      info.hasEntry && !info.hasGrid, info.name);
+  }
+
+  /** stale 은 상승 에지에서만 경보한다 (MCU fault 와 같은 규칙). */
+  _announceStale(entry) {
+    const stale = (entry?.assets ?? []).filter((a) => a.present && a.stale);
+    const key = stale.map((a) => `${a.kind}:${a.issue}`).join('|');
+    if (key === this.lastStaleKey) return;
+    this.lastStaleKey = key;
+    for (const asset of stale) {
+      this.alm.addAlarm('warning',
+        `${ASSET_CARD[asset.kind]?.label ?? asset.kind} 불일치`, asset.issue);
+    }
   }
 
   /** 포인트 처리량은 renderer3d 가 실제로 받은 프레임에서 계산해 넘겨준다. */

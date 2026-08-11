@@ -14,6 +14,7 @@
 import { FoxgloveClient } from '@foxglove/ws-protocol';
 
 import { makeDecoder } from './decoders.js';
+import { SubscriptionRegistry } from './subscription-registry.js';
 
 const RECONNECT_MIN_MS = 500;
 const RECONNECT_MAX_MS = 8000;
@@ -40,9 +41,10 @@ export class RosBridge {
     this.status = 'disconnected';   // disconnected | connecting | connected
 
     this.handlers = new Map();      // topic -> Set<fn(message, meta)>
-    this.decoders = new Map();      // channelId -> fn(data)
-    this.channelsByTopic = new Map();
-    this.subscriptions = new Map(); // subscriptionId -> topic
+    // 채널/구독/디코더 대응은 전부 여기에 있다 (subscription-registry.js).
+    // 예전에는 세 개의 Map 이 인라인 핸들러에 흩어져 있었고, 키를 잘못 쓴 버그가
+    // 그래서 오래 안 보였다.
+    this.registry = new SubscriptionRegistry();
     this.lastSeen = new Map();      // topic -> performance.now()
 
     this.statusListeners = new Set();
@@ -73,7 +75,7 @@ export class RosBridge {
     this.handlers.get(topic).add(handler);
 
     // 이미 연결돼 있고 그 토픽이 광고된 상태라면 즉시 붙는다
-    if (this.status === 'connected' && this.channelsByTopic.has(topic)) {
+    if (this.status === 'connected' && this.registry.hasChannel(topic)) {
       this._attach(topic);
     }
     return () => {
@@ -134,9 +136,7 @@ export class RosBridge {
     });
 
     client.on('close', () => {
-      this.decoders.clear();
-      this.channelsByTopic.clear();
-      this.subscriptions.clear();
+      this.registry.clear();
       this.client = null;
       this._setStatus('disconnected');
       if (!this.closedByUser) this._scheduleReconnect();
@@ -144,21 +144,35 @@ export class RosBridge {
 
     client.on('advertise', (channels) => {
       for (const channel of channels) {
-        this.channelsByTopic.set(channel.topic, channel);
+        this.registry.setChannel(channel);
         if (this.handlers.has(channel.topic)) this._attach(channel.topic);
       }
     });
 
+    /**
+     * 토픽이 사라졌다 (발행 노드 종료). 관련 상태를 **전부** 정리해야 한다.
+     *
+     * ⚠ 여기가 오래 고장나 있었다. 예전 구현은 `decoders.delete(channelId)` 만
+     * 했는데, decoders 의 키는 channelId 가 아니라 subscriptionId 다. 즉 아무것도
+     * 안 지웠고, subscriptions 에는 죽은 토픽이 그대로 남았다.
+     *
+     * 그 결과 _attach() 의 '이미 붙어 있으면 건너뛴다' 검사가 그 유령 항목에
+     * 걸려, **토픽이 다시 광고돼도 재구독하지 않았다.** SLAM 을 한 번 껐다 켜면
+     * /cloud_registered 가 브라우저에 영영 안 들어오는 증상이 이것이다.
+     */
     client.on('unadvertise', (channelIds) => {
-      for (const id of channelIds) this.decoders.delete(id);
+      for (const id of channelIds) {
+        const topic = this.registry.removeChannel(id);
+        if (topic) console.info(`[bridge] ${topic} 사라짐 (발행 노드 종료)`);
+      }
     });
 
     client.on('message', ({ subscriptionId, timestamp, data }) => {
-      const topic = this.subscriptions.get(subscriptionId);
+      const topic = this.registry.topicFor(subscriptionId);
       if (topic === undefined) return;
 
       this.lastSeen.set(topic, performance.now());
-      const decode = this.decoders.get(subscriptionId);
+      const decode = this.registry.decoderFor(subscriptionId);
       if (!decode) return;
 
       let message;
@@ -180,19 +194,15 @@ export class RosBridge {
   }
 
   _attach(topic) {
-    const channel = this.channelsByTopic.get(topic);
+    const channel = this.registry.channelFor(topic);
     if (!channel || !this.client) return;
-    // 이미 붙어 있으면 중복 구독하지 않는다
-    for (const existing of this.subscriptions.values()) {
-      if (existing === topic) return;
-    }
+    if (this.registry.isSubscribed(topic)) return;   // 중복 구독 방지
 
     const decode = makeDecoder(channel);
     if (!decode) return;
 
     const subscriptionId = this.client.subscribe(channel.id);
-    this.subscriptions.set(subscriptionId, topic);
-    this.decoders.set(subscriptionId, decode);
+    this.registry.addSubscription(topic, subscriptionId, decode);
   }
 
   _scheduleReconnect() {

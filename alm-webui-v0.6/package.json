@@ -7,7 +7,7 @@
   "scripts": {
     "build": "vite build",
     "watch": "vite build --watch",
-    "serve": "python3 -m http.server 8080"
+    "serve": "node tools/dev-server.mjs 8080"
   },
   "devDependencies": {
     "vite": "^8.2.0"

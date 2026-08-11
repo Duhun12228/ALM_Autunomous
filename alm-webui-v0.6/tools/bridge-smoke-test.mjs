@@ -29,13 +29,26 @@ const DURATION_MS = 12000;
 
 const WANTED = [
   '/alm/jetson_stats',
+  '/alm/map_inventory',
   '/mcu/state',
   '/cmd_arbiter/owner',
   '/drive_mode/effective',
-  '/Odometry',
   '/map',
   '/livox/lidar',
+  // 활성 맵에 저장된 점군. latched 라 상시 있어야 한다.
+  '/alm/prior_cloud',
 ];
+
+/**
+ * 매핑/측위 스택이 돌 때만 존재하는 토픽. 없다고 실패로 세면 SLAM 이 꺼져 있는
+ * 평상시마다 빨간 불이 켜져서, 정작 진짜 고장이 났을 때 아무도 안 본다.
+ * 있으면 내용을 확인하고, 없으면 '해당 없음' 으로 넘어간다.
+ */
+const OPTIONAL = new Set([
+  '/Odometry',            // FAST-LIO
+  '/cloud_registered',    // FAST-LIO
+]);
+WANTED.push(...OPTIONAL);
 
 const seen = new Map();       // topic -> { count, sample }
 const subscriptions = new Map();
@@ -95,6 +108,10 @@ setTimeout(async () => {
   for (const topic of WANTED) {
     const entry = seen.get(topic);
     if (!entry) {
+      if (OPTIONAL.has(topic)) {
+        console.log(`  · ${topic.padEnd(24)} 해당 없음 (매핑/측위 미기동)`);
+        continue;
+      }
       console.log(`  ✗ ${topic.padEnd(24)} 수신 없음`);
       failures += 1;
       continue;
@@ -142,6 +159,14 @@ function summarize(topic, msg) {
       return `cpu ${msg.cpu_percent?.toFixed(1)}% gpu ${msg.gpu_percent?.toFixed(1)}% `
         + `ram ${msg.ram_used_gb?.toFixed(2)}/${msg.ram_total_gb?.toFixed(2)}GB `
         + `tj ${msg.temp_tj?.toFixed(1)}°C ${msg.power_w?.toFixed(1)}W ${msg.net_interface}`;
+    case '/alm/map_inventory': {
+      const active = (msg.maps ?? []).find((m) => m.active);
+      const assets = (active?.assets ?? [])
+        .map((a) => `${a.kind}${a.present ? (a.stale ? '⚠' : '✓') : '✗'}`).join(' ');
+      return `root=${msg.root?.split('/').slice(-3).join('/')} `
+        + `maps=${msg.maps?.length} active=${msg.active_map} `
+        + `complete=${active?.complete} [${assets}]`;
+    }
     case '/mcu/state':
       return `batt ${msg.battery_voltage?.toFixed(1)}V steer[${msg.steer_angle?.length}] `
         + `wheels[${msg.wheel_speed?.length}] estop=${msg.emergency_stop} fault=${msg.fault}`;
@@ -155,6 +180,8 @@ function summarize(topic, msg) {
         + `origin(${msg.info?.origin?.position?.x?.toFixed(2)}, ${msg.info?.origin?.position?.y?.toFixed(2)}) `
         + `data ${msg.data?.length}`;
     case '/livox/lidar':
+    case '/cloud_registered':
+    case '/alm/prior_cloud':
       return `${msg.width}×${msg.height} step ${msg.point_step} `
         + `fields[${msg.fields?.map((f) => f.name).join(',')}] frame=${msg.header?.frame_id}`;
     default:

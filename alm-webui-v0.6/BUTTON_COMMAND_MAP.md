@@ -2,7 +2,25 @@
 
 WebUI의 모든 조작 요소가 연동 후 **Jetson에서 실제로 무엇을 실행하는지**를 버튼 단위로 정리한 문서입니다. [`JETSON_INTEGRATION_PLAN.md`](JETSON_INTEGRATION_PLAN.md)가 "무엇을 만들어야 하나"라면, 이 문서는 "각 버튼이 눌리면 어떤 명령이 나가나"입니다.
 
-기준: `ALM_auto_ws/src` 실물 (2026-08-06). 표의 명령은 **backend가 rclpy로 수행할 내용을 CLI 형태로 표기**한 것입니다 — 실제로는 `ros2` 명령을 subprocess로 부르는 게 아니라 동등한 API 호출을 합니다. 단, `pcd2pgm.py`/`sc_build_db.py`만은 진짜 subprocess 실행입니다.
+기준: `ALM_auto_ws/src` 실물 (2026-08-10). 표의 명령은 **backend가 rclpy로 수행할 내용을 CLI 형태로 표기**한 것입니다 — 실제로는 `ros2` 명령을 subprocess로 부르는 게 아니라 동등한 API 호출을 합니다. 단, `pcd2pgm.py`/`fpfh_map_builder`와 `ros2 launch`만은 진짜 subprocess 실행입니다.
+
+## 구현 상태 (2026-08-10 · Phase 3 완료)
+
+| 그룹 | 상태 | 비고 |
+|---|---|---|
+| 전역 E-STOP · 해제 | ✅ **실동작** | `command_manager` 래치 + `/emergency_stop/release` 서비스 |
+| 웹 세션 제어권 | ✅ **실동작** | `alm_web_backend` 리스 락 (TTL 15초) |
+| 매핑 시작·종료·저장 | ✅ **실동작** | launch 슬롯 + `/map_save` |
+| pcd2pgm · FPFH DB | ✅ **실동작** | subprocess + 실 stdout 스트림 |
+| 맵 생성 · 활성 전환 | ✅ **실동작** | `maps/<이름>/manifest.yaml`, `active.yaml` |
+| 맵 자산 조회 | ✅ **실동작** | `/alm/map_inventory` (backend 불필요) |
+| 측위 (`#autoLocalization` 등) | ⏳ 목업 | Phase 4 |
+| 자율주행 (`#startNavigation` 등) | ⏳ 목업 | Phase 4 — Nav2 기동 검증 선행 |
+| 수동주행 (`#enterManual` 등) | 🚫 **보류** | `base_control.yaml` 의 4WIS 상수 8개가 `##CONFIRM##` 미확정. 확정 전에는 twist 가 그대로 엉뚱한 rpm/조향각이 된다 |
+
+**API 표면**: `GET /api/health` · `/api/limits` · `/api/session*` · `POST /api/estop`(락 예외) · `/api/estop/release` · `/api/mapping/{start,stop,save}` · `/api/jobs/{pcd2pgm,fpfh}` · `GET /api/jobs/<id>[/stream]` · `POST /api/maps` · `PUT /api/maps/active`
+
+모든 요청에 `Authorization: Bearer $ALM_WEB_TOKEN`. 상태를 바꾸는 요청은 추가로 `X-ALM-Session` 이 현재 제어권 보유자와 일치해야 합니다. **E-STOP 만 락 예외** — 남이 조작 중이라고 로봇을 못 세우면 그게 사고입니다.
 
 ---
 
@@ -22,9 +40,9 @@ WebUI의 모든 조작 요소가 연동 후 **Jetson에서 실제로 무엇을 �
 
 | 요소 (id) | 경로 | Jetson에서 실행되는 것 | 비고 |
 |---|---|---|---|
-| **E-STOP** `#globalEstop`<br>(0.9초 홀드) | **B** | `ros2 topic pub --once /emergency_stop std_msgs/msg/Bool "{data: true}"` | `command_manager`가 직접 구독(arbiter 우회) → `hard_stop`, `motors_on=false`, `McuCommand.emergency_stop=true` |
-| **정지 해제** `#releaseEstop`<br>(문구 "정지 해제" 입력) | **B** | `... Bool "{data: false}"` **또는** 신규 해제 서비스 | ⚠ 현재 `command_manager`는 **래치하지 않음**. 래치 방식 미결정 (계획서 §3.6) |
-| **제어권** `#controlRoleButton` | **B** | ROS 명령 **아님**. backend 세션 API (`POST /api/session/control`) | 웹 세션 제어권 ≠ 동작권. 계획서 §2.1 |
+| **E-STOP** `#globalEstop`<br>(0.9초 홀드) | **B** ✅ | `POST /api/estop` → `/emergency_stop` ← `Bool(true)` | `command_manager`가 직접 구독(arbiter 우회) → `hard_stop`, `motors_on=false`, `McuCommand.emergency_stop=true`.<br>**락 예외** — 제어권이 없어도 누를 수 있다 |
+| **정지 해제** `#releaseEstop`<br>(문구 "정지 해제" 입력) | **B** ✅ | `POST /api/estop/release` → `/emergency_stop/release` (`alm_msgs/srv/ReleaseEstop`) | ✅ 래치 구현됨(`estop_latch: true`). **토픽에 `false` 를 흘려서는 안 풀린다.** MCU 가 fault/estop 을 보고 중이면 해제를 **거부**하고 사유를 응답 |
+| **제어권** `#controlRoleButton` | **B** ✅ | `POST /api/session/acquire` / `release` + 5초 하트비트 | 웹 세션 제어권 ≠ 동작권(계획서 §2.1). 리스 TTL 15초 — 브라우저가 죽어도 락이 영구히 잠기지 않음 |
 | **프로필** `#profilePill` | **L** | 설정 드로어 열기 | |
 | **활성 맵** `#mapPill` | **L→B** | 모달 열 때 `GET /api/maps` | |
 | **설정** `#openSettings` / `#closeSettings` | **L** | | |
@@ -45,18 +63,20 @@ WebUI의 모든 조작 요소가 연동 후 **Jetson에서 실제로 무엇을 �
 
 | 요소 (id) | 경로 | Jetson에서 실행되는 것 |
 |---|---|---|
-| **SLAM 시작** `#startMapping` | **B** | `ros2 launch alm_navigation slam.launch.py use_sim_time:=false rviz:=false`<br>(FAST-LIO `fastlio_mapping`, config `fastlio_mid360.yaml`) |
-| **SLAM 종료** `#stopMapping` | **B** | 위 launch 프로세스에 SIGINT → 역순 종료 |
-| **3D PCD 저장** `#savePcd` | **B** | `ros2 service call /map_save std_srvs/srv/Trigger "{}"`<br>→ `fastlio_mid360.yaml`의 `map_file_path`(`.../maps/alm_3d_map.pcd`)에 저장<br>→ backend가 맵 이름 디렉터리로 이동 |
-| **2D 변환 모달 열기** `#openPcd2Pgm` | **L** | 모달만 염 (사전조건: `state.mappingSaved`) |
-| **변환 실행** `#runPgmJob` | **B** | **subprocess**:<br>`ros2 run alm_navigation pcd2pgm.py --pcd <맵>.pcd --out <맵> --resolution 0.05 --z-min -0.3 --z-max 1.0 --min-points 1` |
-| **SC DB 생성** `#buildScDb` | **B** | **subprocess**:<br>`ros2 run alm_navigation sc_build_db.py --pcd <맵>.pcd --out sc_db.npz --step 0.75 --num-ring 20 --num-sector 60 --max-radius 10.0 --selftest 20` |
-| **매핑 방식** `#mappingProfile` (A/B/C) | **L→B** | 세션 프로필 저장. launch 인자와 SC DB 단계 활성 여부만 바뀜 |
-| **맵 관리** `#openMapManager` | **B** | `GET /api/maps` — `alm_navigation/maps/` 스캔, `.pcd`/`.pgm`/`.npz` 존재 여부 판정 |
-| **새 맵** `#newMapButton` → `#confirmNewMap` | **B** | `POST /api/maps` — 디렉터리 생성 + 이름 중복 재확인 |
+| **SLAM 시작** `#startMapping` | **B** ✅ | `POST /api/mapping/start {map, overwrite}`<br>① `fastlio_mid360.yaml` 의 `map_file_path` 를 대상 맵의 `cloud.pcd` 로 재작성<br>② `ros2 launch alm_navigation slam.launch.py` (프로세스 그룹)<br>⚠ 대상 맵에 이미 `cloud.pcd` 가 있으면 **거부** — `overwrite:true` 를 명시해야 진행 |
+| **SLAM 종료** `#stopMapping` | **B** ✅ | `POST /api/mapping/stop` → 프로세스 **그룹**에 SIGINT(10s) → SIGTERM(5s) → SIGKILL |
+| **3D PCD 저장** `#savePcd` | **B** ✅ | `POST /api/mapping/save` → `/map_save` (`std_srvs/Trigger`)<br>⚠ **상류 함정**: 누적 점군이 비어 있으면 FAST-LIO 가 `pcl::IOException` 을 안 잡고 **죽는다**(exit -6). 서비스는 영영 응답하지 않으므로 backend 가 슬롯 사망을 감지해 즉시 사유를 반환한다 |
+| **2D 변환 모달 열기** `#openPcd2Pgm` | **L** | 모달만 염. 사전조건은 `state.mappingSaved` 가 아니라 **`cloud.pcd` 실제 존재**(`/alm/map_inventory` 기준) |
+| **변환 실행** `#runPgmJob` | **B** ✅ | **subprocess**: `pcd2pgm.py --pcd maps/<맵>/cloud.pcd --out maps/<맵>/grid --resolution 0.05 --z-min -0.3 --z-max 1.5 --min-points 1`<br>진행률을 지어내지 않고 **실제 stdout 줄**을 폴링으로 흘린다 |
+| **FPFH DB 생성** `#buildFpfhDb` | **B** ✅ | **subprocess**: `fpfh_map_builder --map maps/<맵>/cloud.pcd --output-prefix maps/<맵>/fpfh_map --voxel 0.5 --normal-radius 1.0 --feature-radius 2.5 --z-min -0.35 --z-max 1.0` |
+| **맵 관리** `#openMapManager` | **F** ✅ | `/alm/map_inventory` 구독. `map_manager`가 `maps/`를 스캔해 자산 존재·크기·짝맞음(stale)까지 판정해 보낸다. **backend 불필요** |
+| **새 맵** `#newMapButton` → `#confirmNewMap` | **B** ✅ | `POST /api/maps {name, label}` → `maps/<이름>/manifest.yaml` 원자적 생성. 이름은 `^[A-Za-z0-9][A-Za-z0-9_-]{1,31}$` + realpath 로 maps/ 이탈 재확인 |
+| **활성 맵 전환** `#settingsMapSelect` | **B** ✅ | `PUT /api/maps/active {name}` → `active.yaml` 원자적 재작성. **이미 떠 있는 launch 에는 반영되지 않는다**(다음 기동부터) |
 | **로그 지우기** `#clearLogs` / **레벨 필터** `#logLevel` | **L** | 클라이언트 버퍼(120줄) 조작 |
 
-**⚠ launch 범위 주의.** `ros2 launch alm_bringup slam.launch.py`는 `robot.launch.py`(description + lidar + ekf + **base_control** + **mcu_interface**)까지 함께 띄웁니다. 상시 스택이 이미 떠 있는 운용에서 이걸 그대로 부르면 `cmd_arbiter`/`command_manager`/`mcu_bridge`가 **중복 기동**됩니다 — 시리얼 포트 이중 점유로 이어지므로 위험합니다. backend는 상시 스택과 매핑 스택을 분리해 관리하고, "SLAM 시작"은 `alm_navigation/slam.launch.py`만 추가 기동하는 쪽이 맞습니다.
+**⚠ launch 범위 주의.** `ros2 launch alm_bringup slam.launch.py`는 `robot.launch.py`(description + lidar + ekf + **base_control** + **mcu_interface**)까지 함께 띄웁니다. 상시 스택이 이미 떠 있는 운용에서 이걸 그대로 부르면 `cmd_arbiter`/`command_manager`/`mcu_bridge`가 **중복 기동**됩니다 — 시리얼 포트 이중 점유로 이어지므로 위험합니다.
+
+→ **코드로 강제됨.** `alm_web_backend/processes.py` 의 `LAUNCH_ALLOWLIST` 에는 `("alm_navigation", "slam.launch.py")` 만 있고, `LAUNCH_DENYLIST` 가 `alm_bringup` 의 `slam/robot/navigation.launch.py` 를 사유와 함께 명시적으로 막습니다. 웹에서 임의의 launch 파일을 띄울 수 있으면 그건 원격 코드 실행이므로, 목록에 없는 것은 기동하지 않습니다.
 
 ### 2.2 UI 기본값 ↔ 스크립트 기본값 대조
 
@@ -88,16 +108,14 @@ WebUI의 모든 조작 요소가 연동 후 **Jetson에서 실제로 무엇을 �
 
 | 요소 (id) | 경로 | Jetson에서 실행되는 것 |
 |---|---|---|
-| **초기위치 자동 탐색** `#autoLocalization`<br>(방식 B/C) | **B** | ① `ros2 launch alm_navigation localization.launch.py map_pcd:=<맵>.pcd auto_init:=false` (`transform_publisher` + `fastlio_localization`)<br>② `ros2 run alm_navigation sc_localizer.py --ros-args -p db_path:=<맵>/sc_db.npz -p accum_frames:=10 -p max_candidates:=5 -p icp_wait_sec:=12.0` |
-| 〃 (방식 A) | **L→B** | 수동 초기위치 모드로 전환 (아래) |
-| 〃 (FPFH/TEASER 경로) | **B** | `ros2 launch alm_navigation localization.launch.py auto_init:=true fpfh_db_prefix:=<...>` — `teaser_fpfh_localizer` 사용 |
+| **초기위치 자동 탐색** `#autoLocalization` | **B** | `ros2 launch alm_navigation localization.launch.py auto_init:=true`<br>(`teaser_fpfh_localizer` + `transform_publisher` + `fastlio_localization`. 맵·DB 경로는 인자를 비우면 `maps/active.yaml` 에서 자동 조립) |
 | **수동 초기위치** `#manualInitialPose` + 맵 클릭 | **L→B** | `ros2 topic pub --once /initialpose geometry_msgs/msg/PoseWithCovarianceStamped "{...}"` |
-| **재측위** `#relocalize` | **B** | `sc_localizer` + `icp_node` **재기동** |
-| 측위 상태 패널 (누적/매칭/ICP/수렴) | **F** | ⚠ `sc_localizer`가 상태를 발행하지 않음. `/sc_candidates` 수신 = 매칭 완료, `/icp_result` 수신 = 수렴으로 간접 판정하거나 노드에 발행 추가 |
+| **재측위** `#relocalize` | **B** | `teaser_fpfh_localizer` **재기동** (일회성 노드라 성공 후 종료되는 것이 정상) |
+| 측위 상태 패널 (누적/매칭/ICP/수렴) | **F** | ⚠ `teaser_fpfh_localizer`가 구조화된 상태를 발행하지 않음(로그로만 냄). `/icp_result` 수신 = 수렴으로 간접 판정하거나 노드에 상태 토픽을 추가해야 함 |
 | 측위 후보 레이어 `#candidateLayer` | **F** | `/sc_candidates` (`geometry_msgs/PoseArray`) |
 | fitness / pose 표시 | **F** | `/icp_result` |
 
-**⚠ `sc_localizer`와 `icp_node`는 성공하면 스스로 종료하는 일회성 노드입니다.** "재측위"는 재실행을 뜻하므로 backend가 프로세스 수명을 관리해야 하고, 측위 성공 후 노드 목록에서 사라지는 것을 UI가 "죽었다"로 오해하지 않도록 처리해야 합니다.
+**⚠ `teaser_fpfh_localizer`와 `icp_node`는 성공하면 스스로 종료하는 일회성 노드입니다.** "재측위"는 재실행을 뜻하므로 backend가 프로세스 수명을 관리해야 하고, 측위 성공 후 노드 목록에서 사라지는 것을 UI가 "죽었다"로 오해하지 않도록 처리해야 합니다.
 
 ### 3.2 웨이포인트 · 주행
 
@@ -219,10 +237,10 @@ WebUI의 모든 조작 요소가 연동 후 **Jetson에서 실제로 무엇을 �
 | 7 | SLAM 종료 | 프로세스 종료 |
 | 8 | PCD 저장 | 서비스 `/map_save` (`std_srvs/Trigger`) |
 | 9 | PGM 변환 | **subprocess** `pcd2pgm.py` |
-| 10 | SC DB 생성 | **subprocess** `sc_build_db.py` |
-| 11 | 맵 목록 조회 | 파일시스템 |
+| 10 | FPFH DB 생성 | **subprocess** `fpfh_map_builder` |
+| ~~11~~ | ~~맵 목록 조회~~ | **구현 완료** — `/alm/map_inventory` 구독 (backend 불필요) |
 | 12 | 새 맵 생성 | 파일시스템 |
-| 13 | 자동 측위 | launch + `ros2 run sc_localizer.py` |
+| 13 | 자동 측위 | launch (`auto_init:=true`) |
 | 14 | 수동 초기위치 | 토픽 pub `/initialpose` |
 | 15 | 재측위 | 프로세스 재기동 |
 | 16 | 웨이포인트 세트 저장/불러오기 | 파일시스템 |
@@ -251,15 +269,20 @@ WebUI의 모든 조작 요소가 연동 후 **Jetson에서 실제로 무엇을 �
     ▼           ▼                         ▼
 [매핑]      [측위]                    [자율주행]
 slam.       localization.launch.py    navigation.launch.py
-launch.py   + sc_localizer.py         (map_server, Nav2)
+launch.py   (teaser_fpfh_localizer)   (map_server, Nav2)
     │           │                         │
     ▼           ▼                         ▼
  /map_save   /icp_result 수렴          FollowWaypoints
     │        = 초기위치 확정                 ▲
     ▼                                      │
- pcd2pgm.py ──→ <맵>.yaml ─────────────────┘ (map 인자)
+ maps/<맵>/cloud.pcd                       │
+    │                                      │
+    ├─ pcd2pgm.py ─────→ grid.pgm/yaml ────┘ (map 인자)
     │
-    └─ sc_build_db.py ──→ sc_db.npz ──→ sc_localizer 의 db_path
+    └─ fpfh_map_builder ─→ fpfh_map*  ──→ fpfh_db_prefix
+
+  세 자산의 짝맞음은 map_manager 가 감시해 /alm/map_inventory 로 알린다
+  (fpfh_map.meta 의 map_fingerprint = 부모 cloud.pcd 의 FNV-1a).
 ```
 
 UI가 이미 강제하는 순서(`savePcd` 없이는 변환·DB 불가, 측위 수렴 없이는 주행 불가)는 이 체인과 정확히 일치합니다. 연동 시 이 게이팅을 **서버 측에서도** 재검사해야 합니다.

@@ -29,28 +29,28 @@
     monitoring: ['OPERATION / 04', '시스템 모니터링'],
   };
 
-  const PROFILE_INFO = {
-    A: '수동 초기위치 · Scan Context DB 불필요 (PCD만 사용)',
-    B: 'SC 자동 측위 · 매핑 후 Scan Context DB 생성 필요 (PCD + SC DB)',
-    C: 'SC-LIO-SAM · GTSAM 포즈 그래프 최적화 (PCD + SC DB + GTSAM)',
-  };
+  // 측위 방식은 이 브랜치에서 FPFH+TEASER++ 하나로 확정됐다 (커밋 bbc6dad).
+  // 예전의 방식 A/B/C 선택은 제거했다 — 고를 것이 없다.
+  const PIPELINE_DESC = 'FPFH + TEASER++ 전역 초기화 · GICP 지역 정합';
 
   const state = {
     tab: 'mapping',
-    profile: 'B',
-    activeMap: 'lab_main',
-    mapRevision: 3,
-    maps: [
-      { name: 'lab_main', revision: 3, hash: '8fd2', date: '2026-07-23 09:14', hasPcd: true, hasPgm: true, hasScDb: true },
-      { name: 'office_floor_1', revision: 2, hash: 'c14a', date: '2026-07-21 15:40', hasPcd: true, hasPgm: true, hasScDb: true },
-      { name: 'outdoor_loop', revision: 1, hash: '0a77', date: '2026-07-18 13:02', hasPcd: true, hasPgm: true, hasScDb: false },
-    ],
+    // 맵 목록은 지어내지 않는다. /alm/map_inventory 를 받기 전까지는
+    // '아직 모른다'(mapInventory === null) 로 두고, 화면도 그렇게 말한다.
+    activeMap: '—',
+    maps: [],
+    mapInventory: null,
     estop: false,
     hasControl: true,
     systemState: 'IDLE',
     mappingElapsed: 0,
     mappingTimer: null,
     mappingSaved: false,
+    // 서버(/api/health)가 보는 slam 프로세스 상태. 이 탭에서 시작하지 않은
+    // 매핑도 알아야 하므로 systemState 와 별개로 둔다.
+    slamRunning: null,
+    // /livox/lidar 가 재생본인지. null = 아직 모름 (실측과 섞으면 안 된다)
+    lidarReplay: null,
     pointCount: 128420,
     mappingSteps: [],
     logs: [],
@@ -72,13 +72,12 @@
     ['scanning', '차량 주행 및 매핑', '외부 조이스틱 사용'],
     ['save_pcd', '3D PCD 저장', '/map_save'],
     ['pcd2pgm', 'PCD → PGM 변환', '2D Navigation map'],
-    ['sc_db', 'Scan Context DB 생성', '방식 B/C 전용'],
+    ['fpfh_db', 'FPFH 측위 DB 생성', 'fpfh_map_builder'],
   ];
 
   function resetMappingSteps() {
     state.mappingSteps = STEP_BASE.map(([key, title, detail]) => ({
-      key, title, detail,
-      status: key === 'sc_db' && state.profile === 'A' ? 'skipped' : 'pending',
+      key, title, detail, status: 'pending',
     }));
     renderMappingSteps();
   }
@@ -102,16 +101,45 @@
     $('#modal').innerHTML = '';
   }
 
+  /**
+   * 버튼을 '처리 중' 상태로 만든다.
+   *
+   * ⚠ 자식 요소가 있는 버튼의 내용은 건드리지 않는다. 예전 구현은 무조건
+   * `textContent = label` 로 덮었는데, 그러면 안쪽 구조가 통째로 사라진다.
+   * 실제로 두 곳이 깨져 있었다:
+   *
+   *   #globalEstop        SVG 링 + 코어 + 힌트 → 처음 누르면 시각이 날아감
+   *   #controlRoleButton  #controlRoleText 가 사라져 renderGlobal() 이 그 자리에서
+   *                       TypeError → 복구 코드까지 건너뛰어 '반납 중…' 에서 멈춤
+   *
+   * 그래서 구조가 있으면 disabled + .is-busy 만 걸고, 평문 버튼일 때만 라벨을
+   * 바꾼다. 라벨을 꼭 보여줘야 하는 버튼은 전용 처리를 쓴다(setControlBusy).
+   */
   function setButtonBusy(button, busy, label) {
     if (!button) return;
+    button.disabled = busy;
+    button.classList.toggle('is-busy', busy);
+    if (button.childElementCount > 0) return;      // 구조가 있는 버튼은 여기까지
     if (busy) {
-      button.dataset.original = button.textContent;
+      if (button.dataset.original === undefined) button.dataset.original = button.textContent;
       button.textContent = label || '처리 중…';
-      button.disabled = true;
-    } else {
-      button.textContent = button.dataset.original || button.textContent;
-      button.disabled = false;
+    } else if (button.dataset.original !== undefined) {
+      button.textContent = button.dataset.original;
+      delete button.dataset.original;
     }
+  }
+
+  /**
+   * 제어권 버튼 전용 busy. 자식 구조를 건드리지 않고 안쪽 텍스트만 바꾼다.
+   * 처리 중에 renderGlobal() 이 돌아도 #controlRoleText 가 살아 있어야 한다.
+   */
+  function setControlBusy(busy, label) {
+    const button = $('#controlRoleButton');
+    if (!button) return;
+    button.disabled = busy;
+    button.classList.toggle('is-busy', busy);
+    if (busy) $('#controlRoleText').textContent = label;
+    else renderGlobal();
   }
 
   function addLog(level, node, text) {
@@ -128,6 +156,28 @@
         <span>${esc(log.time)}</span><b>${esc(log.level)}</b><em>${esc(log.node)}</em><p>${esc(log.text)}</p>
       </div>`).join('');
     $('#logWindow').scrollTop = $('#logWindow').scrollHeight;
+  }
+
+  /**
+   * 명령 계층(src/commands.js). 로드되기 전이거나 목업 모드면 null 이다.
+   * 여기 없는 동안 조작 버튼은 눌러도 아무 일이 없어야지, 화면에서만 성공한
+   * 척하면 안 된다 — 그게 이 UI 가 원래 갖고 있던 문제였다.
+   */
+  const cmd = () => window.ALM_CMD || null;
+
+  /** 명령을 낼 수 있는 상태인지. 못 내면 이유를 말하고 false. */
+  function requireCmd() {
+    const api = cmd();
+    if (!api) {
+      toast('명령 계층이 없습니다', '페이지를 새로고침하세요.', 'error');
+      return null;
+    }
+    if (!api.hasToken()) {
+      toast('백엔드 토큰이 필요합니다', '설정에서 토큰을 입력하세요.', 'warning');
+      openSettings();
+      return null;
+    }
+    return api;
   }
 
   function canOperate(message = true) {
@@ -159,12 +209,10 @@
   }
 
   function renderGlobal() {
-    $('#profileText').textContent = state.profile;
     $('#activeMapText').textContent = state.activeMap;
     $('#mappingActiveMapText').textContent = state.activeMap;
     $('#settingsMapSelect').value = state.activeMap;
-    $('#mappingProfile').value = state.profile;
-    $('#profileDesc').textContent = PROFILE_INFO[state.profile];
+    $('#profileDesc').textContent = PIPELINE_DESC;
     $('#newMapButton').disabled = state.systemState !== 'IDLE';
     $('#batteryTop').textContent = `${Math.round(state.metrics.battery)}%`;
     $('#batteryFill').style.width = `${state.metrics.battery}%`;
@@ -190,15 +238,29 @@
     });
   }
 
-  function triggerEstop() {
-    state.estop = true;
+  /**
+   * E-STOP. 제어권(락)이 없어도 누를 수 있다 — 서버도 이 엔드포인트만 락에서
+   * 빼 두었다. 남이 조작 중이라고 로봇을 못 세우면 그게 사고다.
+   *
+   * state.estop 을 여기서 true 로 만들지 않는다. 실제 정지 여부는
+   * /mcu/state + /mcu/command 를 보고 ingest.js 가 정한다. 낙관적으로 먼저
+   * '정지됨'을 그리면, 명령이 안 나갔는데 멈춘 줄 아는 상황이 만들어진다.
+   */
+  async function triggerEstop() {
+    const api = requireCmd();
+    if (!api) return;
     stopManualCommand();
-    cancelNavigation(false);
-    addAlarm('critical', 'E-STOP 활성화', '사용자가 전역 비상정지를 작동했습니다.');
-    addLog('ERROR', 'safety_supervisor', 'E-STOP request latched. Motion commands blocked.');
-    renderGlobal();
-    renderManual();
-    toast('비상정지가 활성화되었습니다', '모든 주행 명령이 차단되었습니다.', 'error');
+    const button = $('#globalEstop');
+    setButtonBusy(button, true, '정지 요청 중…');
+    try {
+      await api.estop();
+      addLog('ERROR', 'alm_web_backend', 'E-STOP 요청을 발행했습니다.');
+      toast('비상정지를 요청했습니다', 'MCU 상태로 반영을 확인하세요.', 'error');
+    } catch {
+      /* commands.js 가 이미 토스트를 띄웠다 */
+    } finally {
+      setButtonBusy(button, false);
+    }
   }
 
   function requestEstopRelease() {
@@ -207,32 +269,67 @@
       <div class="modal-body"><p class="modal-copy">차량 주변이 안전하고 MCU fault가 없으며 모든 조작 장치가 중립인지 확인하세요. 아래 문구를 입력해야 해제할 수 있습니다.</p>
       <label class="modal-field"><span>확인 문구</span><input id="releasePhrase" autocomplete="off" placeholder="정지 해제" /></label></div>
       <div class="modal-actions"><button class="secondary-button" data-close-modal>취소</button><button class="primary-button" id="confirmRelease">해제 확인</button></div>`);
-    $('#confirmRelease').addEventListener('click', () => {
+    $('#confirmRelease').addEventListener('click', async (event) => {
       if ($('#releasePhrase').value.trim() !== '정지 해제') {
         toast('확인 문구가 일치하지 않습니다', '“정지 해제”를 정확히 입력하세요.', 'warning');
         return;
       }
-      state.estop = false;
-      addLog('INFO', 'safety_supervisor', 'E-STOP latch released after operator confirmation.');
-      closeModal();
-      renderGlobal();
-      toast('E-STOP이 해제되었습니다', '주행 전 주변 안전을 다시 확인하세요.', 'success');
+      const api = requireCmd();
+      if (!api) return;
+      setButtonBusy(event.currentTarget, true, '해제 중…');
+      try {
+        // 로봇 쪽 래치를 푸는 것은 command_manager 의 서비스뿐이다.
+        // 여기서 state.estop 을 내리지 않는다 — /mcu/command 로 실제 해제가
+        // 확인되면 ingest.js 가 내린다. 거부되면(MCU fault 유지 등) 409 다.
+        await api.releaseEstop('web');
+        addLog('INFO', 'command_manager', 'E-STOP 래치 해제 요청이 승인되었습니다.');
+        closeModal();
+        toast('E-STOP 해제를 요청했습니다', '주행 전 주변 안전을 다시 확인하세요.', 'success');
+      } catch {
+        /* 거부 사유는 commands.js 가 그대로 띄운다 */
+      } finally {
+        setButtonBusy(event.currentTarget, false);
+      }
     });
   }
 
-  function toggleControl() {
-    if (state.hasControl) {
+  /**
+   * 웹 세션 제어권 — 접속한 브라우저 여럿 중 누가 조작하는가.
+   *
+   * ⚠ cmd_arbiter 의 동작권(auto/teleop)과는 **다른 축**이다. 그쪽은 로봇이
+   * 자율을 따르는지 텔레옵을 따르는지고, 이쪽은 웹 클라이언트 사이의 문제다.
+   * 둘을 섞으면 다중 접속에서 사고가 난다.
+   *
+   * 판정은 서버가 한다. state.hasControl 은 서버 응답의 캐시일 뿐이다.
+   */
+  async function toggleControl() {
+    const api = requireCmd();
+    if (!api) return;
+    if (api.hasControl) {
       if (state.manual.enabled || state.nav.state === 'RUNNING') {
         toast('제어권을 반납할 수 없습니다', '진행 중인 주행을 먼저 종료하세요.', 'warning');
         return;
       }
-      state.hasControl = false;
-      toast('제어권을 반납했습니다', '현재 관전 모드입니다.');
-    } else {
-      state.hasControl = true;
-      toast('제어권을 확보했습니다', '조작 기능이 활성화되었습니다.', 'success');
+      setControlBusy(true, '반납 중…');
+      try {
+        await api.releaseControl();
+        toast('제어권을 반납했습니다', '현재 관전 모드입니다.');
+      } finally {
+        // finally 로 감싸는 이유: 여기서 무슨 일이 나든 버튼은 반드시 돌아와야
+        // 한다. 안 그러면 '반납 중…' 에서 멈춰 다시 누를 수조차 없다.
+        setControlBusy(false);
+      }
+      return;
     }
-    renderGlobal();
+    setControlBusy(true, '확보 중…');
+    try {
+      await api.acquireControl(location.hostname);
+      toast('제어권을 확보했습니다', '조작 기능이 활성화되었습니다.', 'success');
+    } catch {
+      /* 409(다른 접속자 보유)는 commands.js 가 안내한다 */
+    } finally {
+      setControlBusy(false);
+    }
   }
 
   function renderMappingSteps() {
@@ -240,61 +337,221 @@
     const labels = { pending: '대기', running: '진행 중', done: '완료', failed: '실패', skipped: '건너뜀' };
     $('#mappingStepper').innerHTML = state.mappingSteps.map((step, index) => `
       <li class="${esc(step.status)}"><span class="step-index">${icons[step.status]}</span><div><strong>${index + 1}. ${esc(step.title)}</strong><small>${esc(step.detail)}</small></div><b>${labels[step.status]}</b></li>`).join('');
+    syncSaveHint();
   }
 
+  /**
+   * 매핑 중에는 '3D 맵 저장' 이 다음에 할 일이다. 그 칸을 빛나게 해서 눈에
+   * 띄게 한다. 오른쪽 후처리 패널은 카드가 셋 다 똑같이 생겨서, 지금 눌러야
+   * 할 것이 무엇인지 화면이 말해주지 않았다.
+   */
+  function syncSaveHint() {
+    const button = $('#savePcd');
+    const row = button?.closest('.asset-row');
+    if (!row || !button) return;
+    const mapping = state.systemState === 'MAPPING';
+    row.classList.toggle('is-next', mapping);
+    // 누르면 SLAM 도 같이 끝난다. 라벨이 '저장' 이면 그 사실을 숨기는 셈이다.
+    // (busy 중에는 setButtonBusy 가 라벨을 들고 있으므로 건드리지 않는다)
+    if (button.dataset.original === undefined) {
+      button.textContent = mapping ? '저장 후 종료' : '저장';
+    }
+  }
+
+  /**
+   * SLAM 매핑 시작 — alm_navigation/slam.launch.py 를 로봇에서 띄운다.
+   *
+   * 예전 목업은 setTimeout 으로 단계가 저절로 진행되는 척했다. 이제는 서버가
+   * 프로세스를 실제로 띄우고, 단계 상태는 **실제 자산**(map_manager 가 보는
+   * maps/ 의 파일)을 따라간다. 경과 시간도 지어내지 않고 실제 기동 시각부터 센다.
+   */
   async function startMapping() {
     if (!canOperate()) return;
     if (state.systemState !== 'IDLE') {
       toast('현재 시작할 수 없습니다', `시스템 상태: ${state.systemState}`, 'warning');
       return;
     }
-    state.systemState = 'MAPPING';
-    state.mappingSaved = false;
-    state.mappingElapsed = 0;
-    resetMappingSteps();
-    $('#startMapping').disabled = true;
-    $('#stopMapping').disabled = false;
-    $('#mappingStateLabel').textContent = '센서 기동 중';
-    state.mappingSteps[0].status = 'running';
+    const api = requireCmd();
+    if (!api) return;
+
+    const target = state.activeMap;
+    const entry = state.maps.find((map) => map.name === target);
+    // 매핑을 시작하면 서버가 이 맵의 산출물을 **전부** 지운다 (cloud/grid/DB).
+    // 하나라도 있으면 확인을 받는다 — cloud.pcd 만 보고 판단하면, 2D 나 DB 만
+    // 남아 있는 맵에서 조용히 지워진다.
+    const existing = (entry?.assets ?? []).filter((asset) => asset.present);
+    if (existing.length && !await confirmOverwrite(target, existing)) return;
+
+    const button = $('#startMapping');
+    setButtonBusy(button, true, '기동 중…');
+    try {
+      const result = await api.startMapping(target, existing.length > 0);
+      state.systemState = 'MAPPING';
+      state.mappingSaved = false;
+      state.mappingElapsed = 0;
+      state.mappingStartedAt = Date.now();
+      // 이전 세션의 누적 점군을 지운다. 안 지우면 새 맵 위에 옛 맵이 겹쳐
+      // 보여서, 화면상으로는 이미 다 매핑된 것처럼 보인다.
+      window.ALM_RENDERER3D?.resetAccumulation();
+      $('#stopMapping').disabled = false;
+      $('#mappingStateLabel').textContent = '매핑 진행 중';
+      // 센서·엔진 기동은 launch 가 한 번에 하므로 둘을 한꺼번에 done 으로 둔다.
+      // 이후 단계는 자산이 실제로 생기면 ingest.js 가 done 으로 접는다.
+      markStep('sensor', 'done');
+      markStep('engine', 'done');
+      markStep('scanning', 'running');
+      if (result.cleared?.length) {
+        addLog('WARN', 'alm_web_backend', `기존 자산 삭제: ${result.cleared.join(', ')}`);
+      }
+      addLog('INFO', 'alm_web_backend',
+        `slam.launch.py 기동 (pid=${result.process?.pid}) → ${result.target}`);
+      // 자산을 지웠으므로 저장된 맵 레이어도 비운다. map_manager 가 5초 안에
+      // 알려주긴 하지만, 그 사이 화면에 방금 지운 맵이 남아 있으면 헷갈린다.
+      window.ALM_RENDERER3D?.onPriorCloud(null);
+      state.mappingTimer = setInterval(() => {
+        state.mappingElapsed = Math.round((Date.now() - state.mappingStartedAt) / 1000);
+        $('#mappingElapsed').textContent = fmtDuration(state.mappingElapsed);
+      }, 1000);
+      toast('SLAM 매핑을 시작했습니다', '차량 이동은 외부 조이스틱으로 수행하세요.', 'success');
+    } catch {
+      state.systemState = 'IDLE';
+    } finally {
+      setButtonBusy(button, false);
+      $('#startMapping').disabled = state.systemState === 'MAPPING';
+      renderMappingSteps(); renderGlobal();
+    }
+  }
+
+  function markStep(key, status) {
+    const step = state.mappingSteps.find((item) => item.key === key);
+    if (step) step.status = status;
+  }
+
+  /**
+   * SLAM 이 끝났다. 화면에 쌓아둔 누적 점군을 버린다.
+   *
+   * 저장(/map_save)하지 않았다면 그 점군은 어디에도 남지 않는다. 화면에만
+   * 계속 띄워두면 "맵이 있다"고 착각하게 만든다 — 정확히 이 UI 가 원래 갖고
+   * 있던 문제다. 저장했다면 cloud.pcd 가 생겼고 prior_cloud_publisher 가
+   * 그걸 저장된 맵 레이어로 다시 보내주므로 잃는 것이 없다.
+   */
+  function discardAccumulation() {
+    window.ALM_RENDERER3D?.resetAccumulation();
+  }
+
+  /**
+   * 서버가 본 slam 프로세스 상태가 바뀌었다 (main.js 의 health 폴링).
+   *
+   * 이 탭에서 시작한 매핑이면 systemState 가 이미 MAPPING 이라 할 일이 없다.
+   * 문제는 **다른 경로로 시작된 경우**다 — CLI, 다른 브라우저, 또는 이 탭을
+   * 열기 전에 이미 돌고 있던 경우. 그때 화면이 'IDLE' 이라고 말하면 조작자는
+   * SLAM 시작 버튼을 다시 누르게 되고, 서버는 409 로 막지만 화면은 계속
+   * 거짓말을 하고 있는 상태가 된다.
+   */
+  function onSlamRunningChange(running, slot) {
+    const label = $('#mappingStateLabel');
+    if (running && state.systemState !== 'MAPPING') {
+      state.systemState = 'MAPPING';
+      state.mappingStartedAt = Date.now() - Math.round((slot?.uptime_sec || 0) * 1000);
+      markStep('sensor', 'done'); markStep('engine', 'done'); markStep('scanning', 'running');
+      if (label) label.textContent = '매핑 진행 중 (다른 경로에서 시작됨)';
+      $('#startMapping').disabled = true;
+      $('#stopMapping').disabled = false;
+      clearInterval(state.mappingTimer);
+      state.mappingTimer = setInterval(() => {
+        state.mappingElapsed = Math.round((Date.now() - state.mappingStartedAt) / 1000);
+        $('#mappingElapsed').textContent = fmtDuration(state.mappingElapsed);
+      }, 1000);
+      addLog('WARN', 'alm_web_backend',
+        `이 탭 밖에서 시작된 매핑을 감지했습니다 (pid=${slot?.pid}).`);
+    } else if (!running && state.systemState === 'MAPPING') {
+      clearInterval(state.mappingTimer);
+      state.mappingTimer = null;
+      state.systemState = 'IDLE';
+      markStep('scanning', 'done');
+      discardAccumulation();
+      if (label) label.textContent = state.mappingSaved ? '매핑 완료' : '매핑 종료됨';
+      $('#startMapping').disabled = false;
+      $('#stopMapping').disabled = true;
+      addLog('INFO', 'alm_web_backend', '매핑 프로세스가 종료되었습니다.');
+    }
+    renderMappingSteps(); renderGlobal(); renderMapOptions();
+  }
+
+  const ASSET_FILES = {
+    cloud: 'cloud.pcd',
+    grid: 'grid.pgm · grid.yaml',
+    fpfh: 'fpfh_map.meta · fpfh_map_*.pcd',
+  };
+
+  /**
+   * 재매핑 전 확인. 서버는 이 맵의 산출물을 **전부 지우고** 시작한다.
+   *
+   * cloud.pcd 만 덮는 게 아닌 이유: 그러면 grid.pgm 과 fpfh_map* 이 옛 점군에서
+   * 만들어진 채 남아, 짝이 안 맞는 자산이 한 폴더에 섞인다. 그 DB 로 측위를
+   * 돌리면 엉뚱한 곳에 수렴한다.
+   */
+  function confirmOverwrite(mapName, existing) {
+    const list = existing.map((asset) =>
+      `<li><b>${esc(ASSET_LABEL[asset.kind] || asset.kind)}</b> — <code>${esc(ASSET_FILES[asset.kind] || asset.kind)}</code>`
+      + `${asset.detail ? ` <small>${esc(asset.detail)}</small>` : ''}</li>`).join('');
+    return new Promise((resolve) => {
+      openModal(`
+        <div class="modal-head"><div><p class="section-kicker">DESTRUCTIVE</p><h2>기존 자산을 모두 지울까요?</h2></div><button class="close-button" data-close-modal>×</button></div>
+        <div class="modal-body"><p class="modal-copy"><b>${esc(mapName)}</b> 로 매핑을 시작하면 아래 파일을 <b class="text-danger">전부 삭제</b>하고 처음부터 만듭니다. 되돌릴 수 없습니다.</p>
+        <ul class="wipe-list">${list}</ul>
+        <p class="modal-copy">기존 맵을 남기려면 취소하고 <b>＋ 새 맵 만들기</b>로 다른 폴더를 만드세요.</p></div>
+        <div class="modal-actions"><button class="secondary-button" data-close-modal>취소</button><button class="danger-text-button" id="confirmOverwrite">지우고 새로 매핑</button></div>`);
+      let settled = false;
+      const finish = (value) => { if (!settled) { settled = true; resolve(value); } };
+      $('#confirmOverwrite').addEventListener('click', () => { closeModal(); finish(true); });
+      $$('[data-close-modal]', $('#modal')).forEach((node) =>
+        node.addEventListener('click', () => finish(false)));
+    });
+  }
+
+  /**
+   * SLAM 프로세스를 실제로 내린다. 성공하면 true.
+   *
+   * 종료 버튼과 저장 버튼이 둘 다 이걸 부른다 (저장이 곧 매핑의 끝이므로).
+   * 어느 버튼이 눌렸는지에 따라 busy 표시가 달라지므로 버튼을 받는다.
+   */
+  async function stopSlamProcess(button) {
+    const api = requireCmd();
+    if (!api) return false;
+    setButtonBusy(button, true, '종료 중…');
+    try {
+      // 서버는 프로세스 그룹에 SIGINT → SIGTERM → SIGKILL 순으로 보낸다.
+      // launch 가 자식 노드를 역순으로 정리할 시간을 주므로 최대 15초 걸린다.
+      await api.stopMapping();
+      return true;
+    } catch {
+      return false;
+    } finally {
+      setButtonBusy(button, false);
+    }
+  }
+
+  /** 종료 후 화면 상태를 맞춘다 (프로세스를 내린 뒤에만 부른다). */
+  function applyMappingStopped() {
+    clearInterval(state.mappingTimer);
+    state.mappingTimer = null;
+    state.systemState = 'IDLE';
+    markStep('scanning', 'done');
+    discardAccumulation();
+    $('#mappingStateLabel').textContent = state.mappingSaved ? '매핑 완료' : '저장 전 종료';
+    $('#startMapping').disabled = false;
+    $('#stopMapping').disabled = true;
+    addLog('INFO', 'alm_web_backend', 'slam.launch.py 를 역순으로 종료했습니다.');
     renderMappingSteps(); renderGlobal();
-    addLog('INFO', 'alm_web_backend', 'Launching profile sensors.');
-    await wait(900);
-    if (state.systemState !== 'MAPPING') return;
-    state.mappingSteps[0].status = 'done';
-    state.mappingSteps[1].status = 'running';
-    $('#mappingStateLabel').textContent = '매핑 엔진 기동 중';
-    addLog('INFO', 'lidar.launch.py', 'PointCloud and IMU streams confirmed.');
-    addLog('INFO', 'alm_web_backend', `Launching ${state.profile === 'C' ? 'mapping_sclio' : 'mapping_fastlio'}.`);
-    renderMappingSteps();
-    await wait(1100);
-    if (state.systemState !== 'MAPPING') return;
-    state.mappingSteps[1].status = 'done';
-    state.mappingSteps[2].status = 'running';
-    $('#mappingStateLabel').textContent = '매핑 진행 중';
-    addLog('INFO', 'mapping_engine', 'Mapping active. Vehicle motion source: external joystick.');
-    renderMappingSteps();
-    state.mappingTimer = setInterval(() => {
-      state.mappingElapsed += 1;
-      state.pointCount = Math.min(200000, state.pointCount + Math.round(60 + Math.random() * 170));
-      $('#mappingElapsed').textContent = fmtDuration(state.mappingElapsed);
-      $('#pointCount').textContent = state.pointCount.toLocaleString();
-    }, 1000);
-    toast('SLAM 매핑을 시작했습니다', '차량 이동은 외부 조이스틱으로 수행하세요.', 'success');
   }
 
   function stopMapping() {
     if (state.systemState !== 'MAPPING') return;
-    const proceed = () => {
-      clearInterval(state.mappingTimer);
-      state.mappingTimer = null;
-      state.systemState = 'IDLE';
-      const scan = state.mappingSteps.find((step) => step.key === 'scanning');
-      if (scan.status === 'running') scan.status = 'done';
-      $('#mappingStateLabel').textContent = state.mappingSaved ? '매핑 완료' : '저장 전 종료';
-      $('#startMapping').disabled = false;
-      $('#stopMapping').disabled = true;
-      addLog('INFO', 'alm_web_backend', 'Mapping launch groups stopped in reverse order.');
-      renderMappingSteps(); renderGlobal(); closeModal();
+    const proceed = async () => {
+      if (!await stopSlamProcess($('#stopMapping'))) return;
+      applyMappingStopped();
+      closeModal();
       toast('SLAM 프로세스를 종료했습니다', state.mappingSaved ? '저장된 맵을 사용할 수 있습니다.' : 'PCD가 저장되지 않았습니다.', state.mappingSaved ? 'success' : 'warning');
     };
     if (!state.mappingSaved) {
@@ -303,99 +560,259 @@
     } else proceed();
   }
 
+  /**
+   * /map_save (std_srvs/Trigger). 저장 경로는 매핑 시작 때 정해진 것을 따른다.
+   *
+   * ⚠ 누적 점군이 비어 있으면 FAST-LIO 가 pcl 예외를 안 잡고 죽는다(상류 버그).
+   * 서버가 그 상황을 감지해 즉시 사유를 알려주므로 여기서는 그대로 보여준다.
+   */
   async function savePcd() {
     if (!canOperate()) return;
     if (!['MAPPING', 'IDLE'].includes(state.systemState)) return;
+    const api = requireCmd();
+    if (!api) return;
     const button = $('#savePcd');
+    let saved = false;
     setButtonBusy(button, true, '저장 중…');
-    addLog('INFO', 'map_save', 'Calling /map_save service.');
-    await wait(1300);
-    state.mappingSaved = true;
-    const step = state.mappingSteps.find((item) => item.key === 'save_pcd');
-    step.status = 'done';
-    const map = state.maps.find((item) => item.name === state.activeMap);
-    if (map) map.hasPcd = true;
-    $('#pcdAssetText').textContent = `${state.activeMap}.pcd · 18.4 MB · ${state.pointCount.toLocaleString()} pts`;
-    addLog('INFO', 'map_save', `Saved /data/maps/${state.activeMap}/${state.activeMap}.pcd`);
-    renderMappingSteps(); setButtonBusy(button, false);
-    toast('3D 맵을 저장했습니다', `${state.activeMap}.pcd`, 'success');
+    markStep('save_pcd', 'running'); renderMappingSteps();
+    addLog('INFO', 'map_save', '/map_save 서비스를 호출합니다 (점군이 크면 수십 초).');
+    try {
+      const result = await api.saveMap();
+      state.mappingSaved = true;
+      markStep('save_pcd', 'done');
+      addLog('INFO', 'map_save', `저장 완료: ${result.saved_to}`);
+      saved = true;
+    } catch {
+      markStep('save_pcd', 'failed');
+    } finally {
+      renderMappingSteps();
+      setButtonBusy(button, false);
+    }
+    if (!saved) return;
+
+    // 저장이 곧 매핑의 끝이다. 저장해 놓고 SLAM 을 계속 돌리면 이후 스캔은
+    // 어디에도 안 남으면서 CPU 와 메모리만 먹는다. 그래서 같이 내린다.
+    //
+    // ⚠ 순서가 중요하다. 먼저 내리면 fast_lio 가 죽어서 /map_save 를 받을 노드가
+    //   없다. 반드시 저장이 끝난 뒤에 종료한다.
+    if (state.systemState !== 'MAPPING') {
+      // 자산 카드 문구는 여기서 지어내지 않는다 — map_manager 가 파일 헤더를
+      // 읽어 5초 안에 /alm/map_inventory 로 실제 값을 보내준다.
+      toast('3D 맵을 저장했습니다', 'map_manager 가 자산 상태를 갱신합니다.', 'success');
+      return;
+    }
+    if (await stopSlamProcess(button)) {
+      applyMappingStopped();
+      toast('저장하고 매핑을 끝냈습니다', 'SLAM 프로세스를 종료했습니다. 이제 2D 변환과 측위 DB 를 만들 수 있습니다.', 'success');
+    } else {
+      // 저장은 됐고 종료만 실패한 상태다. 뭉뚱그리면 조작자가 저장까지 실패한
+      // 줄 안다 — 다시 저장을 누르게 만든다.
+      toast('저장은 됐지만 종료에 실패했습니다', '종료 버튼으로 다시 시도하세요.', 'warning');
+    }
   }
 
   function openPcd2Pgm() {
-    if (!state.mappingSaved) {
+    // 이번 세션에서 저장했는지(state.mappingSaved)가 아니라, 파일이 실제로
+    // 있는지를 본다. 이미 완성된 맵을 다시 열었을 때도 변환할 수 있어야 한다.
+    if (!hasCloudAsset()) {
       toast('PCD가 필요합니다', '먼저 3D 맵을 저장하세요.', 'warning');
       return;
     }
     openModal(`
       <div class="modal-head"><div><p class="section-kicker">PCD TO PGM</p><h2>2D 맵 변환</h2></div><button class="close-button" data-close-modal>×</button></div>
       <div class="modal-body"><p class="modal-copy">높이 밴드를 조정해 장애물 단면을 생성합니다. 작업 진행률은 임의 추정하지 않고 단계 상태로 표시합니다.</p>
-      <div class="modal-grid"><label class="modal-field"><span>Resolution</span><input id="pgmResolution" type="number" value="0.05" step="0.01"></label><label class="modal-field"><span>Min points</span><input id="pgmMinPoints" type="number" value="1"></label><label class="modal-field"><span>Z min</span><input id="pgmZMin" type="number" value="-0.3" step="0.1"></label><label class="modal-field"><span>Z max</span><input id="pgmZMax" type="number" value="1.0" step="0.1"></label></div>
-      <div class="preview-grid"><div><small>직전 결과</small><div class="preview-map"></div></div><div><small>새 미리보기</small><div class="preview-map" style="filter:contrast(1.15)"></div></div></div><div id="jobStage" class="modal-copy">대기 중</div><div class="modal-progress"><i id="pgmProgress"></i></div></div>
+      <div class="modal-grid"><label class="modal-field"><span>Resolution</span><input id="pgmResolution" type="number" value="0.05" step="0.01"></label><label class="modal-field"><span>Min points</span><input id="pgmMinPoints" type="number" value="1"></label><label class="modal-field"><span>Z min</span><input id="pgmZMin" type="number" value="-0.3" step="0.1"></label><label class="modal-field"><span>Z max</span><input id="pgmZMax" type="number" value="1.5" step="0.1"></label></div>
+      <p class="helper">z 밴드는 라이다 마운트 높이에 따라 달라집니다. 실행 후 출력되는 z 분포를 보고 지면 위 0.2~1.5 m 로 맞추세요.</p>
+      <pre class="job-log" id="jobLog">대기 중</pre></div>
       <div class="modal-actions"><button class="secondary-button" data-close-modal>닫기</button><button class="primary-button" id="runPgmJob">변환 실행</button></div>`);
-    $('#runPgmJob').addEventListener('click', async () => {
-      const button = $('#runPgmJob'); setButtonBusy(button, true, '실행 중…');
-      const stages = ['PCD 읽는 중', '높이 필터링', '격자화', 'PGM · YAML 저장'];
-      for (let i = 0; i < stages.length; i += 1) {
-        $('#jobStage').textContent = stages[i];
-        $('#pgmProgress').style.width = `${(i + 1) * 25}%`;
-        addLog('INFO', 'pcd2pgm', stages[i]);
-        await wait(650);
-      }
-      const step = state.mappingSteps.find((item) => item.key === 'pcd2pgm');
-      step.status = 'done';
-      const map = state.maps.find((item) => item.name === state.activeMap);
-      if (map) map.hasPgm = true;
-      $('#pgmAssetText').textContent = `${state.activeMap}.pgm · 412 × 380 · 0.05 m`;
-      renderMappingSteps(); setButtonBusy(button, false);
-      toast('2D 맵 변환이 완료되었습니다', 'PGM과 YAML을 원자적으로 저장했습니다.', 'success');
-    });
+    $('#runPgmJob').addEventListener('click', (event) => runAssetJob({
+      button: event.currentTarget,
+      stepKey: 'pcd2pgm',
+      label: 'pcd2pgm',
+      run: (api) => api.runPcd2Pgm({
+        map: state.activeMap,
+        resolution: Number($('#pgmResolution').value),
+        min_points: Number($('#pgmMinPoints').value),
+        z_min: Number($('#pgmZMin').value),
+        z_max: Number($('#pgmZMax').value),
+      }),
+      done: '2D 맵 변환이 완료되었습니다',
+    }));
   }
 
-  async function buildScDb() {
-    if (state.profile === 'A') {
-      toast('방식 A에서는 생략됩니다', 'Scan Context DB는 방식 B/C에 필요합니다.');
-      return;
+  /**
+   * 자산 생성 작업(pcd2pgm / fpfh_map_builder)의 공통 실행기.
+   *
+   * 진행률을 만들어내지 않는다. 두 스크립트 모두 퍼센트를 내지 않으므로,
+   * **실제 stdout 줄**을 그대로 흘린다. 목업 시절의 25%→50%→75% 막대는
+   * 아무것도 뜻하지 않는 애니메이션이었다.
+   */
+  async function runAssetJob({ button, stepKey, label, run, done }) {
+    const api = requireCmd();
+    if (!api) return;
+    const logNode = $('#jobLog');
+    if (logNode) logNode.textContent = '';
+    setButtonBusy(button, true, '실행 중…');
+    markStep(stepKey, 'running'); renderMappingSteps();
+
+    const append = (line) => {
+      addLog('INFO', label, line);
+      if (!logNode) return;
+      logNode.textContent += (logNode.textContent ? '\n' : '') + line;
+      logNode.scrollTop = logNode.scrollHeight;
+    };
+
+    try {
+      const started = await run(api);
+      const result = await api.followJob(started.id, { onLine: append });
+      if (result.state === 'succeeded') {
+        markStep(stepKey, 'done');
+        toast(done, 'map_manager 가 자산 상태를 갱신합니다.', 'success');
+      } else {
+        markStep(stepKey, 'failed');
+        toast('작업이 실패했습니다', `${label} · 종료 코드 ${result.returncode}`, 'error');
+      }
+    } catch (error) {
+      markStep(stepKey, 'failed');
+      if (error?.status === undefined) toast('작업 실패', String(error), 'error');
+    } finally {
+      renderMappingSteps();
+      setButtonBusy(button, false);
     }
-    if (!state.mappingSaved) {
+  }
+
+  function buildFpfhDb() {
+    if (!hasCloudAsset()) {
       toast('PCD가 필요합니다', '먼저 3D 맵을 저장하세요.', 'warning');
       return;
     }
-    const button = $('#buildScDb'); setButtonBusy(button, true, '생성 중…');
-    const step = state.mappingSteps.find((item) => item.key === 'sc_db');
-    step.status = 'running'; renderMappingSteps();
-    addLog('INFO', 'sc_build_db', 'Building descriptors: ring=20 sector=60 radius=10.0m.');
-    await wait(2100);
-    step.status = 'done';
-    const map = state.maps.find((item) => item.name === state.activeMap);
-    if (map) map.hasScDb = true;
-    $('#scAssetText').textContent = 'sc_db.npz · 312 keyframes · selftest 95%';
-    addLog('INFO', 'sc_build_db', 'Self-test success: 19/20.');
-    renderMappingSteps(); setButtonBusy(button, false);
-    toast('Scan Context DB를 생성했습니다', '312 keyframes · selftest 95%', 'success');
+    return runAssetJob({
+      button: $('#buildFpfhDb'),
+      stepKey: 'fpfh_db',
+      label: 'fpfh_map_builder',
+      run: (api) => api.runFpfh({ map: state.activeMap }),
+      done: 'FPFH 측위 DB를 생성했습니다',
+    });
+  }
+
+  /** 활성 맵에 cloud.pcd 가 실제로 있는가 (map_manager 가 본 사실 기준). */
+  function hasCloudAsset() {
+    const entry = state.maps.find((map) => map.name === state.activeMap);
+    return Boolean(entry?.assets?.find((a) => a.kind === 'cloud' && a.present));
   }
 
   function openMapManager() {
-    const rows = state.maps.map((map) => `
-      <div class="map-manager-item"><div><strong>${esc(map.name)} · revision ${esc(map.revision)}</strong><small>PCD hash ${esc(map.hash)}… · ${esc(map.date)}</small><span>${map.hasPcd ? '<b class="cap">PCD</b>' : ''}${map.hasPgm ? '<b class="cap">PGM</b>' : ''}${map.hasScDb ? '<b class="cap">SC DB</b>' : ''}</span></div><button class="small-button" data-use-map="${esc(map.name)}">사용</button></div>`).join('');
     openModal(`
       <div class="modal-head"><div><p class="section-kicker">MAP ASSETS</p><h2>맵 자산 관리</h2></div><button class="close-button" data-close-modal>×</button></div>
-      <div class="map-manager-list">${rows}</div>
-      <p class="modal-copy">PGM과 SC DB는 부모 PCD의 hash와 revision이 일치할 때만 사용할 수 있습니다.</p>
+      <div id="mapManagerBody">${mapManagerBody()}</div>
+      <p class="modal-copy">각 자산은 부모 <b>cloud.pcd</b>와 짝이 맞을 때만 사용할 수 있습니다. 2D 맵은 <code>pcd2pgm</code>, 측위 DB는 <code>fpfh_map_builder</code>가 만듭니다.<br>
+      <b>활성</b>으로 지정하면 로봇의 <code>maps/active.yaml</code>이 바뀝니다. 이미 실행 중인 노드에는 다음 기동부터 반영됩니다.</p>
       <div class="modal-actions"><button class="secondary-button" data-close-modal>닫기</button><button class="primary-button" id="openNewMapForm">＋ 새 맵 만들기</button></div>`);
-    $$('[data-use-map]', $('#modal')).forEach((button) => button.addEventListener('click', () => {
-      state.activeMap = button.dataset.useMap;
-      const map = state.maps.find((item) => item.name === state.activeMap);
-      state.mapRevision = map ? map.revision : 1;
-      $('#navMapTitle').textContent = `${state.activeMap} · revision ${state.mapRevision}`;
-      closeModal(); renderGlobal();
-      toast('활성 맵을 변경했습니다', state.activeMap, 'success');
-    }));
     $('#openNewMapForm').addEventListener('click', openNewMapModal);
+
+    // 위임 바인딩 — 목록은 인벤토리가 올 때마다 통째로 다시 그려지므로
+    // 버튼마다 붙이면 갱신 때마다 다시 붙여야 한다.
+    $('#mapManagerBody').addEventListener('click', async (event) => {
+      const button = event.target.closest('[data-activate]');
+      if (!button) return;
+      setButtonBusy(button, true, '전환 중…');
+      try {
+        await changeActiveMap(button.dataset.activate);
+      } finally {
+        setButtonBusy(button, false);
+        refreshMapManager();
+      }
+    });
+  }
+
+  /** 모달이 열려 있으면 목록을 최신 인벤토리로 다시 그린다. */
+  function refreshMapManager() {
+    const node = $('#mapManagerBody');
+    if (node) node.innerHTML = mapManagerBody();
+  }
+
+  function mapManagerBody() {
+    // 받기 전(null)과 진짜로 맵이 없는 것(빈 배열)은 다른 상태다 — 섞지 않는다.
+    if (state.mapInventory === null) {
+      return '<p class="modal-copy">맵 목록을 읽는 중입니다… (map_manager 미연결)</p>';
+    }
+    if (state.maps.length === 0) {
+      return '<p class="modal-copy">maps/ 에 맵이 없습니다. SLAM으로 첫 맵을 만드세요.</p>';
+    }
+    return `<div class="map-manager-list">${state.maps.map(mapManagerRow).join('')}</div>`;
+  }
+
+  const ASSET_LABEL = { cloud: '3D', grid: '2D', fpfh: 'FPFH' };
+
+  /** 맵 한 줄. 자산 뱃지는 실제 파일 상태 그대로 — present/stale 을 구분해 보여준다. */
+  function mapManagerRow(map) {
+    const badges = (map.assets || []).map((asset) => {
+      const label = ASSET_LABEL[asset.kind] || asset.kind;
+      if (!asset.present) return `<b class="cap missing" title="없음">${esc(label)}</b>`;
+      if (asset.stale) return `<b class="cap stale" title="${esc(asset.issue)}">${esc(label)} ⚠</b>`;
+      return `<b class="cap" title="${esc(asset.detail)}">${esc(label)}</b>`;
+    }).join('');
+    const status = map.complete
+      ? '<span class="map-status ok">완성</span>'
+      : '<span class="map-status pending">미완성</span>';
+    const active = map.active ? '<span class="map-status active">활성</span>' : '';
+    const subtitle = [map.created, map.notes].filter(Boolean).join(' · ') || map.path;
+
+    // 매핑 중에는 못 바꾼다 — 어느 폴더에 쌓이는지 헷갈리게 만들지 않는다.
+    // 이 탭에서 시작했는지(systemState)가 아니라 **서버가 보는 프로세스**를
+    // 기준으로 판단한다. CLI 나 다른 브라우저가 띄웠어도 매핑은 매핑이다.
+    const mapping = state.systemState === 'MAPPING' || state.slamRunning === true;
+    const action = map.active
+      ? '<button class="ghost-button" disabled>활성</button>'
+      : `<button class="ghost-button" data-activate="${esc(map.name)}"${mapping ? ' disabled' : ''}
+           title="${mapping ? '매핑 중에는 바꿀 수 없습니다' : 'maps/active.yaml 을 이 맵으로 바꿉니다'}">활성으로</button>`;
+
+    return `<div class="map-manager-item${map.active ? ' is-active' : ''}"><div>
+      <strong>${esc(map.label || map.name)} ${status}${active}</strong>
+      <small>${esc(map.name)} — ${esc(subtitle)}</small>
+      <span>${badges}</span></div>${action}</div>`;
   }
 
   function renderMapOptions() {
-    $('#settingsMapSelect').innerHTML = state.maps.map((map) => `<option value="${esc(map.name)}">${esc(map.name)}</option>`).join('');
-    $('#settingsMapSelect').value = state.activeMap;
+    const select = $('#settingsMapSelect');
+    const names = state.maps.length ? state.maps : [{ name: state.activeMap }];
+    select.innerHTML = names.map((map) => `<option value="${esc(map.name)}">${esc(map.name)}</option>`).join('');
+    select.value = state.activeMap;
+    // 매핑 중에는 활성 맵을 바꾸지 못하게 한다 — 저장 대상이 도중에 바뀌면
+    // 어느 폴더에 쌓이는지가 모호해진다.
+    const busy = state.systemState === 'MAPPING';
+    select.disabled = busy || !state.maps.length;
+    select.title = busy
+      ? '매핑 중에는 활성 맵을 바꿀 수 없습니다'
+      : '로봇의 maps/active.yaml 을 바꿉니다';
+    // 맵 관리 모달이 열려 있으면 같이 갱신한다. 새 맵을 만들거나 자산이
+    // 생겼을 때 모달을 닫았다 다시 열게 만들지 않기 위함이다.
+    refreshMapManager();
+  }
+
+  /** 활성 맵 전환. 이미 떠 있는 launch 에는 반영되지 않는다(다음 기동부터). */
+  async function changeActiveMap(name) {
+    const api = requireCmd();
+    if (!api) { renderMapOptions(); return false; }
+    try {
+      const result = await api.setActiveMap(name);
+      // ⚠ 누적 점군을 반드시 지운다. 안 지우면 이전 맵에서 쌓인 점군이 남은 채로
+      // 새 맵 이름이 표시되어, 화면이 "이 맵은 이렇게 생겼다"고 거짓말한다.
+      // (실제로 집에서 매핑한 점군이 alm_lab 을 고른 뒤에도 그대로 떠 있었다)
+      window.ALM_RENDERER3D?.resetAccumulation();
+      addLog('INFO', 'alm_web_backend', `활성 맵 → ${name}`);
+      // 저장 목적지가 어디로 옮겨갔는지 로그에 남긴다. SLAM 실행 중이라 안
+      // 옮겨간 경우도 있으므로, 지어내지 말고 서버가 준 값을 그대로 쓴다.
+      if (result?.mapping_target) {
+        addLog('INFO', 'alm_web_backend', `매핑 저장 위치 → ${result.mapping_target}`);
+      }
+      toast('활성 맵을 바꿨습니다',
+        result?.note || '이미 실행 중인 노드에는 다음 기동부터 반영됩니다.', 'success');
+      return true;
+    } catch {
+      renderMapOptions();   // 실패했으면 서버 값으로 되돌린다
+      return false;
+    }
   }
 
   function openNewMapModal() {
@@ -405,34 +822,43 @@
     }
     openModal(`
       <div class="modal-head"><div><p class="section-kicker">NEW MAP</p><h2>새 맵 만들기</h2></div><button class="close-button" data-close-modal>×</button></div>
-      <div class="modal-body"><p class="modal-copy">새 이름으로 빈 맵을 만들고 바로 활성화합니다. SLAM을 시작하면 이 이름으로 PCD가 저장됩니다.</p>
+      <div class="modal-body"><p class="modal-copy">로봇에 <code>maps/&lt;이름&gt;/</code> 폴더와 <code>manifest.yaml</code>을 만들고, SLAM으로 그 안에 <code>cloud.pcd</code>를 채웁니다.</p>
       <label class="modal-field"><span>맵 이름</span><input id="newMapName" autocomplete="off" placeholder="예: warehouse_b" /></label>
+      <label class="modal-field"><span>표시 이름 (선택)</span><input id="newMapLabel" autocomplete="off" placeholder="예: B동 창고 1층" /></label>
       <p class="modal-copy text-danger hidden" id="newMapError"></p></div>
       <div class="modal-actions"><button class="secondary-button" data-close-modal>취소</button><button class="primary-button" id="confirmNewMap">만들기</button></div>`);
     $('#newMapName').focus();
-    $('#confirmNewMap').addEventListener('click', () => {
+    $('#confirmNewMap').addEventListener('click', async (event) => {
       const raw = $('#newMapName').value.trim();
       const errorEl = $('#newMapError');
-      if (!/^[a-zA-Z0-9_-]{2,32}$/.test(raw)) {
-        errorEl.textContent = '영문·숫자·_·- 조합 2~32자로 입력하세요.';
+      const fail = (text) => {
+        errorEl.textContent = text;
         errorEl.classList.remove('hidden');
+      };
+      // 서버도 같은 규칙으로 다시 검사한다. 여기 검사는 왕복을 아끼는 용도지
+      // 신뢰 경계가 아니다.
+      if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{1,31}$/.test(raw)) {
+        fail('영문·숫자로 시작하고 영문·숫자·_·- 조합 2~32자로 입력하세요.');
         return;
       }
       if (state.maps.some((map) => map.name.toLowerCase() === raw.toLowerCase())) {
-        errorEl.textContent = '이미 존재하는 맵 이름입니다.';
-        errorEl.classList.remove('hidden');
+        fail('이미 존재하는 맵 이름입니다.');
         return;
       }
-      state.maps.push({ name: raw, revision: 1, hash: Math.random().toString(16).slice(2, 6), date: nowTime(), hasPcd: false, hasPgm: false, hasScDb: false });
-      state.activeMap = raw; state.mapRevision = 1; state.mappingSaved = false;
-      resetMappingSteps();
-      $('#pcdAssetText').textContent = '아직 저장되지 않음';
-      $('#pgmAssetText').textContent = 'resolution 0.05 m';
-      $('#scAssetText').textContent = 'B/C 자동 측위용';
-      $('#navMapTitle').textContent = `${raw} · revision 1`;
-      renderMapOptions();
-      closeModal(); renderGlobal(); renderLocalization();
-      toast('새 맵을 만들었습니다', `${raw} · 활성 맵으로 전환됨`, 'success');
+      const api = requireCmd();
+      if (!api) return;
+      setButtonBusy(event.currentTarget, true, '만드는 중…');
+      try {
+        await api.createMap(raw, $('#newMapLabel').value.trim(), '');
+        // state.maps 를 여기서 건드리지 않는다. 목록은 오직 map_manager 가
+        // 파일시스템에서 본 것만 담는다 — 밀어 넣으면 화면이 다시 거짓말한다.
+        closeModal();
+        toast('맵 폴더를 만들었습니다', `${raw} · 목록은 곧 갱신됩니다`, 'success');
+      } catch (error) {
+        fail(error.message);
+      } finally {
+        setButtonBusy(event.currentTarget, false);
+      }
     });
   }
 
@@ -509,7 +935,7 @@
     if (loc.state === 'IDLE') {
       chip.classList.add('idle'); chip.textContent = '대기';
       $('#localizationTitle').textContent = '초기위치가 필요합니다';
-      $('#localizationDetail').textContent = `방식 ${state.profile} · ${state.profile === 'A' ? '수동 지정' : 'Scan Context 자동 초기화 가능'}`;
+      $('#localizationDetail').textContent = 'FPFH + TEASER++ 자동 초기화 가능';
     } else if (loc.state === 'ACCUMULATING') {
       chip.classList.add('running'); chip.textContent = '누적 중';
       $('#localizationTitle').textContent = '라이다 프레임 누적 중';
@@ -518,9 +944,9 @@
       $('#localizationProgressBar').style.width = `${loc.frame * 10}%`;
     } else if (loc.state === 'MATCHING') {
       chip.classList.add('running'); chip.textContent = '매칭';
-      $('#localizationTitle').textContent = 'Scan Context 후보 탐색';
-      $('#localizationDetail').textContent = '상위 5개 후보를 계산하고 있습니다.';
-      $('#localizationProgressText').textContent = 'Descriptor matching';
+      $('#localizationTitle').textContent = 'FPFH 대응점 탐색';
+      $('#localizationDetail').textContent = 'mutual + ratio 검증을 통과한 대응점을 모으고 있습니다.';
+      $('#localizationProgressText').textContent = 'FPFH correspondence matching';
       $('#localizationProgressBar').style.width = '62%';
     } else if (loc.state === 'WAITING_ICP') {
       chip.classList.add('warning'); chip.textContent = 'ICP';
@@ -540,16 +966,11 @@
     $('#fitnessText').textContent = loc.fitness == null ? '—' : loc.fitness.toFixed(3);
     $('#poseText').textContent = loc.pose ? `${loc.pose.x.toFixed(2)}, ${loc.pose.y.toFixed(2)}, ${loc.pose.yaw}°` : '미확정';
     $('#confidenceText').textContent = loc.state === 'CONVERGED' ? '높음' : '—';
-    $('#localizationModeText').textContent = state.profile === 'A' ? 'Manual' : 'Scan Context';
+    $('#localizationModeText').textContent = 'FPFH + TEASER++';
   }
 
   async function autoLocalization() {
     if (!canOperate()) return;
-    if (state.profile === 'A') {
-      toast('방식 A는 수동 초기위치를 사용합니다', '맵에서 위치와 방향을 지정하세요.', 'warning');
-      manualInitialPose();
-      return;
-    }
     if (state.systemState !== 'IDLE') {
       toast('측위를 시작할 수 없습니다', '현재 작업을 먼저 종료하세요.', 'warning');
       return;
@@ -558,7 +979,7 @@
     state.localization = { state: 'ACCUMULATING', frame: 0, fitness: null, pose: null };
     $('#candidateLayer').classList.remove('hidden-layer');
     renderLocalization(); renderGlobal();
-    addLog('INFO', 'sc_localizer', 'Relocalization requested. Accumulating 10 frames.');
+    addLog('INFO', 'teaser_fpfh_localizer', 'Relocalization requested. Accumulating 10 frames.');
     for (let frame = 1; frame <= 10; frame += 1) {
       await wait(180);
       if (state.localization.state !== 'ACCUMULATING') return;
@@ -568,7 +989,7 @@
     state.localization.state = 'WAITING_ICP';
     $('#candidateLayer').innerHTML = [[280,220],[410,265],[550,350],[620,235],[700,420]].map(([x,y], index) => `<circle cx="${x}" cy="${y}" r="${12-index}" fill="#8c61ff" opacity="${0.85-index*0.1}"/>`).join('');
     renderLocalization(); await wait(1300);
-    completeLocalization('scan_context');
+    completeLocalization('fpfh_teaser');
   }
 
   function completeLocalization(mode) {
@@ -579,7 +1000,7 @@
     $('#candidateLayer').classList.add('hidden-layer');
     renderLocalization(); renderGlobal();
     addAlarm('info', '초기위치 확정', `ICP fitness ${state.localization.fitness.toFixed(3)}`);
-    addLog('INFO', 'sc_localizer', `Localization converged. mode=${mode} fitness=${state.localization.fitness.toFixed(3)}`);
+    addLog('INFO', 'teaser_fpfh_localizer', `Localization converged. mode=${mode} fitness=${state.localization.fitness.toFixed(3)}`);
     toast('초기위치가 확정되었습니다', `Fitness ${state.localization.fitness.toFixed(3)}`, 'success');
   }
 
@@ -598,7 +1019,7 @@
     }
     state.localization = { state: 'IDLE', frame: 0, fitness: null, pose: null };
     renderLocalization();
-    state.profile === 'A' ? manualInitialPose() : autoLocalization();
+    autoLocalization();
   }
 
   function renderNavigation() {
@@ -746,16 +1167,66 @@
     toast('수동주행을 종료했습니다', '모터 명령 출력을 비활성화했습니다.');
   }
 
+  /**
+   * 속도 한계. command_manager 의 실제 파라미터를 받아 두고 쓴다.
+   *
+   * 예전에는 0.45 / -0.15 / 0.8 / 0.3 이 여기 하드코딩돼 있었다. 지금은 우연히
+   * 값이 맞을 뿐이라, 로봇 쪽만 바꾸면 화면이 조용히 어긋난다. 서버가 주기 전
+   * 기본값은 남겨 두되(초기 렌더용), 받으면 덮는다.
+   */
+  const limits = { max_linear_x: 0.45, min_linear_x: -0.15, max_linear_y: 0.30, max_angular_z: 0.8 };
+
+  function applyLimits(next) {
+    Object.assign(limits, next || {});
+    $('#limitForward').textContent = `${limits.max_linear_x.toFixed(2)} m/s`;
+    $('#limitReverse').textContent = `${limits.min_linear_x.toFixed(2)} m/s`;
+    $('#limitLateral').textContent = `${limits.max_linear_y.toFixed(2)} m/s`;
+    $('#limitAngular').textContent = `${limits.max_angular_z.toFixed(2)} rad/s`;
+    if (typeof next?.cmd_timeout_sec === 'number') {
+      $('#limitCmdTimeout').textContent = `${next.cmd_timeout_sec.toFixed(2)} s`;
+    }
+    renderManual();
+  }
+
+  /**
+   * 라이다 점군의 출처를 화면에 반영한다 (/api/health 의 lidar_source).
+   *
+   * 재생본과 실측이 같은 토픽으로 흐르기 때문에 화면만 봐서는 구분이 안 된다.
+   * 실제로 집에서 랩실 맵 재생본을 실시간 스캔으로 오인한 적이 있다. 발행 노드
+   * 이름은 백엔드만 알 수 있어서(브리지의 connectionGraph 는 빈 값만 준다)
+   * 여기서 받아 띄운다.
+   */
+  function setLidarSource(info) {
+    const banner = $('#replayBanner');
+    if (!banner) return;
+    // null = 조회 실패. '재생 아님'과 섞지 않는다 — 모르면 배너를 건드리지 않는다.
+    if (!info || info.replay === null || info.replay === undefined) return;
+
+    const replay = info.replay === true;
+    if (replay === state.lidarReplay) return;   // 상태가 그대로면 로그도 안 남긴다
+    state.lidarReplay = replay;
+    banner.hidden = !replay;
+    if (replay) {
+      const who = (info.publishers || []).join(', ') || '알 수 없음';
+      addLog('WARN', 'alm_web_backend',
+        `${info.topic} 이 재생본입니다 (발행: ${who}) — 센서 출력이 아닙니다`);
+    } else {
+      addLog('INFO', 'alm_web_backend',
+        `${info.topic} 실측 발행 확인 (${(info.publishers || []).join(', ') || '없음'})`);
+    }
+  }
+
   function commandFor(name) {
     const factor = state.manual.multiplier;
     const mode = state.manual.mode;
     if (name === 'stop') return { x: 0, y: 0, z: 0 };
-    if (mode === 'spin') return { x: 0, y: 0, z: name === 'left' ? 0.8 * factor : name === 'right' ? -0.8 * factor : 0 };
+    const wz = limits.max_angular_z;
+    if (mode === 'spin') return { x: 0, y: 0, z: name === 'left' ? wz * factor : name === 'right' ? -wz * factor : 0 };
     if (mode === 'normal' || mode === 'auto') {
-      if (name === 'forward') return { x: 0.45 * factor, y: 0, z: 0 };
-      if (name === 'reverse') return { x: -0.15 * factor, y: 0, z: 0 };
-      if (name === 'left') return { x: 0, y: 0, z: 0.8 * factor };
-      if (name === 'right') return { x: 0, y: 0, z: -0.8 * factor };
+      if (name === 'forward') return { x: limits.max_linear_x * factor, y: 0, z: 0 };
+      if (name === 'reverse') return { x: limits.min_linear_x * factor, y: 0, z: 0 };
+      if (name === 'left') return { x: 0, y: 0, z: wz * factor };
+      if (name === 'right') return { x: 0, y: 0, z: -wz * factor };
     }
     return { x: 0, y: 0, z: 0 };
   }
@@ -862,7 +1333,7 @@
     const snapshot = {
       generated_at: new Date().toISOString(),
       system_state: state.systemState,
-      profile: state.profile,
+      pipeline: 'fpfh_teaser',
       active_map: state.activeMap,
       estop: state.estop,
       localization: state.localization,
@@ -920,6 +1391,13 @@
   }
 
   function openSettings() {
+    const api = cmd();
+    if (api) {
+      $('#backendUrl').value = api.base;
+      // 토큰은 되보여주지 않는다. 있으면 있다고만 표시한다.
+      $('#backendToken').value = '';
+      $('#backendToken').placeholder = api.hasToken() ? '저장됨 (바꾸려면 새로 입력)' : '토큰을 입력하세요';
+    }
     $('#settingsDrawer').classList.add('open');
     $('#drawerBackdrop').classList.remove('hidden');
   }
@@ -932,15 +1410,17 @@
     if (state.systemState !== 'IDLE') {
       toast('설정을 변경할 수 없습니다', '실행 중인 워크플로를 먼저 종료하세요.', 'warning'); return;
     }
-    const active = $('#profileCards button.active');
-    state.profile = active?.dataset.profile || state.profile;
-    state.activeMap = $('#settingsMapSelect').value;
-    const map = state.maps.find((item) => item.name === state.activeMap);
-    state.mapRevision = map ? map.revision : 1;
-    resetMappingSteps(); renderGlobal(); renderLocalization();
-    $('#navMapTitle').textContent = `${state.activeMap} · revision ${state.mapRevision}`;
+    // 활성 맵 전환은 select 의 change 에서 즉시 서버로 나간다.
+    // 여기서 저장하는 것은 접속 정보(백엔드 주소·토큰)뿐이다.
+    const api = cmd();
+    if (api) {
+      const url = $('#backendUrl').value.trim();
+      const token = $('#backendToken').value.trim();
+      if (url && url !== api.base) api.setBaseUrl(url);
+      if (token) api.setToken(token);
+    }
     closeSettings();
-    toast('설정을 저장했습니다', `방식 ${state.profile} · ${state.activeMap}`, 'success');
+    toast('설정을 저장했습니다', '접속 정보는 이 탭에서만 유지됩니다(sessionStorage).', 'success');
   }
 
   function bindEvents() {
@@ -956,13 +1436,9 @@
     $('#stopMapping').addEventListener('click', stopMapping);
     $('#savePcd').addEventListener('click', savePcd);
     $('#openPcd2Pgm').addEventListener('click', openPcd2Pgm);
-    $('#buildScDb').addEventListener('click', buildScDb);
+    $('#buildFpfhDb').addEventListener('click', buildFpfhDb);
     $('#openMapManager').addEventListener('click', openMapManager);
     $('#newMapButton').addEventListener('click', openNewMapModal);
-    $('#mappingProfile').addEventListener('change', (event) => {
-      if (state.systemState !== 'IDLE') { event.target.value = state.profile; toast('실행 중에는 프로필을 바꿀 수 없습니다', '', 'warning'); return; }
-      state.profile = event.target.value; resetMappingSteps(); renderGlobal(); renderLocalization();
-    });
     $('#clearLogs').addEventListener('click', () => { state.logs = []; renderLogs(); });
     $('#logLevel').addEventListener('change', renderLogs);
     $('#reset3d').addEventListener('click', () => toast('3D 카메라를 초기화했습니다'));
@@ -1025,13 +1501,22 @@
     $('#openSettings').addEventListener('click', openSettings);
     $('#closeSettings').addEventListener('click', closeSettings);
     $('#drawerBackdrop').addEventListener('click', closeSettings);
-    $('#profileCards').addEventListener('click', (event) => {
-      const button = event.target.closest('button[data-profile]'); if (!button) return;
-      $$('#profileCards button').forEach((item) => item.classList.toggle('active', item === button));
-    });
+    $('#settingsMapSelect').addEventListener('change', (event) => changeActiveMap(event.target.value));
     $('#testConnection').addEventListener('click', async (event) => {
-      setButtonBusy(event.currentTarget, true, '테스트 중…'); await wait(850); setButtonBusy(event.currentTarget, false);
-      toast('연결 테스트 성공', 'Backend 18 ms · Foxglove 24 ms · MCU online', 'success');
+      const api = cmd();
+      setButtonBusy(event.currentTarget, true, '테스트 중…');
+      const started = performance.now();
+      try {
+        const health = await api.health();
+        const ms = Math.round(performance.now() - started);
+        toast('연결 테스트 성공',
+          `백엔드 ${ms} ms · 활성 맵 ${health.active_map} · /map_save ${health.map_save_available ? '가능' : '미기동'}`,
+          'success');
+      } catch (error) {
+        toast('연결 테스트 실패', error.message, 'error');
+      } finally {
+        setButtonBusy(event.currentTarget, false);
+      }
     });
     $('#saveSettings').addEventListener('click', saveSettings);
     window.addEventListener('resize', drawSystemChart);
@@ -1082,6 +1567,14 @@
     esc,
     renderGlobal, renderMetrics, renderManual, renderLocalization,
     renderNavigation, renderAlarms, renderLogs, drawSystemChart,
-    addLog, addAlarm, toast,
+    // /alm/map_inventory 가 이미 만들어진 자산의 단계를 done 으로 접을 때 쓴다
+    renderMappingSteps, renderMapOptions,
+    // 서버가 본 slam 프로세스 상태 변화 (다른 경로로 시작·종료된 매핑)
+    onSlamRunningChange,
+    addLog, addAlarm, toast, openSettings,
+    // command_manager 의 실제 속도 한계를 받아 하드코딩을 덮는다
+    applyLimits,
+    // 점군이 실측인지 재생본인지 (health 폴링이 3초마다 넣어준다)
+    setLidarSource,
   };
 })();
