@@ -17,6 +17,7 @@ install(
   PROGRAMS
     scripts/jetson_stats_publisher.py
     scripts/fake_mcu.py
+    scripts/voice_announcer.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

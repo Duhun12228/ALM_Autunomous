@@ -20,8 +20,11 @@
   <exec_depend>rclpy</exec_depend>
   <exec_depend>nav_msgs</exec_depend>
   <exec_depend>geometry_msgs</exec_depend>
-  <!-- WebUI 읽기 전용 연동용 텔레메트리 브리지 -->
+  <!-- voice_announcer 가 /emergency_stop (Bool) 을 직접 구독한다 -->
+  <exec_depend>std_msgs</exec_depend>
+  <!-- WebUI 읽기: 텔레메트리 브리지 / 쓰기: 명령 백엔드 -->
   <exec_depend>foxglove_bridge</exec_depend>
+  <exec_depend>alm_web_backend</exec_depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>

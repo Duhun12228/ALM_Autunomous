@@ -10,9 +10,11 @@
 Livox MID-360 UDP 직접 파싱
   -> /livox/lidar, /livox/imu, /scan
 FAST-LIO2 매핑
-  -> alm_3d_map.pcd
+  -> maps/<맵이름>/cloud.pcd
 pcd2pgm
-  -> alm_map.pgm/yaml
+  -> maps/<맵이름>/grid.pgm + grid.yaml
+fpfh_map_builder
+  -> maps/<맵이름>/fpfh_map*  (FPFH+TEASER++ 초기측위 DB)
 FAST-LIO-Localization
   -> map->odom, odom->base_link, /Odometry
 Nav2
@@ -92,7 +94,7 @@ ros2 service call /map_save std_srvs/srv/Trigger
 기본 저장 경로:
 
 ```text
-~/ALM_Autunomous/ALM_auto_ws/src/alm_navigation/maps/alm_3d_map.pcd
+~/ALM_Autunomous/ALM_auto_ws/src/alm_navigation/maps/alm_lab/cloud.pcd
 ```
 
 PCD는 대용량 로컬 산출물이므로 `.gitignore`에서 제외됩니다.
@@ -104,11 +106,11 @@ FAST-LIO가 만든 PCD를 `pcd2pgm.py`로 변환합니다.
 
 ```bash
 WS=~/ALM_Autunomous/ALM_auto_ws
-MAPS=$WS/src/alm_navigation/maps
+MAP=$WS/src/alm_navigation/maps/alm_lab      # 맵 하나 = 폴더 하나
 
 ros2 run alm_navigation pcd2pgm.py \
-  --pcd $MAPS/alm_3d_map.pcd \
-  --out $MAPS/alm_map \
+  --pcd $MAP/cloud.pcd \
+  --out $MAP/grid \
   --resolution 0.05 \
   --z-min 0.3 \
   --z-max 0.8
@@ -117,8 +119,8 @@ ros2 run alm_navigation pcd2pgm.py \
 출력:
 
 ```text
-alm_map.pgm
-alm_map.yaml
+maps/alm_lab/grid.pgm
+maps/alm_lab/grid.yaml
 ```
 
 `pcd2pgm.py`가 출력하는 z 분포를 보고 벽/장애물만 잡히도록
@@ -128,16 +130,16 @@ alm_map.yaml
 
 ```bash
 WS=~/ALM_Autunomous/ALM_auto_ws
-MAPS=$WS/src/alm_navigation/maps
 
 ros2 launch alm_sensors lidar.launch.py
-ros2 launch alm_navigation localization.launch.py map_pcd:=$MAPS/alm_3d_map.pcd
+# 인자를 비우면 maps/active.yaml 이 가리키는 맵을 자동으로 쓴다
+ros2 launch alm_navigation localization.launch.py
 ```
 
 2D 맵을 RViz에 함께 띄워 확인:
 
 ```bash
-ros2 run alm_navigation map_publisher.py --ros-args -p yaml:=$MAPS/alm_map.yaml
+ros2 run alm_navigation map_publisher.py --ros-args -p yaml:=$WS/src/alm_navigation/maps/alm_lab/grid.yaml
 rviz2 -d $WS/install/alm_navigation/share/alm_navigation/rviz/localization.rviz
 ```
 
@@ -148,12 +150,19 @@ rviz2 -d $WS/install/alm_navigation/share/alm_navigation/rviz/localization.rviz
 ## 5. 자율주행
 
 ```bash
-WS=~/ALM_Autunomous/ALM_auto_ws
-MAPS=$WS/src/alm_navigation/maps
+# 인자 없이 실행하면 maps/active.yaml 이 가리키는 맵을 쓴다
+ros2 launch alm_bringup navigation.launch.py
+```
+
+다른 맵을 쓰려면 `maps/active.yaml` 의 `active:` 를 바꾸거나 인자로 덮어씁니다:
+
+```bash
+MAP=~/ALM_Autunomous/ALM_auto_ws/src/alm_navigation/maps/<맵이름>
 
 ros2 launch alm_bringup navigation.launch.py \
-  map:=$MAPS/alm_map.yaml \
-  map_pcd:=$MAPS/alm_3d_map.pcd
+  map:=$MAP/grid.yaml \
+  map_pcd:=$MAP/cloud.pcd \
+  fpfh_db_prefix:=$MAP/fpfh_map
 ```
 
 이 launch는 다음을 함께 올립니다.
@@ -184,6 +193,41 @@ ros2 topic pub /drive_mode std_msgs/msg/String "{data: 'auto'}" -1
 
 실제로 적용된 모드는 `/drive_mode/effective`에서 확인합니다.
 
+## 6-1. WebUI 관제 콘솔
+
+```bash
+# 1) 명령 경로용 토큰 (없으면 백엔드가 기동을 거부합니다)
+export ALM_WEB_TOKEN=$(openssl rand -hex 16)
+echo $ALM_WEB_TOKEN          # 브라우저 설정에 넣을 값
+
+# 2) 스택 (읽기 브리지 + 쓰기 백엔드 + 더미 센서/MCU)
+ros2 launch alm_bringup webui_dev.launch.py
+
+# 3) 정적 파일 서버
+cd alm-webui-v0.6 && npm run build && npm run serve   # :8080
+```
+
+브라우저에서 `http://<젯슨IP>:8080` → **설정** 드로어에 백엔드 주소(`http://<젯슨IP>:8081`)와
+토큰을 넣습니다. 토큰은 `sessionStorage` 라 탭을 닫으면 지워집니다.
+
+포트가 둘인 이유 — **읽기와 쓰기가 서로 다른 경로**입니다.
+
+| 포트 | 프로세스 | 방향 | 인증 |
+|---|---|---|---|
+| 8765 | `foxglove_bridge` | 로봇 → 브라우저 (구독 전용) | 없음. 대신 발행·서비스 호출 능력 자체가 빠져 있음 |
+| 8081 | `alm_web_backend` | 브라우저 → 로봇 (명령) | Bearer 토큰 + 웹 제어권 락 |
+
+조작을 하려면 HUD의 **제어권** 버튼으로 락을 잡아야 합니다. 한 번에 한 명만 잡을 수 있고,
+브라우저가 죽으면 15초 뒤 자동으로 풀립니다. **E-STOP 만 예외**로 락 없이 누를 수 있습니다.
+
+⚠ **E-STOP 은 래치입니다.** 토픽으로 `false` 를 보내도 안 풀리고, 해제는 서비스로만 됩니다.
+
+```bash
+ros2 service call /emergency_stop/release alm_msgs/srv/ReleaseEstop "{reason: 'manual'}"
+```
+
+MCU 가 fault/estop 을 보고하는 동안에는 해제가 **거부**됩니다 — 물리 조건을 먼저 푸세요.
+
 ## 7. 자주 보는 문제
 
 | 증상 | 확인 |
@@ -195,6 +239,11 @@ ros2 topic pub /drive_mode std_msgs/msg/String "{data: 'auto'}" -1
 | TF 충돌 | 주행 모드에서는 EKF off, FAST-LIO가 `odom->base_link` 담당 |
 | Nav2가 odom을 못 봄 | `nav2.yaml`의 `odom_topic`은 `/Odometry` |
 | 로봇이 안 움직임 | `/cmd_vel`, `/mcu/command`, `/drive_mode/effective`, e-stop, MCU fault |
+| E-STOP 이 안 풀림 | 래치입니다. `/emergency_stop/release` 서비스로만 해제 (§6-1) |
+| WebUI 백엔드 점이 노랑 | 토큰 미입력. 설정 드로어에서 `ALM_WEB_TOKEN` 값을 넣으세요 |
+| WebUI 조작 버튼이 409 | 제어권 미보유. HUD 제어권 버튼으로 락을 잡으세요 |
+| 백엔드가 안 뜸 | `ALM_WEB_TOKEN` 미설정(fail-closed). 로그에 안내가 찍힙니다 |
+| 노드가 PermissionError 로 죽음 | `--symlink-install` 은 소스의 실행비트를 그대로 씁니다. `chmod +x` 하세요 |
 
 ## 8. 현재 운영상 주의
 
