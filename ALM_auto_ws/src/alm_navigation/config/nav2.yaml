@@ -1,10 +1,35 @@
 # Nav2 파라미터 - 흐름도 '④ Nav2·경로계획'
-#   planner_server(A*/NavFn) -> /plan,  controller_server(DWB) -> /cmd_vel
+#
+#   planner_server   : SmacPlanner2D   (2D A*, 8-connected)      -> /plan
+#   smoother_server  : ConstrainedSmoother (Ceres 곡률/장애물 제약) -> /plan 평활화
+#   controller_server: MPPIController  (샘플링 MPC)               -> /cmd_vel
+#
+#   파이프라인은 behavior_trees/navigate_*_w_smoothing.xml 이 연결합니다
+#   (ComputePathToPose -> SmoothPath -> FollowPath).
+#   BT xml 절대경로는 navigation.launch.py 의 RewrittenYaml 이 주입하므로
+#   아래 default_nav_*_bt_xml 값은 플레이스홀더입니다.
+#
 #   실차: use_sim_time=false, base_frame=base_link
 #
 # footprint 는 alm_description URDF 실측 지오메트리와 일치시켜야 함:
 #   차체 1.200 x 0.9872, 앞바퀴 x=+0.6106(+반지름), 뒷바퀴 x=-0.301, 트랙 ±0.5
 #   → 외곽 사각형(전방 여유 포함): x[-0.65, +0.72], y[±0.52]
+#   → inscribed radius 0.52 m, circumscribed radius 0.888 m
+#     (inflation_radius 는 반드시 circumscribed 보다 커야 costmap 기반 충돌평가가 성립)
+#
+# ⚠ 조향각 제한: normal 모드는 바퀴별 조향각 30°, 즉 최소 선회반경 1.558 m 로
+#   제한됩니다 (내측 앞바퀴 기준). 실제 강제는 command_manager(alm_base_control)가
+#   하며, 여기서는 smoother 의 minimum_turning_radius 와 velocity_smoother 의
+#   scale_velocities 로 '애초에 그 범위 안의 명령이 나오도록' 맞춰둡니다.
+#   30° 로 낼 수 없는 급회전은 auto 모드가 spin(제자리회전, 앞 ±50.7°/뒤 ∓31.1°)
+#   으로 처리합니다. 설계 근거는
+#   alm_base_control/scripts/command_manager.py 상단 주석 참고.
+#
+# ⚠ SmacPlanner2D 는 순수 2D 격자 플래너라 경로에 자세(yaw)가 없습니다.
+#   use_final_approach_orientation=true 로 마지막 pose 만 진행방향으로 채우므로
+#   RViz 에서 찍은 "목표 yaw" 는 무시됩니다. 목표 자세까지 맞춰야 하면
+#   SmacPlannerHybrid(Hybrid-A*) 로 교체하세요.
+#
 # ##TODO## 최고속도(max_vel_x)는 실제 플랫폼 사양으로 조정하세요.
 
 amcl:
@@ -58,6 +83,10 @@ bt_navigator:
     bt_loop_duration: 10
     default_server_timeout: 20
     wait_for_service_timeout: 1000
+    # ↓ navigation.launch.py(RewrittenYaml)가 alm_navigation/behavior_trees/*.xml
+    #   절대경로로 덮어씁니다. 키가 존재해야 치환되므로 지우지 마세요.
+    default_nav_to_pose_bt_xml: "OVERRIDDEN_BY_LAUNCH"
+    default_nav_through_poses_bt_xml: "OVERRIDDEN_BY_LAUNCH"
     plugin_lib_names:
       - nav2_compute_path_to_pose_action_bt_node
       - nav2_compute_path_through_poses_action_bt_node
@@ -127,46 +156,109 @@ controller_server:
       stateful: True
       plugin: "nav2_controller::SimpleGoalChecker"
       xy_goal_tolerance: 0.20
-      yaw_goal_tolerance: 0.20
+      # SmacPlanner2D 는 목표 yaw 를 보존하지 않고 '마지막 진행방향'을 넣습니다.
+      # 정지 후 제자리 회전을 유발하지 않도록 조금 넉넉하게 둡니다.
+      yaw_goal_tolerance: 0.25
+    # ---------------- MPPI (샘플링 기반 MPC) ----------------
+    # 지평선 = time_steps * model_dt = 40 * 0.05 = 2.0 s
+    # model_dt 는 1/controller_frequency(=0.05) 와 맞춥니다.
+    # ##TODO## Jetson 에서 controller_server CPU 가 포화되면 batch_size 를
+    #          1600 -> 1000, time_steps 40 -> 30 순으로 낮추세요.
     FollowPath:
-      plugin: "dwb_core::DWBLocalPlanner"
-      debug_trajectory_details: True
-      # 전진 = +x. normal/spin 주행 (측면속도 vy 미사용 → mode_manager 가 crab 담당)
-      min_vel_x: -0.15
-      min_vel_y: 0.0
-      max_vel_x: 0.45
-      max_vel_y: 0.0
-      max_vel_theta: 0.8
-      min_speed_xy: 0.0
-      max_speed_xy: 0.45
-      min_speed_theta: 0.0
-      acc_lim_x: 1.0
-      acc_lim_y: 0.0
-      acc_lim_theta: 1.5
-      decel_lim_x: -1.5
-      decel_lim_y: 0.0
-      decel_lim_theta: -1.5
-      vx_samples: 20
-      vy_samples: 1
-      vtheta_samples: 20
-      sim_time: 1.5
-      linear_granularity: 0.05
-      angular_granularity: 0.025
-      transform_tolerance: 0.5
-      short_circuit_trajectory_evaluation: True
-      stateful: True
-      critics: ["Oscillation", "BaseObstacle", "GoalAlign", "PathAlign", "PathDist", "GoalDist", "RotateToGoal", "PreferForward"]
-      BaseObstacle.scale: 0.02
-      PreferForward.scale: 0.5
-      PathAlign.scale: 32.0
-      PathAlign.forward_point_distance: 0.15
-      GoalAlign.scale: 24.0
-      GoalAlign.forward_point_distance: 0.15
-      PathDist.scale: 32.0
-      GoalDist.scale: 24.0
-      RotateToGoal.scale: 32.0
-      RotateToGoal.slowing_factor: 5.0
-      RotateToGoal.lookahead_time: -1.0
+      plugin: "nav2_mppi_controller::MPPIController"
+      time_steps: 40
+      model_dt: 0.05
+      batch_size: 1600
+      iteration_count: 1
+      # 전진 = +x. normal/spin 주행 (측면속도 vy 미사용 → command_manager 가 crab 담당)
+      #
+      # DiffDrive 유지 = 의도된 선택입니다. 이 플랫폼은 normal 모드에서만
+      # 조향각 30°(최소 선회반경 1.058 m) 제약을 받고, spin 모드에서는 90° 조향으로
+      # 제자리 회전이 가능합니다. MPPI 를 Ackermann(min_turning_r=1.058)으로 묶으면
+      # 제자리 회전을 아예 계획하지 못해 좁은 통로에서 Nav2 Spin 리커버리에
+      # 의존하게 됩니다. 그래서 MPPI 는 자유롭게 두고, 30° 로 못 내는 급회전은
+      # command_manager 의 auto 모드가 spin 으로 라우팅합니다
+      #   (auto_spin_route_radius, alm_base_control/config/base_control.yaml).
+      # → normal 모드의 30° 보장은 command_manager 가 최종 책임집니다.
+      motion_model: "DiffDrive"
+      vx_max: 0.45
+      vx_min: -0.15
+      vy_max: 0.0
+      wz_max: 0.8
+      # 탐색 노이즈 표준편차 (제어 범위의 1/3 정도가 무난)
+      vx_std: 0.15
+      vy_std: 0.0
+      wz_std: 0.30
+      temperature: 0.3
+      gamma: 0.015
+      prune_distance: 2.0
+      transform_tolerance: 0.3
+      # 제어가 reset_period 이상 끊기면 제어 시퀀스를 초기화
+      reset_period: 1.0
+      regenerate_noises: false
+      visualize: false
+      TrajectoryVisualizer:
+        trajectory_step: 5
+        time_step: 3
+      # DiffDrive 에선 미사용이나 플러그인이 파라미터를 선언하므로 남겨둡니다.
+      AckermannConstraints:
+        min_turning_r: 0.6
+      critics: ["ConstraintCritic", "CostCritic", "GoalCritic", "GoalAngleCritic",
+                "PathAlignCritic", "PathFollowCritic", "PathAngleCritic",
+                "PreferForwardCritic"]
+      ConstraintCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 4.0
+      # CostCritic: 로봇이 1.37 x 1.04 m 로 원형근사와 차이가 커서
+      #             consider_footprint=true (실제 footprint 충돌검사)로 둡니다.
+      CostCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 3.81
+        critical_cost: 300.0
+        consider_footprint: true
+        collision_cost: 1000000.0
+        near_goal_distance: 0.5
+        trajectory_point_step: 2
+      GoalCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 5.0
+        threshold_to_consider: 1.0
+      GoalAngleCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 3.0
+        threshold_to_consider: 0.5
+      PathAlignCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 14.0
+        max_path_occupancy_ratio: 0.05
+        trajectory_point_step: 4
+        threshold_to_consider: 0.5
+        offset_from_furthest: 20
+        use_path_orientations: false   # SmacPlanner2D 경로엔 유효한 yaw 가 없음
+      PathFollowCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 5.0
+        offset_from_furthest: 5
+        threshold_to_consider: 1.0
+      PathAngleCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 2.0
+        offset_from_furthest: 4
+        threshold_to_consider: 0.5
+        max_angle_to_furthest: 1.0
+        forward_preference: true
+      PreferForwardCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 5.0
+        threshold_to_consider: 0.5
 
 local_costmap:
   local_costmap:
@@ -177,8 +269,10 @@ local_costmap:
       robot_base_frame: base_link
       use_sim_time: false
       rolling_window: true
-      width: 5
-      height: 5
+      # MPPI 롤아웃(prune_distance 2.0 m + footprint 0.9 m)이 전부 들어가야 하므로
+      # DWB 시절의 5x5 에서 8x8 로 확대 (0.05 m 해상도 → 160x160 셀).
+      width: 8
+      height: 8
       resolution: 0.05
       footprint: "[[0.72, 0.52], [0.72, -0.52], [-0.65, -0.52], [-0.65, 0.52]]"
       always_send_full_costmap: True
@@ -210,8 +304,10 @@ local_costmap:
           max_obstacle_height: 1.5
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
+        # circumscribed radius(0.888 m) 보다 커야 MPPI CostCritic 의
+        # findCircumscribedCost() 가 올바른 임계값을 얻습니다.
         cost_scaling_factor: 3.0
-        inflation_radius: 0.45
+        inflation_radius: 1.00
 
 global_costmap:
   global_costmap:
@@ -256,8 +352,12 @@ global_costmap:
           max_obstacle_height: 1.5
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 3.0
-        inflation_radius: 0.55
+        # SmacPlanner2D 는 로봇을 '점'으로 보고 cost>=253(inscribed) 셀만 막습니다.
+        # 즉 통과 가능 폭은 inscribed radius(0.52 m)로 결정되고, 나머지 팽창은
+        # 벽에서 떨어져 달리려는 선호도로 작동합니다. ConstrainedSmoother 의
+        # w_cost 도 이 costmap 을 씁니다.
+        cost_scaling_factor: 2.5
+        inflation_radius: 1.10
 
 map_server:
   ros__parameters:
@@ -274,13 +374,80 @@ map_saver:
 planner_server:
   ros__parameters:
     use_sim_time: false
-    expected_planner_frequency: 5.0
+    # BT 의 RateController 가 1 Hz 로 재계획하므로 기대 주기도 1 Hz
+    expected_planner_frequency: 1.0
     planner_plugins: ["GridBased"]
     GridBased:
-      plugin: "nav2_navfn_planner/NavfnPlanner"
-      tolerance: 0.5
-      use_astar: true
-      allow_unknown: true
+      plugin: "nav2_smac_planner/SmacPlanner2D"
+      tolerance: 0.50            # 목표에 정확히 못 붙을 때 허용 반경 (m)
+      downsample_costmap: false  # true 면 downsampling_factor 배로 격자를 줄여 가속
+      downsampling_factor: 1
+      allow_unknown: true        # 미탐사 영역 통과 허용 (track_unknown_space 와 세트)
+      max_iterations: 1000000
+      max_on_approach_iterations: 1000
+      max_planning_time: 2.0     # 초. 넘으면 tolerance 내 최선해 반환
+      cost_travel_multiplier: 2.0  # ↑ 이면 벽에서 더 떨어져 돌아감 (거리 vs 여유)
+      # 마지막 pose 자세를 '진행방향'으로 채움 → 도착 후 불필요한 제자리 회전 방지.
+      # (대신 사용자가 지정한 목표 yaw 는 무시됨 - 파일 상단 주의 참고)
+      use_final_approach_orientation: true
+      # SmacPlanner2D 내장 경량 스무더: 8-connected 계단현상 제거용.
+      # 곡률/장애물 제약 평활화는 아래 smoother_server(ConstrainedSmoother)가 담당.
+      smoother:
+        max_iterations: 1000
+        w_smooth: 0.3
+        w_data: 0.2
+        tolerance: 1.0e-10
+        do_refinement: true
+
+# ---------------- ConstrainedSmoother (Ceres) ----------------
+# BT 의 SmoothPath 노드가 ComputePathToPose 결과를 여기로 보내 평활화합니다.
+# 곡률(w_curve) · 원경로 이탈(w_dist) · 매끄러움(w_smooth) · 장애물비용(w_cost)의
+# 가중합을 Ceres 로 최소화합니다.
+smoother_server:
+  ros__parameters:
+    use_sim_time: false
+    costmap_topic: "global_costmap/costmap_raw"
+    footprint_topic: "global_costmap/published_footprint"
+    robot_base_frame: base_link
+    transform_tolerance: 0.3
+    smoother_plugins: ["SmoothPath"]
+    SmoothPath:
+      plugin: "nav2_constrained_smoother/ConstrainedSmoother"
+      # SmacPlanner2D 경로엔 유효한 자세가 없으므로 후진구간 판정/시작자세 고정을 끕니다.
+      reversing_enabled: false
+      keep_start_orientation: false
+      # 마지막 pose 는 planner 가 use_final_approach_orientation 으로 채워 둔
+      # 유효한 진행방향이므로 유지합니다 (goal checker 가 이 값을 씁니다).
+      keep_goal_orientation: true
+      path_downsampling_factor: 3   # 3점마다 최적화 (속도)
+      path_upsampling_factor: 1     # 결과를 베지어로 되살릴 배수
+      # normal 모드 '바퀴별' 조향각 한계(30°)에서 나오는 최소 선회반경:
+      #   R = front_x/tan(30°) + half_track = 0.6106/0.5774 + 0.500 = 1.558 m
+      # (가장 크게 꺾이는 바퀴 = 선회 내측 앞바퀴 기준. 축/중심선 기준으로
+      #  잡으면 1.058 m 이지만 내측 앞바퀴가 47.6° 로 한계를 넘습니다.)
+      # 여기서 경로를 미리 완만하게 만들어 두면 command_manager 의 조향각
+      # 클램프와 normal→spin 전환이 개입할 일이 줄어듭니다.
+      minimum_turning_radius: 1.558
+      # ⚠ w_curve 는 R_min 위반에 걸리는 페널티 가중치인데, nav2 기본값 30 은
+      #   w_smooth(15000) 대비 500배 작아 사실상 무시됩니다. R_min 을 실제로
+      #   지키게 하려면 올려야 합니다. 아래는 출발값 —
+      #   ##TODO## 실차에서 경로가 여전히 급하면 ↑, 과하게 넓게 돌면 ↓.
+      w_curve: 200.0
+      w_dist: 0.0        # 0 = 원경로 추종 강제 안 함 (w_smooth 가 형상을 지배)
+      w_smooth: 15000.0
+      w_cost: 0.020      # ↑ 이면 장애물에서 더 멀어지려 함
+      w_cost_cusp_multiplier: 3.0
+      cusp_zone_length: 2.5
+      # base_link 원점 외에 추가로 costmap 비용을 볼 점 [x, y, weight] 묶음.
+      # 차체가 길어(전 +0.72 / 후 -0.65) 앞뒤 끝을 함께 봅니다.
+      cost_check_points: [0.55, 0.0, 1.0, -0.45, 0.0, 1.0]
+      optimizer:
+        max_iterations: 70
+        debug_optimizer: false
+        gradient_tol: 5.0e-3
+        fn_tol: 1.0e-6
+        param_tol: 1.0e-15
+        linear_solver_type: "SPARSE_NORMAL_CHOLESKY"
 
 behavior_server:
   ros__parameters:
@@ -317,7 +484,12 @@ velocity_smoother:
   ros__parameters:
     use_sim_time: false
     smoothing_frequency: 20.0
-    scale_velocities: False
+    # normal 모드 조향각은 wz/vx 비로 결정되므로, 가속제한이 성분별로 걸리면
+    # 램프 구간에서 비가 망가져 조향각이 튄다 (wz 1.5 rad/s² 가 vx 1.0 m/s² 보다
+    # 빨리 도달). true = 가장 제한적인 성분에 맞춰 나머지도 같이 스케일 →
+    # vx:wz 비 유지. command_manager 가 최종 보장하지만 여기서 맞춰두면
+    # 클램프가 개입할 일 자체가 줄어든다.
+    scale_velocities: True
     feedback: "OPEN_LOOP"
     max_velocity: [0.45, 0.0, 0.8]
     min_velocity: [-0.15, 0.0, -0.8]
@@ -336,4 +508,4 @@ lifecycle_manager_navigation:
   ros__parameters:
     use_sim_time: false
     autostart: True
-    node_names: ["controller_server", "planner_server", "behavior_server", "bt_navigator", "waypoint_follower", "velocity_smoother"]
+    node_names: ["controller_server", "smoother_server", "planner_server", "behavior_server", "bt_navigator", "waypoint_follower", "velocity_smoother"]

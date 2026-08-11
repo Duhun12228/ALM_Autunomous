@@ -1,0 +1,52 @@
+<!--
+  ALM NavigateToPose BT
+  = nav2 기본 navigate_to_pose_w_replanning_and_recovery.xml
+    + ComputePathToPose 뒤에 SmoothPath(ConstrainedSmoother) 삽입.
+
+  ComputePathToPose(SmacPlanner2D) -> {path}
+    -> SmoothPath(ConstrainedSmoother) -> 같은 {path} 로 덮어쓰기
+    -> FollowPath(MPPI)
+
+  SmoothPath 는 Fallback + AlwaysSuccess 로 감싸서 실패해도 주행이 멈추지 않게 합니다.
+  실패 시 블랙보드의 {path} 는 갱신되지 않으므로 평활화 이전 원본 경로로 주행합니다.
+  (check_for_collisions=true 이므로 평활화 결과가 장애물을 스치면 실패로 처리됨)
+-->
+<root main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <RecoveryNode number_of_retries="6" name="NavigateRecovery">
+      <PipelineSequence name="NavigateWithReplanning">
+        <RateController hz="1.0">
+          <RecoveryNode number_of_retries="1" name="ComputePathToPose">
+            <Sequence name="PlanAndSmooth">
+              <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
+              <Fallback name="SmoothIfPossible">
+                <SmoothPath unsmoothed_path="{path}" smoothed_path="{path}"
+                            smoother_id="SmoothPath"
+                            max_smoothing_duration="0.3"
+                            check_for_collisions="true"/>
+                <AlwaysSuccess/>
+              </Fallback>
+            </Sequence>
+            <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
+          </RecoveryNode>
+        </RateController>
+        <RecoveryNode number_of_retries="1" name="FollowPath">
+          <FollowPath path="{path}" controller_id="FollowPath"/>
+          <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap"/>
+        </RecoveryNode>
+      </PipelineSequence>
+      <ReactiveFallback name="RecoveryFallback">
+        <GoalUpdated/>
+        <RoundRobin name="RecoveryActions">
+          <Sequence name="ClearingActions">
+            <ClearEntireCostmap name="ClearLocalCostmap-Subtree" service_name="local_costmap/clear_entirely_local_costmap"/>
+            <ClearEntireCostmap name="ClearGlobalCostmap-Subtree" service_name="global_costmap/clear_entirely_global_costmap"/>
+          </Sequence>
+          <Spin spin_dist="1.57"/>
+          <Wait wait_duration="5"/>
+          <BackUp backup_dist="0.30" backup_speed="0.05"/>
+        </RoundRobin>
+      </ReactiveFallback>
+    </RecoveryNode>
+  </BehaviorTree>
+</root>

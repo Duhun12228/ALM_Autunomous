@@ -17,9 +17,15 @@
   <exec_depend>lio_sam</exec_depend>
   <exec_depend>alm_sensors</exec_depend>
   <exec_depend>nav2_bringup</exec_depend>
+  <exec_depend>nav2_common</exec_depend>
   <exec_depend>nav2_amcl</exec_depend>
   <exec_depend>nav2_map_server</exec_depend>
   <exec_depend>nav2_lifecycle_manager</exec_depend>
+  <!-- 경로계획 SmacPlanner2D / 평활화 ConstrainedSmoother / 지역제어 MPPI -->
+  <exec_depend>nav2_smac_planner</exec_depend>
+  <exec_depend>nav2_constrained_smoother</exec_depend>
+  <exec_depend>nav2_mppi_controller</exec_depend>
+  <exec_depend>nav2_smoother</exec_depend>
   <exec_depend>tf2_ros</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
