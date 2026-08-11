@@ -38,6 +38,7 @@ class FakeMcu(Node):
         g("battery_empty_voltage", 21.0)
         g("battery_drain_per_min", 0.4)     # [%]
         g("wheel_radius_m", 0.103)
+        g("rws_ratio", 0.5)                 # ALM07.slx CONS(1). 후륜 조향각 되비추기용
         g("inject_fault_code", 0)           # 0 = 정상. UI 경보 시험용
         g("inject_fault_text", "")
         # MCU '자신의' E-STOP 상태(물리 버튼/내부 래치). 명령으로 받은 estop 을
@@ -50,6 +51,7 @@ class FakeMcu(Node):
         p = self.get_parameter
         self.timeout = float(p("command_timeout_sec").value)
         self.wheel_radius = float(p("wheel_radius_m").value)
+        self.rws_ratio = float(p("rws_ratio").value)
         self.v_full = float(p("battery_full_voltage").value)
         self.v_empty = float(p("battery_empty_voltage").value)
         self.drain = float(p("battery_drain_per_min").value)
@@ -128,8 +130,9 @@ class FakeMcu(Node):
         state.odom_pose.y = self.pose[1]
         state.odom_pose.theta = self.pose[2]
 
-        # 조향은 축당 1개 — [front, rear]. rear 는 후륜 고정(rws_ratio=0)이라 0.
-        state.steer_angle = [math.radians(steer_deg), 0.0]
+        # 조향은 축당 1개 — [front, rear]. 후륜은 전륜의 rws_ratio 배로 역방향 조향.
+        state.steer_angle = [math.radians(steer_deg),
+                             -math.radians(steer_deg) * self.rws_ratio]
 
         # 바퀴 각속도 [rad/s]. 회전 성분은 좌우를 반대로 벌린다.
         base = measured_vx / self.wheel_radius if self.wheel_radius else 0.0

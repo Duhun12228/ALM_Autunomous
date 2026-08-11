@@ -61,22 +61,23 @@ _EPS_W = 1e-3        # 이 이하는 회전 없음으로 간주 [rad/s]
 class FourWISParams:
     """STM32 CONS 벡터 + 구동계 제원 중 Jetson 이 알아야 하는 값들.
 
-    ##CONFIRM## 기본값은 docs/ 의 잠정 수치라 실측으로 반드시 덮어써야 합니다.
-    wheelbase_m/track_m/rws_ratio 는 STM32 CONS(2)/CONS(3)/CONS(1) 과
-    **같은 값**이어야 명령과 실제 궤적이 일치합니다.
+    wheelbase_m/track_m/rws_ratio/crab_rpm_scale/zero_turn_rpm_scale 는 STM32
+    CONS(2)/CONS(3)/CONS(1)/CONS(10)/CONS(11) 과 **같은 값**이어야 명령과 실제
+    궤적이 일치합니다. 이 5개 기본값은 ALM07.slx 에서 읽은 실제 CONS 값입니다.
+    ##CONFIRM## 나머지(구동계 제원·기구 한계)는 CONS 에 없어 실측이 필요합니다.
     """
 
     def __init__(
         self,
-        wheelbase_m=0.9116,          # CONS(2) B  [m] (STM32 는 mm)
-        track_m=1.0,                 # CONS(3) T  [m] (전체 윤거)
-        rws_ratio=0.0,               # CONS(1) RWS_percent / 100
+        wheelbase_m=1.0,             # CONS(2) B = 1000 mm
+        track_m=0.919,               # CONS(3) T = 919 mm (전체 윤거)
+        rws_ratio=0.5,               # CONS(1) RWS_percent / 100 = 50%
         wheel_radius_m=0.103,
         gear_ratio=1.0,              # 모터 rpm / 휠 rpm
         max_steer_deg=30.0,
         straight_angle_deg=2.0,      # CONS(4) 조향 데드밴드
-        crab_rpm_scale=1.0,          # CONS(10)
-        zero_turn_rpm_scale=1.0,     # CONS(11)
+        crab_rpm_scale=0.5,          # CONS(10)
+        zero_turn_rpm_scale=0.6,     # CONS(11)
         crab_steer_sign=1.0,         # +vy 를 낼 때 보낼 steer_deg 부호
         spin_steer_sign=1.0,         # +wz 를 낼 때 보낼 steer_deg 부호
         max_rpm=3000.0,
@@ -246,6 +247,12 @@ def _encode_normal(vx, wz, params):
                        "normal 모드에서 vx≈0 회전 요청 - spin 모드가 필요합니다")
 
     d, clamped = solve_inner_front_steer(vx, wz, params)
+
+    # 계산된 조향각이 STM32 직진 데드밴드(CONS(4)) 이하면 STM32 가 어차피 직진으로
+    # 처리한다. Jetson 도 직진 명령으로 맞춰야 예상 rpm 과 실제 출력이 어긋나지 않는다.
+    if math.degrees(d) <= params.straight_angle_deg:
+        return _finish(0.0, mps_to_rpm(vx, params), MODE_NORMAL, params)
+
     v_inner = abs(wz) * params._icr_distance_to_inner_front(d)
 
     # ★ 부호반전: STM32 가 normalDriveMode(-steer_deg, ...) 로 호출하므로
@@ -294,7 +301,7 @@ def _selftest():
     """단독 실행 검증: 역산 -> 정방향 재계산으로 twist 가 복원되는지 확인."""
     ok = True
 
-    for rws in (0.0, 0.3, 0.6):
+    for rws in (0.0, 0.3, 0.5, 0.6):
         p = FourWISParams(rws_ratio=rws)
         for vx in (0.1, 0.25, 0.45, -0.15):
             for wz in (0.05, 0.2, 0.5, -0.35):
@@ -304,6 +311,8 @@ def _selftest():
                     print(f"  FAIL mode {mode}")
                     continue
                 if note:                      # clamp 된 경우는 복원 대상 아님
+                    continue
+                if steer_deg == 0.0:          # 직진 데드밴드로 접힌 경우도 제외
                     continue
                 # 정방향: 보낸 각도로 ICR 을 다시 계산해 vx/wz 복원
                 d = math.radians(abs(steer_deg))
@@ -325,6 +334,14 @@ def _selftest():
     straight_ok = (s == 0.0 and m == MODE_NORMAL
                    and abs(rpm - mps_to_rpm(0.3, p)) < 1e-6)
     print("[straight] steer=0, rpm=vx 환산:", "OK" if straight_ok else "FAIL")
+
+    # 직진 데드밴드: 데드밴드 이하 조향각은 STM32 와 동일하게 직진으로 접는다
+    p_db = FourWISParams(straight_angle_deg=5.0)
+    d_small = math.radians(1.0)                       # 5° 데드밴드보다 작은 조향각
+    vx_db, wz_db = 0.3, 0.3 / p_db._icr_y(d_small)
+    s_db, rpm_db, _, _ = encode(vx_db, 0.0, wz_db, "normal", False, p_db)
+    deadband_ok = (s_db == 0.0 and abs(rpm_db - mps_to_rpm(vx_db, p_db)) < 1e-6)
+    print("[deadband] CONS(4) 이하 조향 -> 직진:", "OK" if deadband_ok else "FAIL")
 
     # 정지 게이팅
     s, rpm, m, _ = encode(0.4, 0.0, 0.3, "normal", True, p)
@@ -352,7 +369,7 @@ def _selftest():
         print("  실제:", got.hex(" ").upper())
     print("[frame] 문서 예시 프레임과 바이트 일치:", "OK" if frame_ok else "FAIL")
 
-    return ok and straight_ok and stop_ok and map_ok and frame_ok
+    return ok and straight_ok and deadband_ok and stop_ok and map_ok and frame_ok
 
 
 if __name__ == "__main__":

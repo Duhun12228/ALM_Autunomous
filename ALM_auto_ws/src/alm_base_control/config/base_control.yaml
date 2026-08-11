@@ -39,6 +39,16 @@ command_manager:
     enable_motors_on_start: true
     cmd_timeout_sec: 0.5               # 이 시간 넘게 cmd_vel 없으면 정지
 
+    # ---- E-STOP 래치 ----
+    # /emergency_stop 은 "세워라"만 뜻한다. true 는 받고 false 는 무시하며,
+    # 해제는 /emergency_stop/release (alm_msgs/srv/ReleaseEstop) 로만 가능하다.
+    # 토픽으로 풀 수 있으면 래치가 아니다 — 노드 하나가 실수로 false 를 주기적
+    # 발행하면 정지가 조용히 풀린다. 웹 UI 도 래치를 전제로 만들어져 있다.
+    estop_latch: true
+    # 해제 시 MCU 가 아직 fault/estop 을 보고 중이면 거부한다.
+    # 소프트웨어가 물리 상태를 앞질러 '해제됨'을 표시하지 않기 위함.
+    estop_release_requires_clear_mcu: true
+
     # ---- 속도/가속 제한 (안전 게이팅). ##TODO## 실제 플랫폼 사양으로 조정 ----
     max_linear_x: 0.45
     min_linear_x: -0.15
@@ -69,21 +79,30 @@ command_manager:
     auto_crab_angular_threshold: 0.10
 
     # ---- 4WIS 변환 (twist -> steer_deg/speed_rpm/mode) ----
-    # ##CONFIRM## 아래 4개는 STM32 CONS 벡터와 반드시 같은 값이어야 합니다.
-    #   wheelbase_m <- CONS(2) B [mm] / 1000
-    #   track_m     <- CONS(3) T [mm] / 1000   (전체 윤거)
-    #   rws_ratio   <- CONS(1) RWS_percent / 100
-    #   straight_angle_deg <- CONS(4)
-    wheelbase_m: 0.9116               # ##CONFIRM## 잠정값 (docs 기준)
-    track_m: 1.0                      # ##CONFIRM## 잠정값
-    rws_ratio: 0.0                    # ##CONFIRM## 후륜 보조조향 비율 (0=후륜 고정)
-    wheel_radius_m: 0.103             # ##CONFIRM## rpm 환산에 직접 영향
-    gear_ratio: 1.0                   # ##CONFIRM## 모터 rpm / 휠 rpm
-    max_steer_deg: 30.0               # ##CONFIRM## 조향 기구 한계
-    straight_angle_deg: 2.0           # ##CONFIRM## CONS(4) 데드밴드
-    crab_rpm_scale: 1.0               # ##CONFIRM## CONS(10)
-    zero_turn_rpm_scale: 1.0          # ##CONFIRM## CONS(11)
-    # 크랩/제로턴 방향 부호. 실차에서 바퀴 도는 방향 보고 뒤집을 것 (+1 / -1)
+    # 아래 5개는 STM32 CONS 벡터와 반드시 같은 값이어야 합니다.
+    # 값 출처: STM32 Simulink 모델 ALM07.slx 의 CONS 생성 서브시스템.
+    #   wheelbase_m         <- CONS(2) B = 1000 mm
+    #   track_m             <- CONS(3) T = 919 mm   (전체 윤거, 코드가 /2 함)
+    #   rws_ratio           <- CONS(1) 후륜 보조조향률 = 50%
+    #   crab_rpm_scale      <- CONS(10) = 0.5
+    #   zero_turn_rpm_scale <- CONS(11) = 0.6
+    wheelbase_m: 1.0                  # ALM07.slx CONS(2)
+    track_m: 0.919                    # ALM07.slx CONS(3)
+    rws_ratio: 0.5                    # ALM07.slx CONS(1) — 후륜이 전륜의 50% 역방향
+    crab_rpm_scale: 0.5               # ALM07.slx CONS(10)
+    zero_turn_rpm_scale: 0.6          # ALM07.slx CONS(11)
+
+    # ##CONFIRM## 실차 사양 실측 후 확정할 값 (Simulink CONS 에 없음)
+    wheel_radius_m: 0.103             # ##CONFIRM## 접지 상태 실효 반지름. rpm 환산에 직접 영향
+    gear_ratio: 1.0                   # ##CONFIRM## 모터 rpm / 휠 rpm. STM32 rpm 명령 단위 확인 필요
+    max_steer_deg: 30.0               # ##CONFIRM## 일반 주행 내측 전륜 기구 한계.
+                                      #   크랩 90°(CONS(8)) / 제로턴 47°(CONS(9)) 는
+                                      #   STM32 고정 자세이므로 여기 넣으면 안 됨.
+    max_rpm: 3000.0                   # ##CONFIRM## 구동 드라이버 한계
+    straight_angle_deg: 2.0           # ##CONFIRM## CONS(4) 데드밴드.
+                                      #   ALM07.slx 의 '직진판정각도(DEG)' Constant 블록에서 실제 값 확인 필요
+    # 크랩/제로턴 방향 부호. 실차에서 저속으로 방향 확인 후 뒤집을 것 (+1 / -1)
+    #   +linear.y  -> 좌측 크랩 이동?      아니면 crab_steer_sign: -1.0
+    #   +angular.z -> 반시계 제자리 회전?  아니면 spin_steer_sign: -1.0
     crab_steer_sign: 1.0              # ##CONFIRM##
     spin_steer_sign: 1.0              # ##CONFIRM##
-    max_rpm: 3000.0                   # ##CONFIRM## 구동 드라이버 한계

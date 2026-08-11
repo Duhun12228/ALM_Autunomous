@@ -23,6 +23,7 @@ from nav_msgs.msg import Odometry
 from std_msgs.msg import Bool, String
 
 from alm_msgs.msg import McuCommand, McuState
+from alm_msgs.srv import ReleaseEstop
 
 import fourwis_encode
 
@@ -64,6 +65,12 @@ class CommandManager(Node):
                 ("default_drive_mode", "auto"),
                 ("enable_motors_on_start", True),
                 ("cmd_timeout_sec", 0.5),
+                # E-STOP 을 래치로 둘지. true 면 /emergency_stop 의 true 만 받고
+                # false 는 무시한다 — 해제는 /emergency_stop/release 서비스로만.
+                # false 로 두면 예전처럼 토픽 값을 그대로 따라간다(래치 아님).
+                ("estop_latch", True),
+                # 래치 해제 시 MCU 가 아직 fault/estop 을 보고 중이면 거부할지.
+                ("estop_release_requires_clear_mcu", True),
                 ("max_linear_x", 0.45),
                 ("min_linear_x", -0.15),
                 ("max_linear_y", 0.30),
@@ -87,15 +94,16 @@ class CommandManager(Node):
                 ("auto_crab_lateral_threshold", 0.05),
                 ("auto_crab_angular_threshold", 0.10),
                 # ---- 4WIS 변환 (STM32 CONS 와 반드시 일치시킬 것) ----
-                ("wheelbase_m", 0.9116),
-                ("track_m", 1.0),
-                ("rws_ratio", 0.0),
+                # 기본값 출처: STM32 Simulink 모델 ALM07.slx 의 CONS 생성 서브시스템
+                ("wheelbase_m", 1.0),          # CONS(2) 1000 mm
+                ("track_m", 0.919),            # CONS(3) 919 mm
+                ("rws_ratio", 0.5),            # CONS(1) 50%
                 ("wheel_radius_m", 0.103),
                 ("gear_ratio", 1.0),
                 ("max_steer_deg", 30.0),
-                ("straight_angle_deg", 2.0),
-                ("crab_rpm_scale", 1.0),
-                ("zero_turn_rpm_scale", 1.0),
+                ("straight_angle_deg", 2.0),   # CONS(4) ##CONFIRM##
+                ("crab_rpm_scale", 0.5),       # CONS(10)
+                ("zero_turn_rpm_scale", 0.6),  # CONS(11)
                 ("crab_steer_sign", 1.0),
                 ("spin_steer_sign", 1.0),
                 ("max_rpm", 3000.0),
@@ -150,6 +158,9 @@ class CommandManager(Node):
         self.cmd = Twist()
         self.last_cmd_sec = 0.0
         self.estop = False
+        self.estop_latch = bool(g("estop_latch").value)
+        self.estop_release_needs_clear = bool(g("estop_release_requires_clear_mcu").value)
+        self.estop_reason = ""          # 무엇이 래치를 걸었는지 (해제 로그용)
         self.mcu_fault = False          # (7) MCU 가 보고한 fault/estop
         self.last_odom_sec = 0.0        # (8) odom 워치독
         self.have_odom = False
@@ -173,6 +184,8 @@ class CommandManager(Node):
         self.create_subscription(Bool, g("estop_topic").value, self._on_estop, 10)
         self.create_subscription(McuState, g("mcu_state_topic").value, self._on_mcu_state, 10)
         self.create_subscription(Odometry, g("odom_topic").value, self._on_odom, 10)
+        # 래치 해제는 서비스로만. 토픽에 false 를 흘려서 푸는 경로는 없다.
+        self.create_service(ReleaseEstop, "/emergency_stop/release", self._on_release_estop)
         self.timer = self.create_timer(1.0 / self.rate, self._tick)
 
         self._normalize_mode()
@@ -180,8 +193,13 @@ class CommandManager(Node):
             f"command_manager 시작: default_mode={self.desired_mode}, "
             f"limits vx[{self.min_lx},{self.max_lx}] wz±{self.max_wz}, "
             f"rate_limit={'on' if self.rate_limit_on else 'off'}, "
-            f"mcu_fault_stop={self.stop_on_mcu_fault}, odom_watchdog={self.odom_watchdog}s"
+            f"mcu_fault_stop={self.stop_on_mcu_fault}, odom_watchdog={self.odom_watchdog}s, "
+            f"estop_latch={'on' if self.estop_latch else 'off'}"
         )
+        if not self.estop_latch:
+            self.get_logger().warn(
+                "estop_latch=false — /emergency_stop 에 false 가 오면 정지가 즉시 풀립니다. "
+                "웹 UI 는 래치를 전제로 동작하므로 운용에서는 true 를 권장합니다.")
 
         # 기구학 한계 대비 속도 제한이 타당한지 시작 시 1회 점검
         r_min = fourwis_encode.min_turn_radius(self.wis)
@@ -210,9 +228,58 @@ class CommandManager(Node):
         self.get_logger().info(f"drive_mode -> {self.desired_mode}")
 
     def _on_estop(self, msg):
-        if msg.data and not self.estop:
-            self.get_logger().warn("EMERGENCY STOP 활성화 (/emergency_stop)")
-        self.estop = bool(msg.data)
+        """/emergency_stop 구독. 래치 모드에서는 true 만 받는다.
+
+        false 를 무시하는 것이 요점이다. 토픽으로 풀 수 있으면 래치가 아니고,
+        아무 노드나(또는 `ros2 topic pub`) false 를 한 번 흘리는 순간 정지가
+        조용히 풀린다. 해제는 /emergency_stop/release 서비스 한 곳에서만.
+        """
+        if msg.data:
+            if not self.estop:
+                self.get_logger().warn("EMERGENCY STOP 활성화 (/emergency_stop)")
+                self.estop_reason = "/emergency_stop"
+            self.estop = True
+            return
+        if self.estop_latch:
+            if self.estop:
+                self.get_logger().warn(
+                    "/emergency_stop 에 false 가 왔지만 래치 상태라 무시합니다. "
+                    "해제는 /emergency_stop/release 서비스로만 가능합니다.")
+            return
+        if self.estop:
+            self.get_logger().warn("EMERGENCY STOP 해제 (래치 비활성 모드)")
+        self.estop = False
+        self.estop_reason = ""
+
+    def _on_release_estop(self, request, response):
+        """/emergency_stop/release — 래치 해제 요청.
+
+        MCU 가 아직 fault/estop 을 보고 중이면 거부한다. 소프트웨어가 물리
+        상태를 앞질러 '해제됨'을 표시하면, 조작자는 풀린 줄 알고 다음 명령을
+        낸다. 물리 조건을 먼저 풀게 하는 편이 맞다.
+        """
+        who = (request.reason or "").strip() or "(사유 미기재)"
+        if not self.estop:
+            response.success = True
+            response.message = "이미 해제 상태입니다."
+            response.latched = False
+            return response
+        if self.estop_release_needs_clear and self.mcu_fault:
+            self.get_logger().warn(f"E-STOP 해제 거부 (MCU fault 유지 중): {who}")
+            response.success = False
+            response.message = (
+                "MCU 가 아직 fault/estop 을 보고하고 있습니다. "
+                "물리 비상정지 스위치와 MCU fault 를 먼저 해소하세요.")
+            response.latched = True
+            return response
+        self.get_logger().warn(
+            f"E-STOP 래치 해제: {who} (걸린 원인={self.estop_reason or '알 수 없음'})")
+        self.estop = False
+        self.estop_reason = ""
+        response.success = True
+        response.message = "E-STOP 래치를 해제했습니다."
+        response.latched = False
+        return response
 
     def _on_mcu_state(self, msg: McuState):
         fault = bool(msg.fault or msg.emergency_stop)

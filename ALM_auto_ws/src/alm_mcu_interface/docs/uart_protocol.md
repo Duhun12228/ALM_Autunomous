@@ -97,6 +97,24 @@ Jetson 측 twist → `steer_deg/speed_rpm` 역산은
 (`wheelbase_m`, `track_m`, `rws_ratio`)는 STM32 `CONS(2)/CONS(3)/CONS(1)` 과
 **반드시 같은 값**이어야 명령과 실제 궤적이 일치합니다.
 
+#### STM32 `CONS` 값 (Simulink 모델 `ALM07.slx` 기준)
+
+| CONS | 의미 | 값 | Jetson 파라미터 |
+|------|------|----|-----------------|
+| `CONS(1)` | 후륜 보조 조향률 | 50 % | `rws_ratio: 0.5` |
+| `CONS(2)` | 휠베이스 B | 1000 mm | `wheelbase_m: 1.0` |
+| `CONS(3)` | 윤거 T | 919 mm | `track_m: 0.919` |
+| `CONS(4)` | 직진 판정 각도 | ##CONFIRM## | `straight_angle_deg` |
+| `CONS(8)` | 크랩 고정 조향각 | 90° | (STM32 고정 — Jetson 전송 안 함) |
+| `CONS(9)` | 제로턴 고정 조향각 | 47° | (STM32 고정 — Jetson 전송 안 함) |
+| `CONS(10)` | 크랩 속도 비율 | 0.5 | `crab_rpm_scale: 0.5` |
+| `CONS(11)` | 제로턴 속도 비율 | 0.6 | `zero_turn_rpm_scale: 0.6` |
+
+`CONS(8)/CONS(9)` 는 크랩·제로턴에서 STM32 가 쓰는 **고정 자세**이므로
+Jetson 의 `max_steer_deg`(일반 주행 내측 전륜 기구 한계)에 넣으면 안 됩니다.
+`CONS(4)` 는 `.slx` 파일에 값이 저장돼 있지 않아, Simulink 에서
+`ALM07 → CONS 생성 서브시스템 → 직진판정각도(DEG)` 블록을 직접 열어 확인해야 합니다.
+
 ## State payload — `msg_type = 0x02` (STM32 → Jetson), 63 bytes
 
 > **현재 미구현 (예정 규격).** STM32 측에 업링크 송신부가 아직 없습니다.
