@@ -42,3 +42,29 @@ command_manager:
     auto_mode_min_hold_sec: 0.80
     auto_crab_lateral_threshold: 0.05
     auto_crab_angular_threshold: 0.10
+
+    # ---- normal 모드 조향각 제한 (바퀴별 30°) ----
+    # 플랫폼: 조향 4륜 독립 + 구동 2축(front/rear). normal 모드 조향각은 wz/vx 비
+    # (=선회반경)로만 결정되고, 가장 크게 꺾이는 바퀴는 '선회 내측 앞바퀴'다:
+    #   tan δ_inner_front = wz·front_x / (vx − wz·half_track)
+    #   30° → |wz| ≤ 0.6420·|vx|,  R ≥ front_x/tan30 + half_track = 1.558 m
+    # ⚠ 축(중심선) 기준 30°로 잡으면 R=1.058 m 이지만 내측 앞바퀴가 47.6°까지
+    #   꺾인다. 바퀴별 기계한계가 30°라 반드시 위 식이어야 한다.
+    # spin/crab 은 기계 한계를 그대로 쓰므로 이 제한을 받지 않는다
+    # (4륜 독립조향이라 제자리회전 = 앞 ±50.7°/뒤 ∓31.1°, 구름회전 가능).
+    steer_limit_enabled: true
+    max_steer_angle_deg: 30.0
+    # 지오메트리는 URDF(alm_description) 가 SINGLE SOURCE OF TRUTH.
+    # URDF front_x/rear_x/half_track 을 바꾸면 여기와 STM32 상수도 같이 바꿀 것.
+    steer_front_x: 0.6106
+    steer_rear_x: -0.3010
+    steer_half_track: 0.500
+    # 이 속도 미만에서는 30° 안으로 유효한 회전을 만들 수 없어 wz=0 (경고 발생).
+    steer_limit_min_vx: 0.03
+    # /mcu/state 실측 조향각 경고 문턱 = max_steer_angle_deg + 이 여유
+    steer_feedback_margin_deg: 5.0
+    # 요구 선회반경이 이보다 작으면 auto 모드가 spin(제자리회전)으로 처리.
+    # 기본값 ≈ 최소선회반경(1.558)의 1/2 — 살짝 넘는 정도는 클램프로 완만하게
+    # 돌고, 정말 급한 회전만 정지→회전→전진으로 넘긴다.
+    # ##TODO## 실차에서 normal↔spin 전환이 잦으면 값을 낮추세요(=클램프 쪽으로).
+    auto_spin_route_radius: 0.78
