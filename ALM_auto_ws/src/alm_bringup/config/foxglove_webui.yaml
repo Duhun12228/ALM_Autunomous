@@ -38,6 +38,9 @@ foxglove_bridge:
     topic_whitelist:
       # 리소스·상태
       - "/alm/jetson_stats"
+      # maps/ 디렉터리의 실제 자산 목록 (map_manager). 읽기 전용이며,
+      # 맵 생성·전환 경로는 여기에도 다른 어디에도 없다.
+      - "/alm/map_inventory"
       - "/mcu/state"
       # 명령 쪽 estop 도 읽는다. /mcu/state.emergency_stop 은 MCU '자신의'
       # 정지 상태(물리 버튼)라, 소프트웨어로 건 정지는 여기에만 보인다.
@@ -57,12 +60,16 @@ foxglove_bridge:
       - "/local_plan"
       - "/global_costmap/costmap"
       - "/local_costmap/costmap"
-      # 측위
-      - "/sc_candidates"
+      # 측위 (teaser_fpfh_localizer → transform_publisher)
+      # /sc_candidates 는 Scan Context 제거(bbc6dad)로 아무도 발행하지 않아 뺐다.
       - "/icp_result"
       # 3D 뷰포트
       - "/livox/lidar"
       - "/cloud_registered"
+      # 활성 맵의 저장된 점군(복셀 다운샘플). prior_cloud_publisher 가 latched 로
+      # 한 번만 낸다 — 원본 52 MB 를 그대로 보내는 경로가 아니다.
+      - "/alm/prior_cloud"
+      - "/alm/prior_cloud_map"
 
     # ---- 쓰기·호출 차단 ----
     # 어떤 토픽/서비스/파라미터 이름과도 매칭되지 않는 정규식.

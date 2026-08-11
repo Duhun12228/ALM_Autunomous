@@ -1,0 +1,9 @@
+format_version: 1
+name: empty_test
+label: "빈 맵 (placeholder 확인용)"
+created: ""
+sensor: livox_mid360
+# 자산이 하나도 없는 맵의 화면 표시를 확인하려고 둔 시험용 폴더다.
+# maps/active.yaml 을 empty_test 로 바꾸면 매핑/자율주행 탭에 placeholder 가 뜬다.
+# 필요 없어지면 폴더째 지워도 된다.
+notes: "시험용 빈 맵 — 지워도 됩니다"

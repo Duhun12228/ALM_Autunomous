@@ -4,9 +4,11 @@
         # 입력: /livox/lidar (PointCloud2 + per-point time) + /livox/imu (내장 6축)
         # 출력: odom->base_link TF (send_odom_base_tf), /Odometry.
         #       map->odom 은 icp_relocalization(transform_publisher)가 담당.
-        # ##TODO## prior_map_path 를 실제 주행 매핑으로 만든 map.pcd 로 지정.
+        # ⚠ 절대경로. localization.launch.py 의 map_pcd 인자(= maps/active.yaml 의
+        #   활성 맵)와 **같은 파일을 가리켜야** 한다. 둘이 어긋나면 fast_lio 와
+        #   teaser_fpfh_localizer 가 서로 다른 맵 위에서 돌아 조용히 틀린다.
         locate_in_prior_map: true
-        prior_map_path: "/home/kdh/ALM_Autunomous/ALM_auto_ws/src/alm_navigation/maps/alm_3d_map.pcd"
+        prior_map_path: "/home/kdh/ALM_Autunomous/ALM_auto_ws/src/alm_navigation/maps/alm_lab/cloud.pcd"
         feature_extract_enable: false
         point_filter_num: 3
         max_iteration: 3

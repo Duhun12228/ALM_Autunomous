@@ -12,7 +12,18 @@
         cube_side_length: 1000.0
         runtime_pos_log_enable: false
         # /map_save 서비스가 이 경로로 3D 점군맵을 저장한다.
-        map_file_path: "/home/kdh/ALM_Autunomous/ALM_auto_ws/src/alm_navigation/maps/alm_3d_map.pcd"
+        #
+        # ⚠ 여기만 절대경로다. fast_lio 가 이 값을 자기 파라미터로 읽으므로
+        #   launch 의 maps/active.yaml 치환이 닿지 않는다. (레이아웃: maps/<맵이름>/cloud.pcd)
+        #
+        #   웹에서 쓸 때는 손댈 필요 없다 — alm_web_backend 가 활성 맵을 바꾸거나
+        #   매핑을 시작할 때 이 줄을 자동으로 갈아끼운다. 단 SLAM 이 도는 중에는
+        #   안 바꾼다. fast_lio 는 기동 시점 값을 메모리에 들고 있어서, 파일만
+        #   고치면 화면이 말하는 저장 위치와 실제 저장 위치가 갈라진다.
+        #
+        #   터미널에서 직접 매핑할 때는 이 줄을 손으로 바꿔야 한다. 안 바꾸면
+        #   여기 적힌 맵의 cloud.pcd 를 덮어쓴다.
+        map_file_path: "/home/kdh/ALM_Autunomous/ALM_auto_ws/src/alm_navigation/maps/alm_lab/cloud.pcd"
 
         common:
             lid_topic:  "/livox/lidar"

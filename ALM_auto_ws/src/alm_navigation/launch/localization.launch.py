@@ -19,6 +19,7 @@
 """
 
 import os
+import sys
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
@@ -28,12 +29,20 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import map_layout  # noqa: E402  (같은 디렉터리의 공용 헬퍼)
+
 
 def generate_launch_description():
     nav_share = get_package_share_directory("alm_navigation")
     default_config = os.path.join(nav_share, "config", "fastlio_relocalization.yaml")
-    default_map = os.path.join(nav_share, "maps", "alm_3d_map.pcd")
-    default_fpfh_db = os.path.join(nav_share, "maps", "fpfh_map")
+
+    # 경로는 maps/active.yaml 이 가리키는 맵에서 조립한다 — 맵을 바꾸려면
+    # active.yaml 한 줄만 고치면 되고, 개별 인자는 그대로 덮어쓸 수 있다.
+    maps_root = map_layout.maps_root(nav_share)
+    active = map_layout.active_map_paths(maps_root)
+    default_map = active.cloud if active else ""
+    default_fpfh_db = active.fpfh_prefix if active else ""
 
     fastlio_config = LaunchConfiguration("fastlio_config")
     map_pcd = LaunchConfiguration("map_pcd")

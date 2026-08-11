@@ -1,9 +1,15 @@
 """자율주행 모드: 로봇 상시 스택 + FAST-LIO-Localization + Nav2.
 
+    ros2 launch alm_bringup navigation.launch.py
+
+맵 경로는 인자를 비워 두면 maps/active.yaml 이 가리키는 맵에서 자동으로 조립된다
+(maps/<맵이름>/grid.yaml · cloud.pcd · fpfh_map). 다른 맵을 쓰려면 active.yaml 을
+고치거나 인자로 직접 덮어쓴다:
+
     ros2 launch alm_bringup navigation.launch.py \
-      map:=<ws>/src/alm_navigation/maps/alm_map.yaml \
-      map_pcd:=<ws>/src/alm_navigation/maps/alm_3d_map.pcd \
-      fpfh_db_prefix:=<ws>/src/alm_navigation/maps/fpfh_map
+      map:=<ws>/src/alm_navigation/maps/<맵이름>/grid.yaml \
+      map_pcd:=<ws>/src/alm_navigation/maps/<맵이름>/cloud.pcd \
+      fpfh_db_prefix:=<ws>/src/alm_navigation/maps/<맵이름>/fpfh_map
 
 FPFH+TEASER++ 자동 초기위치가 완료된 뒤 RViz에서 Nav2 Goal을 지정하거나,
     ros2 topic pub /drive_mode std_msgs/msg/String "{data: 'auto'}" -1

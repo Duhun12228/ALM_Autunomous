@@ -18,6 +18,9 @@ install(
     scripts/pcd2pgm.py
     scripts/map_publisher.py
     scripts/pcd_replay.py
+    scripts/map_manager.py
+    scripts/migrate_maps.py
+    scripts/prior_cloud_publisher.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

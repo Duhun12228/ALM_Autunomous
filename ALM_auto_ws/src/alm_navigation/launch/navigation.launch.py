@@ -15,6 +15,7 @@
 """
 
 import os
+import sys
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
@@ -24,13 +25,21 @@ from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import map_layout  # noqa: E402  (같은 디렉터리의 공용 헬퍼)
+
 
 def generate_launch_description():
     nav_share = get_package_share_directory("alm_navigation")
     default_params = os.path.join(nav_share, "config", "nav2.yaml")
-    default_map = os.path.join(nav_share, "maps", "my_map.yaml")
-    default_map_pcd = os.path.join(nav_share, "maps", "alm_3d_map.pcd")
-    default_fpfh_db = os.path.join(nav_share, "maps", "fpfh_map")
+
+    # maps/active.yaml 이 가리키는 맵에서 세 경로를 한꺼번에 얻는다.
+    # (이전 기본값 my_map.yaml 은 실제로 존재한 적이 없었다.)
+    maps_root = map_layout.maps_root(nav_share)
+    active = map_layout.active_map_paths(maps_root)
+    default_map = active.grid_yaml if active else ""
+    default_map_pcd = active.cloud if active else ""
+    default_fpfh_db = active.fpfh_prefix if active else ""
 
     use_sim_time = LaunchConfiguration("use_sim_time")
     params_file = LaunchConfiguration("params_file")
