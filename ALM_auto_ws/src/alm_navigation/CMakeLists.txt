@@ -24,6 +24,8 @@ install(
     scripts/migrate_maps.py
     scripts/prior_cloud_publisher.py
     scripts/nav2_kinematic_check.py
+    scripts/virtual_pose_publisher.py
+    scripts/plan_probe.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
