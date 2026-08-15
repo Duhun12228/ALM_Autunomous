@@ -218,9 +218,40 @@ ros2 launch alm_bringup navigation.launch.py \
 - FAST-LIO-Localization
 - Nav2 planner/controller/BT
 
-RViz에서 **2D Pose Estimate**로 초기 위치를 주고 **Nav2 Goal**을 지정합니다.
+초기 위치는 지정하지 않습니다 — FPFH+TEASER++가 자동으로 찾습니다(§4).
+`map → odom` TF가 나오기 전까지는 목표를 줘도 의미가 없으니 먼저 확인하세요.
+
+### RViz에서 웨이포인트 찍기
+
+```bash
+rviz2 -d $WS/install/alm_navigation/share/alm_navigation/rviz/navigation.rviz
+```
+
+`localization.rviz` 와 달리 **Navigation 2 패널**(`nav2_rviz_plugins`)과
+코스트맵·경로 디스플레이가 들어 있습니다. 웨이포인트 모드가 그 패널에 있습니다.
+
+1. 왼쪽 아래 **Navigation 2** 패널에서 **Waypoint / Nav Through Poses mode** 클릭
+2. 상단 툴바 **Nav2 Goal** 로 맵을 찍습니다. 드래그해서 놓으면 **놓는 방향이 그 점의 yaw** 입니다
+3. 원하는 만큼 반복 — 찍을 때마다 목록에 쌓입니다
+4. **Start Waypoint Following** 클릭
+
+패널 버튼은 `/follow_waypoints` 액션을 부릅니다. CLI 로 같은 것을 보내려면:
+
+```bash
+ros2 action send_goal /follow_waypoints nav2_msgs/action/FollowWaypoints \
+  "{poses: [{header: {frame_id: map}, pose: {position: {x: 1.0, y: 0.0}, orientation: {w: 1.0}}}]}" --feedback
+```
+
+한 점만 갈 때는 패널 조작 없이 **Nav2 Goal** 을 바로 찍으면 됩니다
+(`/goal_pose` → `navigate_to_pose`).
+
 Nav2는 `/cmd_vel`을 만들고, `command_manager`가 `auto` 모드에서
 `normal/spin/crab` 중 실제 MCU에 보낼 모드를 선택합니다. 현재 crab은 기본 비활성입니다.
+
+⚠ **실차 주행 전에 `/mcu/command` 를 먼저 보세요.** `base_control.yaml` 의 4WIS
+변환 상수 8개가 아직 `##CONFIRM##` 입니다. Nav2 의 twist 가 그 상수를 거쳐
+rpm·조향각이 되므로, 값이 틀리면 명령과 다른 방향으로 갑니다. 바퀴를 띄운
+상태에서 `/mcu/command` 가 상식적인 값인지 확인한 뒤 바닥에 내리세요.
 
 ## 6. 주행 모드
 
