@@ -23,7 +23,7 @@
         #
         #   터미널에서 직접 매핑할 때는 이 줄을 손으로 바꿔야 한다. 안 바꾸면
         #   여기 적힌 맵의 cloud.pcd 를 덮어쓴다.
-        map_file_path: "/home/kdh/ALM_Autunomous/ALM_auto_ws/src/alm_navigation/maps/alm_lab/cloud.pcd"
+        map_file_path: "/home/kdh/ALM_Autunomous/ALM_auto_ws/src/alm_navigation/maps/cschool/cloud.pcd"
 
         common:
             lid_topic:  "/livox/lidar"
