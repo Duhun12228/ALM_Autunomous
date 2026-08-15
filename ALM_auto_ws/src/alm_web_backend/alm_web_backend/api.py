@@ -50,6 +50,8 @@ class Api:
         self.logger = logger
         # 잡은 HTTP 요청이 끝난 **뒤에** 완료된다. 그 시점에 말하려면 콜백이 필요하다.
         self.jobs.on_finish = self._job_finished
+        # 제어권도 같은 이유다. 만료는 HTTP 요청이 아예 없는 채로 일어난다.
+        self.session.on_change = self._session_changed
 
     # ── 음성 문구 ───────────────────────────────────────────────────────
     # 약어는 띄어쓴다 — 붙여 쓰면 합성기가 뭉갠다 ("SLAM" → "슬램" 이 아니라 잡음).
@@ -59,6 +61,31 @@ class Api:
         "fpfh": ("Building localization database",
                  "Localization database ready", "Localization database failed"),
     }
+
+    # 반납과 만료를 굳이 다른 문구로 나눈다. 반납은 조작자가 끝낸 것이고,
+    # 만료는 **쥔 채로 연결이 끊긴** 것이다 — 귀로 구분돼야 한다.
+    SESSION_VOICE = {
+        "acquired": ("Control acquired", "info", "웹 제어권 획득"),
+        "released": ("Control released", "info", "웹 제어권 반납"),
+        "expired": ("Control timed out", "warn",
+                    "웹 제어권 리스 만료 (하트비트 끊김)"),
+    }
+
+    def _session_changed(self, event, label):
+        """SessionLock 이 부른다. 스레드는 정해져 있지 않다 — HTTP 핸들러일
+        수도 있고, 만료를 감지한 주기 타이머일 수도 있다."""
+        entry = self.SESSION_VOICE.get(event)
+        if entry is None:
+            return
+        phrase, level, message = entry
+        self._log(level, f"{message}: {label}" if label else message)
+        # label 은 읽지 않는다 — 기본값이 접속 IP 라 자릿수를 하나씩 읽으면
+        # 5초가 넘고, 정작 알고 싶은 정보도 아니다.
+        #
+        # E-STOP 처럼 priority 2 + interrupt 로 올리지 않는다. 제어권이 풀린다고
+        # 로봇이 위험해지는 게 아니라 명령을 안 받을 뿐이고, 선점은 안전 사건
+        # 전용으로 남겨둔다.
+        self.ros.say(phrase, key="session")
 
     def check_processes(self):
         """프로세스가 **혼자 죽은 것**을 잡아 알린다. 주기 타이머가 부른다.
@@ -146,11 +173,12 @@ class Api:
         return self.session.status()
 
     def session_acquire(self, request):
+        # 로그와 음성은 SessionLock 의 on_change 가 낸다 (_session_changed).
+        # 여기서 또 내면 만료 경로만 빠진 반쪽짜리가 되고, 언젠가 갈라진다.
         label = request.str_field("label", default="") or request.client
         session_id = self.session.acquire(label)
         if session_id is None:
             raise ApiError(409, "다른 접속자가 제어권을 쥐고 있습니다.")
-        self._log("info", f"웹 제어권 획득: {label}")
         return {"session_id": session_id, **self.session.status()}
 
     def session_heartbeat(self, request):
@@ -160,8 +188,6 @@ class Api:
 
     def session_release(self, request):
         released = self.session.release(request.session_id)
-        if released:
-            self._log("info", "웹 제어권 반납")
         return {"released": released, **self.session.status()}
 
     # ── E-STOP ──────────────────────────────────────────────────────────

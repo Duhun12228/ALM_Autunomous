@@ -153,6 +153,11 @@ def main():
     # 프로세스가 혼자 죽는 것을 감시한다. /api/health 는 브라우저가 열려 있을
     # 때만 폴링되므로, 실차에서 화면 없이 돌 때는 아무도 안 본다.
     node.create_timer(2.0, api.check_processes)
+    # 같은 이유로 제어권 만료도 깨워줘야 한다. 리스 정리는 원래 누가 API 를
+    # 부를 때 곁다리로만 일어나는데, 락을 쥔 브라우저가 크래시하고 그게
+    # 유일한 접속자였다면 부를 사람이 없다. TTL 15초에 2초 폴링이면 늦어야
+    # 2초 뒤에는 알린다.
+    node.create_timer(2.0, session.poll)
 
     executor = rclpy.executors.MultiThreadedExecutor(num_threads=4)
     executor.add_node(node)

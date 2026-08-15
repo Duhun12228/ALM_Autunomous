@@ -65,6 +65,7 @@ PREWARM = (
     "Localization database failed",
     "Emergency stop", "Emergency stop released", "M C U fault",
     "S L A M process exited", "Voice ready",
+    "Control acquired", "Control released", "Control timed out",
 )
 
 # ── 스피커 버튼 (AVRCP) ────────────────────────────────────────────────
