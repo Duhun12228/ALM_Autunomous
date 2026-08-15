@@ -63,8 +63,11 @@ PREWARM = (
     "Building two D map", "Two D map ready", "Two D map failed",
     "Building localization database", "Localization database ready",
     "Localization database failed",
+    "Starting localization", "Localization started",
+    "Localization failed to start", "Localization stopped",
+    "Localization converged",
     "Emergency stop", "Emergency stop released", "M C U fault",
-    "S L A M process exited", "Voice ready",
+    "S L A M process exited", "Localization process exited", "Voice ready",
     "Control acquired", "Control released", "Control timed out",
 )
 

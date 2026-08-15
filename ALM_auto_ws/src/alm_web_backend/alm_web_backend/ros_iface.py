@@ -15,6 +15,8 @@ MutuallyExclusiveCallbackGroup 이면 요청 두 개가 겹쳤을 때 뒤엣것�
 응답을 기다리다 함께 멈춘다.
 """
 
+import math
+import threading
 import time
 
 import rclpy
@@ -22,6 +24,7 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy
 
+from geometry_msgs.msg import PoseWithCovarianceStamped
 from rcl_interfaces.srv import GetParameters
 from std_msgs.msg import Bool
 from std_srvs.srv import Trigger
@@ -61,6 +64,16 @@ class RosInterface(Node):
         # 구독자(voice_announcer)가 없어도 발행은 그냥 버려진다 — 확인하지 않는다.
         self._say_pub = self.create_publisher(Speech, "/alm/say", 10)
 
+        # 측위 수렴. HTTP 요청이 이미 끝난 **뒤에** 오는 사건이라 구독이 필요하다
+        # (잡 완료 콜백과 같은 이유). teaser_fpfh_localizer 가 성공했을 때 딱
+        # 한 번 낸다 — 그 뒤로는 스스로 유휴 상태가 되므로 재발행도 없다.
+        self._icp_lock = threading.Lock()
+        self._last_icp = None
+        self.on_localized = None
+        self._icp_sub = self.create_subscription(
+            PoseWithCovarianceStamped, "/icp_result", self._on_icp_result, 10,
+            callback_group=self._group)
+
         self._limits_cache = None
         self._limits_cache_at = 0.0
 
@@ -81,6 +94,45 @@ class RosInterface(Node):
             self._say_pub.publish(msg)
         except Exception:                                # noqa: BLE001
             pass
+
+    # ── 측위 결과 ───────────────────────────────────────────────────────
+    def _on_icp_result(self, msg):
+        pose = msg.pose.pose
+        q = pose.orientation
+        # yaw 만 뽑는다. roll/pitch 는 화면에서 쓸 데가 없고, 평면 위 로봇에서는
+        # 사실상 0 이다.
+        yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                         1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+        result = {
+            "x": round(pose.position.x, 3),
+            "y": round(pose.position.y, 3),
+            "z": round(pose.position.z, 3),
+            "yaw_deg": round(math.degrees(yaw), 1),
+            "frame_id": msg.header.frame_id,
+            "stamp_wall": time.time(),
+        }
+        with self._icp_lock:
+            self._last_icp = result
+
+        # 콜백은 **락 밖에서** 부른다 (session.py 의 _emit 과 같은 규약).
+        # 여기서 발화까지 하므로 뮤텍스를 쥔 채로 부르면 오디오 경로에 묶인다.
+        callback = self.on_localized
+        if callback is None:
+            return
+        try:
+            callback(result)
+        except Exception:                                # noqa: BLE001
+            pass
+
+    def last_icp_result(self):
+        with self._icp_lock:
+            return dict(self._last_icp) if self._last_icp else None
+
+    def clear_icp_result(self):
+        """측위를 새로 시작할 때 부른다. 안 지우면 이전 기동의 성공이 남아
+        있어서 화면이 '이미 수렴했다'고 거짓말한다."""
+        with self._icp_lock:
+            self._last_icp = None
 
     # ── 공통 ────────────────────────────────────────────────────────────
     def _call(self, client, request, timeout=5.0, what="", abort_if=None):
@@ -169,6 +221,20 @@ class RosInterface(Node):
             "publishers": names,
             "replay": any(name in self.REPLAY_NODES for name in names),
         }
+
+    # ── 그래프 조회 ─────────────────────────────────────────────────────
+    def running_nodes(self, wanted):
+        """wanted 중 지금 ROS 그래프에 있는 노드 이름.
+
+        ProcessManager 는 **자기가 띄운 것만** 안다. CLI 로 먼저 launch 를
+        띄워놓고 웹을 여는 것은 흔한 순서인데, 그 경우 슬롯은 비어 있으므로
+        중복 기동을 막지 못한다. 프로세스 표가 아니라 그래프에 물어야 한다.
+        """
+        try:
+            names = {name for name, _ in self.get_node_names_and_namespaces()}
+        except Exception:                                # noqa: BLE001
+            return []
+        return sorted(name for name in wanted if name in names)
 
     # ── command_manager 속도 한계 ───────────────────────────────────────
     LIMIT_KEYS = ("max_linear_x", "min_linear_x", "max_linear_y", "max_angular_z",

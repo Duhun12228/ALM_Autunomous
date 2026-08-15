@@ -12,7 +12,7 @@ import os
 import time
 
 from .http_server import ApiError, StreamResponse
-from . import maps_write
+from . import localization, maps_write
 from .jobs import JobError
 from .logging_util import log
 from .processes import ProcessError
@@ -52,6 +52,9 @@ class Api:
         self.jobs.on_finish = self._job_finished
         # 제어권도 같은 이유다. 만료는 HTTP 요청이 아예 없는 채로 일어난다.
         self.session.on_change = self._session_changed
+        # 측위 수렴도 마찬가지다. 기동 요청은 3초면 끝나고, 정합은 그 뒤에
+        # 수십 초에 걸쳐 일어난다.
+        self.ros.on_localized = self._localized
 
     # ── 음성 문구 ───────────────────────────────────────────────────────
     # 약어는 띄어쓴다 — 붙여 쓰면 합성기가 뭉갠다 ("SLAM" → "슬램" 이 아니라 잡음).
@@ -60,6 +63,13 @@ class Api:
         "pcd2pgm": ("Building two D map", "Two D map ready", "Two D map failed"),
         "fpfh": ("Building localization database",
                  "Localization database ready", "Localization database failed"),
+    }
+
+    # 슬롯이 **혼자 죽었을 때** 외치는 문구. 슬롯 이름을 그대로 읽히면
+    # "localization" 이 뭉개지므로 표로 둔다 (약어는 띄어쓰기 규칙과 같은 이유).
+    DIED_VOICE = {
+        "slam": "S L A M process exited",
+        "localization": "Localization process exited",
     }
 
     # 반납과 만료를 굳이 다른 문구로 나눈다. 반납은 조작자가 끝낸 것이고,
@@ -87,6 +97,14 @@ class Api:
         # 전용으로 남겨둔다.
         self.ros.say(phrase, key="session")
 
+    def _localized(self, result):
+        """teaser_fpfh_localizer 가 /icp_result 를 냈다. rclpy 콜백 스레드다."""
+        self._log("info",
+                  f"측위 수렴: x={result['x']} y={result['y']} "
+                  f"yaw={result['yaw_deg']}deg")
+        # 실차에서 이게 가장 기다리는 소리다 — 초기위치가 잡혀야 주행을 시작한다.
+        self.ros.say("Localization converged", key="localization")
+
     def check_processes(self):
         """프로세스가 **혼자 죽은 것**을 잡아 알린다. 주기 타이머가 부른다.
 
@@ -103,7 +121,7 @@ class Api:
             # stop() 을 거친 종료는 ProcessManager 가 표시한다. 그게 아닌데
             # 사라졌다면 스스로 죽은 것이다.
             if was and not now and not getattr(slot, "stop_requested", False):
-                self.ros.say(f"{name.upper().replace('SLAM', 'S L A M')} process exited",
+                self.ros.say(self.DIED_VOICE.get(name, "Process exited"),
                              priority=2, key=f"died:{name}")
                 self._log("warn", f"'{name}' 프로세스가 요청 없이 종료했습니다")
 
@@ -136,6 +154,11 @@ class Api:
         add("POST", "/api/mapping/stop", self.mapping_stop, needs_lock=True)
         add("POST", "/api/mapping/save", self.mapping_save, needs_lock=True)
 
+        add("GET", "/api/localization", self.localization_status)
+        add("GET", "/api/localization/log", self.localization_log)
+        add("POST", "/api/localization/start", self.localization_start, needs_lock=True)
+        add("POST", "/api/localization/stop", self.localization_stop, needs_lock=True)
+
         add("GET", "/api/jobs", self.job_list)
         add("GET", "/api/jobs/{id}", self.job_get)
         add("GET", "/api/jobs/{id}/stream", self.job_stream)
@@ -156,6 +179,9 @@ class Api:
             "session": self.session.status(),
             "processes": self.processes.status(),
             "map_save_available": self.ros.map_save_available(),
+            # 슬롯 표에는 없지만 그래프에는 있는 측위 노드. CLI 로 먼저 띄운
+            # 경우가 이것이고, 화면이 '측위 안 돌고 있음'이라고 말하면 안 된다.
+            "localization_nodes": self.ros.running_nodes(self.LOCALIZATION_NODES),
             "mapping_target": maps_write.read_mapping_target(self.fastlio_config),
             # 화면의 점군이 실측인지 재생본인지. 토픽 이름으로는 구분이 안 된다.
             "lidar_source": self.ros.lidar_source(),
@@ -300,6 +326,128 @@ class Api:
         # 저장된 파일의 사실(점 개수 등)은 여기서 지어내지 않는다.
         # map_manager 가 5초 안에 헤더를 읽어 /alm/map_inventory 로 알린다.
         return {"saved_to": target, "message": result["message"]}
+
+    # ── 측위 ────────────────────────────────────────────────────────────
+    # localization.launch.py 가 띄우는 노드들. 이름이 바뀌면 여기도 바꿔야 한다
+    # (중복 기동 감지가 조용히 무력해지는 종류의 어긋남이다).
+    LOCALIZATION_NODES = ("teaser_fpfh_localizer", "fastlio_localization")
+
+    def localization_status(self, _request):
+        slot = self.processes.slot("localization")
+        return {
+            "process": slot.info(),
+            # 슬롯이 비어 있어도 그래프에 떠 있을 수 있다 (CLI 기동).
+            "nodes": self.ros.running_nodes(self.LOCALIZATION_NODES),
+            "active_map": self.map_layout.active_map_name(self.maps_root),
+            # 이 슬롯이 어떤 맵으로 떠 있는지. args 를 그대로 되돌려주는 이유는
+            # 기동 뒤에 활성 맵이 바뀌었을 수 있기 때문이다 — 지금 돌고 있는
+            # 프로세스의 진실은 active.yaml 이 아니라 기동 인자에 있다.
+            "result": self.ros.last_icp_result(),
+        }
+
+    def localization_log(self, request):
+        """슬롯 로그 tail. /rosout 에 안 나오는 실패를 보기 위한 경로다.
+
+        기동 자체가 실패하거나 노드가 맵을 읽다 죽으면 ROS 로그는 한 줄도
+        안 남는다. 그때 화면의 /rosout 패널은 비어 있고, 조작자는 '멈춘 건지
+        도는 건지'를 알 수 없다.
+        """
+        try:
+            return self.processes.read_log("localization",
+                                           since=request.int_query("since", 0))
+        except ProcessError as error:
+            raise ApiError(404, str(error)) from error
+
+    def localization_start(self, request):
+        """활성 맵으로 측위 스택을 띄운다.
+
+        맵을 인자로 안 주면 active.yaml 을 따른다. 다만 **여기서 해석한
+        절대경로를 launch 인자로 명시 전달**한다 — launch 가 스스로 active.yaml 을
+        다시 읽게 두면, 요청과 파싱 사이에 활성 맵이 바뀌었을 때 화면이 보고한
+        맵과 실제로 뜬 맵이 갈라진다.
+        """
+        name = (request.str_field("map", default="")
+                or self.map_layout.active_map_name(self.maps_root))
+        if not name:
+            raise ApiError(409, "활성 맵이 없습니다. 맵을 먼저 만들고 선택하세요.")
+        paths = self._map_paths(name)
+
+        # 기동 전 점검. 실패는 전부 409 — 서버 오류가 아니라 '지금은 못 한다'다.
+        try:
+            summary = localization.check_assets(paths)
+            lidar_note = localization.check_lidar(self.ros.lidar_source())
+        except localization.PreflightError as error:
+            raise ApiError(409, str(error)) from error
+
+        conflict = self.processes.conflicting("localization")
+        if conflict:
+            raise ApiError(409, f"'{conflict}' 가 실행 중입니다. 먼저 종료하세요 — "
+                                f"FAST-LIO 가 두 개 뜨면 /Odometry 와 TF 가 겹칩니다.")
+
+        # 슬롯 표만으로는 부족하다. CLI 로 먼저 띄워놓고 웹을 여는 경우 슬롯은
+        # 비어 있어서 여기까지 통과하고, 그러면 fast_lio 두 개가 odom→base_link
+        # 를 동시에 내는 상태가 만들어진다 — 로그는 양쪽 다 깨끗하다.
+        already = self.ros.running_nodes(self.LOCALIZATION_NODES)
+        if already:
+            raise ApiError(409,
+                           f"측위 노드가 이미 떠 있습니다 ({', '.join(already)}). "
+                           f"웹 밖에서 기동한 것이라면 그 터미널에서 먼저 종료하세요 "
+                           f"— FAST-LIO 가 두 개면 /Odometry 와 TF 가 겹칩니다.")
+
+        accum = max(1, min(60, request.int_field("accum_frames", 10)))
+        launch_args = [
+            f"map_pcd:={paths.cloud}",
+            f"fpfh_db_prefix:={paths.fpfh_prefix}",
+            "auto_init:=true",
+            f"accum_frames:={accum}",
+        ]
+        # DB 가 자기 전처리 파라미터를 들고 다닌다. 화면에서 voxel 을 바꿔 DB 를
+        # 다시 만들어도 localizer 가 자동으로 따라온다 — 이게 없으면 DB 는 0.3,
+        # localizer 는 0.5 로 도는 조용한 고장이 난다.
+        launch_args += [f"{name}:={value}"
+                        for name, value in sorted(summary["params"].items())]
+
+        # 이전 기동의 성공이 남아 있으면 화면이 '이미 수렴했다'고 거짓말한다.
+        self.ros.clear_icp_result()
+
+        self.ros.say("Starting localization", key="localization")
+        try:
+            info = self.processes.start("localization", launch_args)
+        except ProcessError as error:
+            self.ros.say("Localization failed to start", key="localization")
+            raise ApiError(409, str(error)) from error
+        self.ros.say("Localization started", key="localization")
+        self._log("info", f"측위 기동: 맵 '{name}' "
+                          f"(feature {summary['db_features']}개, "
+                          f"{summary['cloud_points']:,}점, {accum}프레임 누적)")
+
+        notes = [note for note in (summary["warning"], lidar_note) if note]
+        return {"map": name, "process": info, "summary": summary,
+                "accum_frames": accum, "notes": notes,
+                "message": "로봇을 정지 상태로 두세요 — 정합 전에 라이다 "
+                           f"{accum}프레임을 누적합니다."}
+
+    def localization_stop(self, _request):
+        try:
+            info = self.processes.stop("localization")
+        except ProcessError as error:
+            raise ApiError(409, str(error)) from error
+
+        # 슬롯이 비어 있었다면 **아무것도 안 내린 것**이다. 그런데도 "종료했다"고
+        # 말하면 조작자는 측위가 멈춘 줄 안다 — CLI 로 띄운 스택이 그대로 도는
+        # 채로. 그건 화면이 하는 거짓말 중 가장 나쁜 종류다.
+        if info.get("already_stopped"):
+            leftover = self.ros.running_nodes(self.LOCALIZATION_NODES)
+            if leftover:
+                raise ApiError(409,
+                               f"웹이 띄운 측위가 없습니다. 지금 도는 것은 웹 밖에서 "
+                               f"기동한 것입니다 ({', '.join(leftover)}) — 그 터미널에서 "
+                               f"Ctrl-C 하세요.")
+            return {"process": info, "message": "실행 중인 측위가 없습니다."}
+
+        self.ros.clear_icp_result()
+        self.ros.say("Localization stopped", key="localization")
+        return {"process": info}
 
     # ── 작업 (subprocess) ───────────────────────────────────────────────
     def job_pcd2pgm(self, request):

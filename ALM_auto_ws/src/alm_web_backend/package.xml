@@ -18,6 +18,8 @@
   <exec_depend>rclpy</exec_depend>
   <exec_depend>std_msgs</exec_depend>
   <exec_depend>std_srvs</exec_depend>
+  <!-- /icp_result (PoseWithCovarianceStamped) 구독 — 측위 수렴 감지 -->
+  <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>alm_msgs</exec_depend>
   <!-- maps/ 레이아웃 해석(map_layout.py)과 pcd2pgm.py 를 빌려 쓴다 -->
   <exec_depend>alm_navigation</exec_depend>

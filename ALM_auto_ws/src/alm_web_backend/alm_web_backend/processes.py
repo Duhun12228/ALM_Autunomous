@@ -28,10 +28,16 @@ from .logging_util import log
 # 슬롯 이름 → (패키지, launch 파일). 이 표에 없으면 기동하지 않는다.
 LAUNCH_ALLOWLIST = {
     "slam": ("alm_navigation", "slam.launch.py"),
-    # Phase 4 에서 추가 예정:
-    #   "localization": ("alm_navigation", "localization.launch.py"),
+    "localization": ("alm_navigation", "localization.launch.py"),
+    # Phase 4-2 에서 추가 예정:
     #   "navigation":   ("alm_navigation", "navigation.launch.py"),
 }
+
+# 동시에 떠 있으면 안 되는 조합. 둘 다 fast_lio 를 띄우므로 /Odometry 와
+# odom->base_link TF 를 두 노드가 동시에 낸다 — TF 트리에 부모가 둘인
+# 상태가 되어 조회하는 쪽마다 다른 답을 받는다. 로그는 양쪽 다 깨끗해서
+# 화면만 보고는 알 수 없다.
+EXCLUSIVE_SLOTS = (("slam", "localization"),)
 
 # 이름이 비슷해서 헷갈리는데 절대 띄우면 안 되는 것들. 실수로 allowlist 에
 # 추가하려 할 때 걸리도록 명시해 둔다.
@@ -106,6 +112,67 @@ class ProcessManager:
         with self._lock:
             return [slot.info() for slot in self._slots.values()]
 
+    def _conflicting_locked(self, name):
+        """name 과 동시에 떠 있으면 안 되는데 지금 돌고 있는 슬롯 이름."""
+        for pair in EXCLUSIVE_SLOTS:
+            if name not in pair:
+                continue
+            for other in pair:
+                if other != name and self._slots[other].is_running():
+                    return other
+        return None
+
+    def conflicting(self, name):
+        with self._lock:
+            return self._conflicting_locked(name)
+
+    # ── 로그 tail ───────────────────────────────────────────────────────
+    # /rosout 으로는 안 보이는 것들을 위한 경로다. launch 자체가 못 뜨는 경우,
+    # 노드가 맵을 읽다 죽는 경우, PCL/TEASER 가 stderr 로 뱉는 예외는 ROS 로그
+    # 시스템을 거치지 않는다. 그때 화면의 /rosout 패널은 **비어 있고**, 조작자는
+    # 멈춘 건지 도는 건지 알 수 없다 — 가장 알고 싶은 순간에 가장 안 보인다.
+    MAX_TAIL_BYTES = 64 * 1024
+
+    def read_log(self, name, since=0):
+        """슬롯 로그를 바이트 오프셋부터 읽어 **완결된 줄만** 돌려준다.
+
+        오프셋 기반인 이유: 줄 번호로 세면 매번 파일을 처음부터 읽어야 한다.
+        마지막 줄이 아직 개행으로 안 끝났으면 그 줄은 남겨두고 오프셋도 그
+        앞까지만 올린다 — 반쪽짜리 줄을 화면에 뿌리지 않기 위해서다.
+        """
+        slot = self.slot(name)
+        path = slot.log_path
+        if not path or not os.path.isfile(path):
+            return {"slot": name, "lines": [], "offset": 0, "log_path": path,
+                    "running": slot.is_running(), "truncated": False}
+
+        size = os.path.getsize(path)
+        start = max(0, int(since or 0))
+        truncated = False
+        if start > size:
+            # 새 기동으로 로그 파일이 바뀌었다. 처음부터 다시 읽는다.
+            start = 0
+        if size - start > self.MAX_TAIL_BYTES:
+            start = size - self.MAX_TAIL_BYTES
+            truncated = True
+
+        try:
+            with open(path, "rb") as handle:
+                handle.seek(start)
+                chunk = handle.read(self.MAX_TAIL_BYTES)
+        except OSError as error:
+            raise ProcessError(f"로그를 읽을 수 없습니다: {error}") from error
+
+        cut = chunk.rfind(b"\n") + 1            # 0 이면 완결된 줄이 없다
+        offset = start + cut
+        text = chunk[:cut].decode("utf-8", errors="replace")
+        lines = text.splitlines()
+        if truncated and lines:
+            # 앞을 잘랐다면 첫 줄은 중간부터일 수 있다. 버리는 편이 정직하다.
+            lines = lines[1:]
+        return {"slot": name, "lines": lines, "offset": offset, "log_path": path,
+                "running": slot.is_running(), "truncated": truncated}
+
     # ── 기동 ────────────────────────────────────────────────────────────
     def start(self, name, launch_args=None, env=None):
         launch_args = list(launch_args or [])
@@ -119,6 +186,13 @@ class ProcessManager:
             if key in LAUNCH_DENYLIST:
                 raise ProcessError(f"{key[0]}/{key[1]} 는 웹에서 기동할 수 없습니다 — "
                                    f"{LAUNCH_DENYLIST[key]}")
+
+            other = self._conflicting_locked(name)
+            if other is not None:
+                raise ProcessError(
+                    f"'{other}' 가 실행 중입니다. '{name}' 과 동시에 띄울 수 "
+                    f"없습니다 — 둘 다 FAST-LIO 를 띄워서 /Odometry 와 "
+                    f"odom→base_link TF 가 겹칩니다. 먼저 '{other}' 를 종료하세요.")
 
             argv = ["ros2", "launch", slot.package, slot.launch_file] + launch_args
             stamp = time.strftime("%Y%m%d-%H%M%S")
