@@ -1005,3 +1005,44 @@ body.estop-on .hud{border-bottom-color:rgba(255,77,79,.3)}
 @media (prefers-reduced-motion:reduce){
   .alm-ph-sweep,.alm-ph-eye,.alm-ph-ping,.alm-ph-bot{animation:none}
 }
+
+/* ── 23. 정합 로그 (측위 레일) ──────────────────────────────
+   레일 폭이 348px 라 매핑 탭의 4열 .log-line 을 그대로 쓸 수 없다.
+   시각·태그를 한 줄, 본문을 그 아래 줄로 접는다. 로그 원문은 영어
+   그대로 둔다 — 번역하면 소스와 대조가 안 되고 검색도 안 걸린다. */
+.loc-log{height:260px;padding:10px 12px}
+.loc-log-empty{
+  color:var(--txt-3);font-size:11px;line-height:1.6;padding:6px 2px
+}
+.loc-line{
+  padding:5px 0;border-top:1px solid var(--hair);
+  font-family:var(--mono);font-size:11px;line-height:1.5
+}
+.loc-line:first-child{border-top:0}
+.loc-line .loc-head{display:flex;gap:7px;align-items:center;flex-wrap:wrap}
+.loc-line time{color:var(--txt-3);font-size:10px}
+.loc-line .loc-tag{
+  font-size:9px;font-weight:600;letter-spacing:.07em;
+  padding:1px 5px;border-radius:4px;
+  background:var(--raise-2);color:var(--txt-3);border:1px solid var(--hair-2)
+}
+.loc-line .loc-node{color:var(--txt-3);font-size:10px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.loc-line p{margin:2px 0 0;color:var(--txt-2);overflow-wrap:anywhere}
+
+/* 단계별 색. 실제로 눈이 가야 하는 것은 거절(warn)과 성공(ok)이다. */
+.loc-line.t-accum .loc-tag,.loc-line.t-attempt .loc-tag{color:var(--txt-2);border-color:var(--hair-2)}
+.loc-line.t-fpfh .loc-tag,.loc-line.t-match .loc-tag{color:var(--ice);border-color:var(--ice)}
+.loc-line.t-teaser .loc-tag{color:#8c61ff;border-color:#8c61ff}
+.loc-line.t-gicp .loc-tag{color:var(--brass);border-color:var(--brass)}
+.loc-line.t-consistency .loc-tag{color:var(--ok);border-color:var(--ok)}
+.loc-line.warn .loc-tag{color:var(--warn);border-color:var(--warn)}
+.loc-line.warn p{color:var(--warn)}
+.loc-line.error .loc-tag{color:var(--danger);border-color:var(--danger)}
+.loc-line.error p{color:var(--danger)}
+.loc-line.ok p{color:var(--ok)}
+
+.loc-log-foot{
+  display:flex;justify-content:space-between;align-items:center;
+  margin-top:8px;font-size:10px;color:var(--txt-3)
+}

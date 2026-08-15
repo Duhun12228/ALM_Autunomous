@@ -205,6 +205,22 @@ export class Commands {
   stopMapping() { return this.request('POST', '/api/mapping/stop', {}); }
   saveMap() { return this.request('POST', '/api/mapping/save', {}); }
 
+  // ── 측위 ────────────────────────────────────────────────────────────
+  // map 을 생략하면 서버가 active.yaml 의 활성 맵을 쓴다. 화면이 맵 이름을
+  // 지어내 보내지 않는 편이 낫다 — 활성 맵의 진실은 서버에 있고, 여기서
+  // 캐시한 값을 보내면 그 사이 바뀐 경우 엉뚱한 맵으로 측위가 뜬다.
+  startLocalization(options = {}) {
+    return this.request('POST', '/api/localization/start', options);
+  }
+  stopLocalization() { return this.request('POST', '/api/localization/stop', {}); }
+  localizationStatus() {
+    return this.request('GET', '/api/localization', undefined, { silent: true });
+  }
+  localizationLog(since = 0) {
+    return this.request('GET', `/api/localization/log?since=${since}`,
+      undefined, { silent: true });
+  }
+
   createMap(name, label, notes) {
     return this.request('POST', '/api/maps', { name, label, notes });
   }

@@ -15,6 +15,20 @@ import { toggleMapPlaceholder, toggleSvgMapPlaceholder } from './render/placehol
 // rcl_interfaces/msg/Log 의 레벨 상수
 const ROS_LOG_LEVEL = { 10: 'DEBUG', 20: 'INFO', 30: 'WARN', 40: 'ERROR', 50: 'ERROR' };
 
+/**
+ * 측위 스택을 이루는 노드들. 이 이름들의 로그는 전역 예산과 **별도로** 통과시킨다.
+ *
+ * 이유: 전역 logBudget 은 초당 20건을 모든 노드가 나눠 쓴다. 정합 중에는
+ * fast_lio 와 livox 파서가 훨씬 시끄러워서, 정작 봐야 할 teaser 줄이 예산에
+ * 밀려 조용히 버려질 수 있다. 정합 로그는 시도당 몇 줄이라 따로 빼도 부담이 없다.
+ */
+const LOCALIZATION_NODES = new Set([
+  'teaser_fpfh_localizer', 'transform_publisher', 'fastlio_localization',
+]);
+
+/** teaser_fpfh_localizer 가 쓰는 [단계] 태그. 소스의 로그 문자열과 1:1 이다. */
+const LOC_STAGE_TAGS = ['ACCUM', 'ATTEMPT', 'FPFH', 'MATCH', 'TEASER', 'GICP', 'CONSISTENCY'];
+
 // ##CONFIRM## 실제 배터리 팩 사양으로 맞출 것. fake_mcu 의 기본값과 동일하게 둔다.
 const BATTERY_EMPTY_V = 21.0;
 const BATTERY_FULL_V = 25.2;
@@ -71,6 +85,8 @@ export class Ingest {
     bridge.subscribe('/drive_mode/effective', (msg) => this.onEffectiveMode(msg));
     bridge.subscribe('/rosout', (msg) => this.onRosout(msg));
     bridge.subscribe('/Odometry', (msg) => this.onOdometry(msg));
+    // 측위 수렴. teaser_fpfh_localizer 가 성공했을 때 딱 한 번 낸다.
+    bridge.subscribe('/icp_result', (msg) => this.onIcpResult(msg));
 
     // /rosout 은 노드가 많으면 초당 수십 건도 들어온다. 렌더를 매 건 돌리면
     // 로그창이 화면을 잡아먹으므로 초당 처리량에 상한을 둔다.
@@ -435,12 +451,43 @@ export class Ingest {
 
   // ── 로그 ───────────────────────────────────────────────────────────
   onRosout(msg) {
+    const level = ROS_LOG_LEVEL[msg.level] ?? 'INFO';
+    const node = msg.name ?? 'unknown';
+    const text = msg.msg ?? '';
+
+    // 측위 로그는 전역 예산을 **거치지 않는다** (LOCALIZATION_NODES 주석 참조).
+    // 전역 로그창에도 그대로 넣는다 — 매핑 탭에서 보던 흐름이 끊기면 안 된다.
+    if (LOCALIZATION_NODES.has(node)) {
+      this.alm.addLocalizationLog?.({ level, node, text, stage: locStage(text) });
+    }
+
     if (this.logBudget <= 0) return;
     this.logBudget -= 1;
-    this.alm.addLog(
-      ROS_LOG_LEVEL[msg.level] ?? 'INFO',
-      msg.name ?? 'unknown',
-      msg.msg ?? '',
-    );
+    this.alm.addLog(level, node, text);
   }
+
+  /**
+   * /icp_result — 정합 성공. 이것이 도착했다는 사실 자체가 성공 신호다.
+   *
+   * 목업은 타이머로 1.3초 뒤에 '수렴'을 선언하고 fitness 0.087 을 지어냈다.
+   * 이제는 로봇이 실제로 pose 를 낼 때까지 아무 말도 하지 않는다.
+   */
+  onIcpResult(msg) {
+    const pose = msg?.pose?.pose;
+    if (!pose) return;
+    this.alm.onLocalizationConverged?.({
+      x: pose.position.x,
+      y: pose.position.y,
+      z: pose.position.z,
+      yaw: (quaternionToYaw(pose.orientation) * 180) / Math.PI,
+      frame: msg.header?.frame_id ?? 'map',
+    });
+  }
+}
+
+/** 로그 본문 앞머리의 [단계] 태그. 없으면 빈 문자열. */
+function locStage(text) {
+  const match = /^\[([A-Z]+)(?:\s+\d+)?\]/.exec(text || '');
+  if (!match) return '';
+  return LOC_STAGE_TAGS.includes(match[1]) ? match[1] : '';
 }

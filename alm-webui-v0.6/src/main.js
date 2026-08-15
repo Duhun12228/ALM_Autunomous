@@ -174,6 +174,20 @@ function start() {
         alm.state.slamRunning = running;
         alm.onSlamRunningChange?.(running, slam);
       }
+      // 측위도 같은 이유로 감시한다 — CLI 로 localization.launch.py 를 먼저
+      // 띄워두고 웹을 여는 것은 흔한 순서다.
+      //
+      // 슬롯과 그래프를 **둘 다** 본다. 슬롯만 보면 웹 밖에서 띄운 스택을
+      // '안 돌고 있음'으로 표시하고, 그래프만 보면 웹이 내릴 수 있는 것인지를
+      // 알 수 없다. external = 돌고 있는데 웹이 띄운 게 아니다 (= 못 내린다).
+      const loc = (health.processes || []).find((p) => p.slot === 'localization');
+      const nodes = health.localization_nodes || [];
+      const locRunning = Boolean(loc?.running) || nodes.length > 0;
+      const external = !loc?.running && nodes.length > 0;
+      if (locRunning !== alm.state.localization.running
+          || external !== alm.state.localization.external) {
+        alm.onLocalizationRunningChange?.(locRunning, loc, { external, nodes });
+      }
     } catch (error) {
       backendDot.className = 'status-dot danger';
       item?.setAttribute('title', `alm_web_backend: ${error.message}`);
@@ -205,9 +219,15 @@ function start() {
 /**
  * 아직 mock 인 조작 계열에 배지를 붙인다.
  *
- * 매핑 5개와 E-STOP 은 이제 실제로 로봇에 나간다(Phase 3). 여기 남은 것들은
- * 여전히 화면 안에서만 도는 것들이다 — 실데이터 패널과 섞여 있으면 조작자가
- * "눌렀으니 로봇이 반응했겠지"로 오해하므로 배지를 유지한다.
+ * 매핑 5개와 E-STOP 은 이제 실제로 로봇에 나간다(Phase 3). 측위(자동 탐색·
+ * 재측위)도 Phase 4-1 에서 붙었다. 여기 남은 것들은 여전히 화면 안에서만 도는
+ * 것들이다 — 실데이터 패널과 섞여 있으면 조작자가 "눌렀으니 로봇이 반응했겠지"로
+ * 오해하므로 배지를 유지한다.
+ *
+ * ⚠ #manualInitialPose 는 '아직 안 붙였다'가 아니라 **붙일 대상이 없다.**
+ *   이 브랜치의 teaser_fpfh_localizer 는 /initialpose 를 구독하지 않는다
+ *   (구독하는 것은 쓰지 않는 icp_node 다). 전역 정합이라 초기 추정 자체가
+ *   필요 없는 방식이므로, 배지를 유지하고 누르면 그렇게 말한다.
  *
  * ⚠ 수동주행(enterManual/exitManual)은 단순히 '아직 안 붙였다'가 아니다.
  *   base_control.yaml 의 4WIS 변환 상수 8개가 ##CONFIRM## 미확정이라, 지금
@@ -216,17 +236,20 @@ function start() {
  */
 function markMockControls() {
   const mockSelectors = [
-    ['#autoLocalization', 4], ['#manualInitialPose', 4], ['#relocalize', 4],
+    ['#manualInitialPose', 'manual-pose'],
     ['#startNavigation', 4], ['#pauseNavigation', 4], ['#cancelNavigation', 4],
     ['#enterManual', 5], ['#exitManual', 5],
   ];
+  const TITLES = {
+    'manual-pose': '연결 대상이 없습니다 — FPFH+TEASER++ 는 초기 추정 없이 전역에서 찾습니다',
+    4: '아직 목업입니다 — 자율주행 연동은 다음 단계입니다',
+    5: '아직 목업입니다 — 수동주행은 4WIS 변환 상수를 실차로 확정한 뒤에 붙입니다',
+  };
   for (const [selector, phase] of mockSelectors) {
     const node = document.querySelector(selector);
     if (!node) continue;
     node.classList.add('is-mock');
-    node.title = phase === 5
-      ? '아직 목업입니다 — 수동주행은 4WIS 변환 상수를 실차로 확정한 뒤에 붙입니다'
-      : '아직 목업입니다 — 측위·자율주행 연동은 다음 단계입니다';
+    node.title = TITLES[phase];
   }
 }
 

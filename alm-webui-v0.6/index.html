@@ -404,6 +404,7 @@
           <span class="command-label">초기위치</span>
           <button class="secondary-button" id="manualInitialPose">수동 지정</button>
           <button class="secondary-button" id="autoLocalization">자동 탐색</button>
+          <button class="secondary-button" id="stopLocalizationBtn" disabled>측위 중단</button>
           <button class="ghost-button" id="relocalize">재측위</button>
         </div>
         <div class="nav-run-group">
@@ -445,9 +446,35 @@
           <span class="mono" id="localizationProgressText">프레임 0 / 10 누적</span>
         </div>
         <div class="row"><span>모드</span><i class="lead"></i><strong id="localizationModeText">FPFH + TEASER++</strong></div>
-        <div class="row"><span>fitness</span><i class="lead"></i><strong class="mono" id="fitnessText">—</strong></div>
+        <div class="row"><span>맵</span><i class="lead"></i><strong class="mono" id="localizationMapText">—</strong></div>
+        <div class="row"><span>rmse</span><i class="lead"></i><strong class="mono" id="fitnessText">—</strong></div>
+        <div class="row"><span>겹침률</span><i class="lead"></i><strong class="mono" id="overlapText">—</strong></div>
         <div class="row"><span>pose</span><i class="lead"></i><strong class="mono" id="poseText">미확정</strong></div>
         <div class="row"><span>신뢰도</span><i class="lead"></i><strong id="confidenceText">—</strong></div>
+      </section>
+
+      <!-- 정합 로그. 두 출처를 토글한다.
+           ROS   : /rosout 의 teaser_fpfh_localizer 계열 (정상 동작 중의 진행)
+           출력  : launch 프로세스의 stdout/stderr (기동 실패·크래시)
+           둘은 서로 다른 종류의 실패를 잡는다 — ROS 로그가 비어 있는 것 자체가
+           증상일 때 볼 곳이 '출력' 쪽이다. -->
+      <section class="rail-block">
+        <div class="col-head">
+          <span class="lbl">정합 로그</span>
+          <div class="head-actions">
+            <select id="locLogSource" class="select-control tiny">
+              <option value="ros">ROS 로그</option>
+              <option value="process">프로세스 출력</option>
+            </select>
+            <button class="text-button" id="copyLocLogs" title="로그를 클립보드로 복사">복사</button>
+            <button class="text-button" id="clearLocLogs">지우기</button>
+          </div>
+        </div>
+        <div class="log-window loc-log" id="locLogWindow"></div>
+        <div class="loc-log-foot">
+          <span class="mono" id="locLogCount">0 줄</span>
+          <button class="text-button hidden" id="locLogFollow">↓ 최신으로</button>
+        </div>
       </section>
 
       <section class="rail-block">

@@ -54,7 +54,20 @@
     pointCount: 128420,
     mappingSteps: [],
     logs: [],
-    localization: { state: 'IDLE', frame: 0, fitness: null, pose: null },
+    // rmse/overlap 은 [GICP] 로그에서 뽑은 **실측**이다. 예전에는 'fitness' 라는
+    // 이름으로 0.087 을 지어내 그리고 있었다.
+    localization: {
+      state: 'IDLE', frame: 0, frameTotal: 10, attempts: 0,
+      matches: null, matchesNeeded: null, accepted: 0, needed: 0,
+      rmse: null, overlap: null, pose: null, map: '', running: null, external: false,
+    },
+    // 정합 로그는 전역 logs 와 **다른 버퍼**다. 120줄짜리 전역 버퍼에 섞으면
+    // fast_lio 수다에 밀려 정합 줄이 몇 초 만에 사라진다.
+    localizationLogs: [],
+    locLogSource: 'ros',
+    locLogFollow: true,
+    locLogOffset: 0,
+    locLogTimer: null,
     waypoints: [],
     addWaypoint: false,
     manualPose: false,
@@ -491,6 +504,25 @@
    * 만들어진 채 남아, 짝이 안 맞는 자산이 한 폴더에 섞인다. 그 DB 로 측위를
    * 돌리면 엉뚱한 곳에 수렴한다.
    */
+  /**
+   * 되돌릴 수 없는 조작 앞의 일반 확인창. body 는 신뢰된 문자열이므로 HTML 을
+   * 그대로 쓴다 (호출부는 전부 이 파일 안의 고정 문구다 — 사용자 입력을
+   * 여기에 넣지 말 것).
+   */
+  function confirmModal({ title, body, confirm = '계속', kicker = 'CONFIRM' }) {
+    return new Promise((resolve) => {
+      openModal(`
+        <div class="modal-head"><div><p class="section-kicker">${esc(kicker)}</p><h2>${esc(title)}</h2></div><button class="close-button" data-close-modal>×</button></div>
+        <div class="modal-body"><p class="modal-copy">${body}</p></div>
+        <div class="modal-actions"><button class="secondary-button" data-close-modal>취소</button><button class="primary-button" id="confirmModalOk">${esc(confirm)}</button></div>`);
+      let settled = false;
+      const finish = (value) => { if (!settled) { settled = true; resolve(value); } };
+      $('#confirmModalOk').addEventListener('click', () => { closeModal(); finish(true); });
+      $$('[data-close-modal]', $('#modal')).forEach((node) =>
+        node.addEventListener('click', () => finish(false)));
+    });
+  }
+
   function confirmOverwrite(mapName, existing) {
     const list = existing.map((asset) =>
       `<li><b>${esc(ASSET_LABEL[asset.kind] || asset.kind)}</b> — <code>${esc(ASSET_FILES[asset.kind] || asset.kind)}</code>`
@@ -681,18 +713,79 @@
     }
   }
 
-  function buildFpfhDb() {
+  /**
+   * FPFH 측위 DB 생성.
+   *
+   * voxel 이 이 작업의 핵심 손잡이다. 맵을 그 격자로 줄인 뒤 남은 점마다
+   * 기술자를 만들므로, **voxel 이 곧 DB 의 feature 개수**를 정한다. 적으면
+   * 정합이 자주 거절되고([MATCH] 문턱 20개), 너무 많으면 Orin Nano 에서
+   * 초기화가 느려진다.
+   *
+   * 여기서 고른 값은 측위 기동 시 fpfh_map.meta 에서 다시 읽혀 localizer 로
+   * 넘어간다 — 화면에서 바꿨는데 localizer 만 옛 값으로 도는 일은 없다.
+   */
+  function openFpfhBuilder() {
     if (!hasCloudAsset()) {
       toast('PCD가 필요합니다', '먼저 3D 맵을 저장하세요.', 'warning');
       return;
     }
-    return runAssetJob({
-      button: $('#buildFpfhDb'),
+    const entry = state.maps.find((map) => map.name === state.activeMap);
+    const cloud = entry?.assets?.find((asset) => asset.kind === 'cloud');
+    openModal(`
+      <div class="modal-head"><div><p class="section-kicker">FPFH DATABASE</p><h2>측위 DB 생성</h2></div><button class="close-button" data-close-modal>×</button></div>
+      <div class="modal-body"><p class="modal-copy"><b>${esc(state.activeMap)}</b> 의 <code>cloud.pcd</code>${cloud?.detail ? ` <small>(${esc(cloud.detail)})</small>` : ''} 를 격자로 줄인 뒤, 남은 점마다 주변 형상을 33차원 지문으로 만들어 저장합니다. 측위는 이 지문으로 현재 스캔의 위치를 맵 전체에서 찾습니다.</p>
+      <div class="modal-grid">
+        <label class="modal-field"><span>Voxel (m)</span><input id="fpfhVoxel" type="number" value="0.5" step="0.05" min="0.05" max="5"></label>
+        <label class="modal-field"><span>Normal radius (m)</span><input id="fpfhNormalRadius" type="number" value="1.0" step="0.1" min="0.1" max="10"></label>
+        <label class="modal-field"><span>Feature radius (m)</span><input id="fpfhFeatureRadius" type="number" value="2.5" step="0.1" min="0.1" max="20"></label>
+        <label class="modal-field"><span>Z min (m)</span><input id="fpfhZMin" type="number" value="-0.35" step="0.05"></label>
+        <label class="modal-field"><span>Z max (m)</span><input id="fpfhZMax" type="number" value="1.0" step="0.05"></label>
+      </div>
+      <p class="helper" id="fpfhHint"></p>
+      <p class="helper"><b>voxel 을 줄이면</b> 남는 점이 많아져 feature 가 늘고 정합이 잘 붙습니다. 대신 생성 시간·파일 크기가 커지고, 매 스캔마다 FPFH 를 다시 계산하는 측위 쪽도 무거워집니다. 실내 복도처럼 형상이 반복되는 곳은 0.25~0.3 이 무난하고, 넓고 특징이 뚜렷한 곳은 0.5 로 충분합니다.<br>
+      <b>반경 두 개는 voxel 과 같이 움직여야 합니다.</b> normal ≈ voxel×2, feature ≈ voxel×5 가 기준입니다. voxel 만 줄이면 반경 안에 점이 너무 많이 들어와 지문이 뭉개집니다.</p>
+      <pre class="job-log" id="jobLog">대기 중</pre></div>
+      <div class="modal-actions"><button class="secondary-button" data-close-modal>닫기</button><button class="primary-button" id="runFpfhJob">DB 생성</button></div>`);
+
+    // voxel 을 만지면 두 반경을 같이 끌어준다. 사용자가 직접 고친 뒤에는
+    // 건드리지 않는다 — 손으로 넣은 값을 화면이 되돌리면 안 된다.
+    const voxel = $('#fpfhVoxel');
+    const normal = $('#fpfhNormalRadius');
+    const feature = $('#fpfhFeatureRadius');
+    let radiiTouched = false;
+    for (const node of [normal, feature]) {
+      node.addEventListener('input', () => { radiiTouched = true; });
+    }
+    const syncHint = () => {
+      const v = Number(voxel.value) || 0.5;
+      if (!radiiTouched) {
+        normal.value = (v * 2).toFixed(2);
+        feature.value = (v * 5).toFixed(2);
+      }
+      // 점 개수는 형상에 따라 다르므로 예측하지 않는다. 대신 지금 DB 가 있으면
+      // 그 실측치를 기준선으로 보여준다 — 비교할 대상이 있어야 판단이 된다.
+      const fpfh = entry?.assets?.find((asset) => asset.kind === 'fpfh');
+      $('#fpfhHint').innerHTML = fpfh?.present
+        ? `현재 DB: <b>${esc(fpfh.detail || '?')}</b> — 정합이 <code>[MATCH]</code> 에서 자주 거절되면 voxel 을 줄여 다시 만드세요.`
+        : '아직 DB 가 없습니다. 먼저 기본값으로 만든 뒤, 정합이 잘 안 붙으면 voxel 을 줄여 다시 만드는 순서를 권합니다.';
+    };
+    voxel.addEventListener('input', syncHint);
+    syncHint();
+
+    $('#runFpfhJob').addEventListener('click', (event) => runAssetJob({
+      button: event.currentTarget,
       stepKey: 'fpfh_db',
       label: 'fpfh_map_builder',
-      run: (api) => api.runFpfh({ map: state.activeMap }),
+      run: (api) => api.runFpfh({
+        map: state.activeMap,
+        voxel: Number(voxel.value),
+        normal_radius: Number(normal.value),
+        feature_radius: Number(feature.value),
+        z_min: Number($('#fpfhZMin').value),
+        z_max: Number($('#fpfhZMax').value),
+      }),
       done: 'FPFH 측위 DB를 생성했습니다',
-    });
+    }));
   }
 
   /** 활성 맵에 cloud.pcd 가 실제로 있는가 (map_manager 가 본 사실 기준). */
@@ -917,107 +1010,472 @@
       return;
     }
     if (state.manualPose) {
+      // 라이브에서는 여기 올 수 없다 (manualInitialPose 가 막는다). 목업 모드
+      // 데모용 경로로만 남긴다 — 라이브 상태를 가짜 pose 로 덮으면 안 된다.
+      if (isLive()) { state.manualPose = false; return; }
       const map = pixelToMap(point.x, point.y);
       state.localization.pose = { x: map.x, y: map.y, yaw: 0 };
       state.localization.state = 'WAITING_ICP';
       state.manualPose = false;
       renderLocalization();
-      setTimeout(() => completeLocalization('manual'), 1400);
+      setTimeout(() => completeLocalization(), 1400);
       return;
     }
   }
+
+  /* ── 측위 ────────────────────────────────────────────────────────────
+   *
+   * 진행 상태는 **로봇이 말해주는 것만** 그린다. 예전에는 이 자리에서
+   * setTimeout 으로 프레임 카운터를 돌리고 fitness 0.087 을 지어냈다 —
+   * 라이다가 꺼져 있어도 화면은 똑같이 '수렴'까지 갔다.
+   *
+   * 두 출처가 들어온다.
+   *   /rosout 의 [단계] 태그  → 진행 (ingest.addLocalizationLog)
+   *   /icp_result 도착        → 수렴 확정 (ingest.onLocalizationConverged)
+   * 둘 다 안 오면 화면도 아무 말 하지 않는다. 그게 사실이다.
+   */
+  const LOC_STAGE_STATE = {
+    ACCUM: 'ACCUMULATING', ATTEMPT: 'MATCHING',
+    FPFH: 'MATCHING', MATCH: 'MATCHING', TEASER: 'MATCHING',
+    GICP: 'WAITING_ICP', CONSISTENCY: 'WAITING_ICP',
+  };
 
   function renderLocalization() {
     const loc = state.localization;
     const chip = $('#localizationChip');
     chip.className = 'state-chip';
-    $('#localizationProgress').classList.toggle('hidden', !['ACCUMULATING', 'MATCHING', 'WAITING_ICP'].includes(loc.state));
+    $('#localizationProgress').classList.toggle('hidden',
+      !['STARTING', 'ACCUMULATING', 'MATCHING', 'WAITING_ICP'].includes(loc.state));
+    const setProgress = (text, percent) => {
+      $('#localizationProgressText').textContent = text;
+      $('#localizationProgressBar').style.width = `${percent}%`;
+    };
+
     if (loc.state === 'IDLE') {
       chip.classList.add('idle'); chip.textContent = '대기';
       $('#localizationTitle').textContent = '초기위치가 필요합니다';
       $('#localizationDetail').textContent = 'FPFH + TEASER++ 자동 초기화 가능';
+    } else if (loc.state === 'STARTING') {
+      chip.classList.add('running'); chip.textContent = '기동';
+      $('#localizationTitle').textContent = '측위 스택을 띄우는 중';
+      $('#localizationDetail').textContent = 'localization.launch.py — 맵과 DB 를 읽습니다.';
+      setProgress('waiting for teaser_fpfh_localizer', 12);
     } else if (loc.state === 'ACCUMULATING') {
       chip.classList.add('running'); chip.textContent = '누적 중';
-      $('#localizationTitle').textContent = '라이다 프레임 누적 중';
+      $('#localizationTitle').textContent = loc.attempts > 1
+        ? `${loc.attempts}번째 시도 — 스캔 재누적` : '라이다 프레임 누적 중';
       $('#localizationDetail').textContent = '로봇을 정지 상태로 유지하세요.';
-      $('#localizationProgressText').textContent = `프레임 ${loc.frame} / 10 누적`;
-      $('#localizationProgressBar').style.width = `${loc.frame * 10}%`;
+      setProgress(`프레임 ${loc.frame} / ${loc.frameTotal} 누적`,
+        (loc.frame / Math.max(1, loc.frameTotal)) * 100);
     } else if (loc.state === 'MATCHING') {
       chip.classList.add('running'); chip.textContent = '매칭';
-      $('#localizationTitle').textContent = 'FPFH 대응점 탐색';
-      $('#localizationDetail').textContent = 'mutual + ratio 검증을 통과한 대응점을 모으고 있습니다.';
-      $('#localizationProgressText').textContent = 'FPFH correspondence matching';
-      $('#localizationProgressBar').style.width = '62%';
+      $('#localizationTitle').textContent = 'FPFH 대응점 · TEASER++ 전역정합';
+      $('#localizationDetail').textContent = '맵 전체에서 현재 스캔의 위치를 찾고 있습니다.';
+      // 대응점 수가 문턱을 못 넘는 것이 가장 흔한 실패다. 숫자를 그대로 보인다.
+      setProgress(loc.matches == null
+        ? 'FPFH correspondence matching'
+        : `대응점 ${loc.matches}` + (loc.matchesNeeded ? ` / ${loc.matchesNeeded} 필요` : ''),
+        62);
     } else if (loc.state === 'WAITING_ICP') {
-      chip.classList.add('warning'); chip.textContent = 'ICP';
-      $('#localizationTitle').textContent = '후보 2 / 5 시도 중';
-      $('#localizationDetail').textContent = 'ICP 수렴을 최대 12초 동안 확인합니다.';
-      $('#localizationProgressText').textContent = 'ICP elapsed 4.2 / 12.0 s';
-      $('#localizationProgressBar').style.width = '78%';
+      chip.classList.add('warning'); chip.textContent = 'GICP';
+      $('#localizationTitle').textContent = loc.needed
+        ? `일치 확인 ${loc.accepted} / ${loc.needed}`
+        : '지역 GICP 정밀화';
+      $('#localizationDetail').textContent =
+        '잘못된 단발 결과를 막기 위해 새 스캔에서 같은 답이 나오는지 확인합니다.';
+      setProgress(`overlap ${loc.overlap == null ? '—' : `${loc.overlap.toFixed(1)}%`}`
+        + ` · rmse ${fmtRmse(loc.rmse)}`, 84);
     } else if (loc.state === 'CONVERGED') {
       chip.classList.add('success'); chip.textContent = '수렴';
       $('#localizationTitle').textContent = '초기위치가 확정되었습니다';
-      $('#localizationDetail').textContent = 'map → odom 변환이 안정적으로 연결되었습니다.';
+      $('#localizationDetail').textContent = 'map → odom 변환이 연결되었습니다.';
     } else {
-      chip.classList.add('warning'); chip.textContent = '실패';
-      $('#localizationTitle').textContent = '측위에 실패했습니다';
-      $('#localizationDetail').textContent = '로봇 위치를 이동한 뒤 다시 시도하세요.';
+      chip.classList.add('warning'); chip.textContent = '중단';
+      $('#localizationTitle').textContent = '측위가 종료되었습니다';
+      $('#localizationDetail').textContent = '정합 로그에서 거절 사유를 확인하세요.';
     }
-    $('#fitnessText').textContent = loc.fitness == null ? '—' : loc.fitness.toFixed(3);
-    $('#poseText').textContent = loc.pose ? `${loc.pose.x.toFixed(2)}, ${loc.pose.y.toFixed(2)}, ${loc.pose.yaw}°` : '미확정';
+
+    // 버튼은 **서버가 본 슬롯 상태**를 따른다 (loc.running). 화면의 진행 상태로
+    // 판단하면 CLI 로 띄운 측위나 혼자 죽은 프로세스를 놓친다.
+    // running === null 은 '아직 모른다' 라 목업 모드와 첫 폴링 전을 뜻한다.
+    const live = isLive();
+    const running = Boolean(loc.running);
+    // 웹 밖에서 띄운 것은 내릴 수 없다 — 프로세스 그룹을 우리가 안 갖고 있다.
+    // 버튼을 살려두면 눌렀을 때 409 만 받고 왜인지는 모른다.
+    const stopButton = $('#stopLocalizationBtn');
+    if (stopButton) {
+      stopButton.disabled = live && (!running || loc.external);
+      stopButton.title = loc.external
+        ? '웹 밖에서 기동한 측위입니다 — 띄운 터미널에서 Ctrl-C 하세요'
+        : '';
+    }
+    const startButton = $('#autoLocalization');
+    if (startButton) startButton.disabled = live && running;
+
+    $('#localizationMapText').textContent = loc.map || '—';
+    $('#fitnessText').textContent = fmtRmse(loc.rmse);
+    $('#overlapText').textContent = loc.overlap == null ? '—' : `${loc.overlap.toFixed(1)}%`;
+    $('#poseText').textContent = loc.pose
+      ? `${loc.pose.x.toFixed(2)}, ${loc.pose.y.toFixed(2)}, ${loc.pose.yaw.toFixed(0)}°`
+      : '미확정';
     $('#confidenceText').textContent = loc.state === 'CONVERGED' ? '높음' : '—';
     $('#localizationModeText').textContent = 'FPFH + TEASER++';
   }
 
+  const fmtRmse = (value) => (value == null ? '—' : value.toFixed(3));
+
   async function autoLocalization() {
+    const api = requireCmd();
+    if (!api) return;
     if (!canOperate()) return;
-    if (state.systemState !== 'IDLE') {
-      toast('측위를 시작할 수 없습니다', '현재 작업을 먼저 종료하세요.', 'warning');
+    if (state.systemState === 'MAPPING') {
+      toast('매핑 중에는 측위할 수 없습니다',
+        'FAST-LIO 가 두 개 뜨면 오도메트리와 TF 가 겹칩니다. 매핑을 먼저 끝내세요.',
+        'warning');
       return;
     }
-    state.systemState = 'LOCALIZING';
-    state.localization = { state: 'ACCUMULATING', frame: 0, fitness: null, pose: null };
-    $('#candidateLayer').classList.remove('hidden-layer');
-    renderLocalization(); renderGlobal();
-    addLog('INFO', 'teaser_fpfh_localizer', 'Relocalization requested. Accumulating 10 frames.');
-    for (let frame = 1; frame <= 10; frame += 1) {
-      await wait(180);
-      if (state.localization.state !== 'ACCUMULATING') return;
-      state.localization.frame = frame; renderLocalization();
+    if (state.localization.running) {
+      toast('측위가 이미 실행 중입니다', '다시 시도하려면 재측위를 쓰세요.', 'warning');
+      return;
     }
-    state.localization.state = 'MATCHING'; renderLocalization(); await wait(900);
-    state.localization.state = 'WAITING_ICP';
-    $('#candidateLayer').innerHTML = [[280,220],[410,265],[550,350],[620,235],[700,420]].map(([x,y], index) => `<circle cx="${x}" cy="${y}" r="${12-index}" fill="#8c61ff" opacity="${0.85-index*0.1}"/>`).join('');
-    renderLocalization(); await wait(1300);
-    completeLocalization('fpfh_teaser');
+
+    const button = $('#autoLocalization');
+    setButtonBusy(button, true, '기동 중…');
+    state.systemState = 'LOCALIZING';
+    state.localization = {
+      ...state.localization,
+      state: 'STARTING', frame: 0, attempts: 0, accepted: 0, needed: 0,
+      matches: null, matchesNeeded: null, rmse: null, overlap: null, pose: null,
+    };
+    renderLocalization(); renderGlobal();
+
+    try {
+      // 맵 이름을 보내지 않는다 — 활성 맵의 진실은 서버에 있다.
+      const result = await api.startLocalization({});
+      state.localization.map = result.map;
+      state.localization.running = true;
+      state.locLogOffset = 0;
+      state.localizationLogs = [];
+      renderLocalization();          // 버튼 상태를 즉시 뒤집는다 (폴링 3초를 기다리지 않는다)
+      renderLocalizationLogs();
+      startLocalizationLogPoll();
+      addLog('INFO', 'alm_web_backend',
+        `측위 기동: 맵 ${result.map} (feature ${result.summary?.db_features ?? '?'}개, `
+        + `${result.accum_frames}프레임 누적)`);
+      for (const note of result.notes || []) addAlarm('warning', '측위 주의', note);
+      toast('측위를 시작했습니다', result.message, 'success');
+    } catch (error) {
+      // 409 는 오류가 아니라 '지금은 못 한다'는 안내다. 이유가 본문에 있다.
+      state.systemState = 'IDLE';
+      state.localization.state = 'IDLE';
+      state.localization.running = false;
+      renderLocalization(); renderGlobal();
+      addLog('WARN', 'alm_web_backend', `측위 기동 거부: ${error.message}`);
+      toast('측위를 시작할 수 없습니다', error.message,
+        error.status === 409 ? 'warning' : 'error');
+    } finally {
+      setButtonBusy(button, false);
+    }
   }
 
-  function completeLocalization(mode) {
-    state.localization.state = 'CONVERGED';
-    state.localization.fitness = mode === 'manual' ? 0.164 : 0.087;
-    state.localization.pose ||= { x: -1.6, y: 0.2, yaw: 12 };
-    state.systemState = 'IDLE';
-    $('#candidateLayer').classList.add('hidden-layer');
+  /** 슬롯을 실제로 내린다. 확인창 없음 — 부르는 쪽이 책임진다. */
+  async function stopLocalizationProcess(button) {
+    const api = requireCmd();
+    if (!api) return false;
+    setButtonBusy(button, true, '종료 중…');
+    try {
+      // 서버가 프로세스 그룹에 SIGINT → SIGTERM → SIGKILL 을 보낸다. launch 가
+      // 자식 노드를 역순으로 정리할 시간을 주므로 최대 15초 걸린다.
+      await api.stopLocalization();
+      // 서버가 이미 내린 것이 확실하다. health 폴링(3초)을 기다리면 그동안
+      // '측위 중단' 버튼이 계속 눌리는 상태로 남는다.
+      state.localization.running = false;
+      stopLocalizationLogPoll();
+      renderLocalization();
+      addLog('INFO', 'alm_web_backend', 'localization.launch.py 를 종료했습니다.');
+      return true;
+    } catch (error) {
+      toast('측위 종료 실패', error.message, 'error');
+      return false;
+    } finally {
+      setButtonBusy(button, false);
+    }
+  }
+
+  /**
+   * '측위 중단' 버튼.
+   *
+   * 이미 수렴한 뒤에 내리는 것은 단순한 취소가 아니다. 이 launch 에는
+   * transform_publisher(map→odom)와 fast_lio(odom→base_link)가 같이 들어 있어서,
+   * 내리면 **로봇이 자기 위치를 통째로 잃는다.** 주행 중이면 Nav2 도 같이 멈춘다.
+   * 정합을 기다리다 취소하는 것과는 결과가 다르므로 그때만 확인을 받는다.
+   */
+  async function stopLocalizationClicked() {
+    if (!canOperate()) return;
+    const button = $('#stopLocalizationBtn');
+    if (state.localization.state === 'CONVERGED') {
+      const ok = await confirmModal({
+        title: '측위를 중단할까요?',
+        body: '이미 초기위치가 잡혀 있습니다. 중단하면 <b>map → odom 과 '
+          + 'odom → base_link 가 모두 사라져 로봇이 자기 위치를 잃습니다.</b> '
+          + '다시 쓰려면 처음부터 정합해야 합니다.',
+        confirm: '중단',
+        kicker: 'STOP',
+      });
+      if (!ok) return;
+    }
+    if (!await stopLocalizationProcess(button)) return;
+    toast('측위를 중단했습니다', 'localization.launch.py 를 종료했습니다.');
+  }
+
+  /**
+   * /icp_result 가 도착했다 (또는 목업 모드의 수동 지정).
+   *
+   * pose 인자가 있으면 실측이다. 없으면 목업 경로이므로 아무것도 지어내지 않고
+   * 상태만 바꾼다.
+   */
+  function completeLocalization(pose) {
+    const loc = state.localization;
+    loc.state = 'CONVERGED';
+    if (pose) loc.pose = pose;
+    if (state.systemState === 'LOCALIZING') state.systemState = 'IDLE';
+    $('#candidateLayer')?.classList.add('hidden-layer');
     renderLocalization(); renderGlobal();
-    addAlarm('info', '초기위치 확정', `ICP fitness ${state.localization.fitness.toFixed(3)}`);
-    addLog('INFO', 'teaser_fpfh_localizer', `Localization converged. mode=${mode} fitness=${state.localization.fitness.toFixed(3)}`);
-    toast('초기위치가 확정되었습니다', `Fitness ${state.localization.fitness.toFixed(3)}`, 'success');
+    const detail = loc.pose
+      ? `x ${loc.pose.x.toFixed(2)} · y ${loc.pose.y.toFixed(2)} · yaw ${loc.pose.yaw.toFixed(0)}°`
+      : '';
+    addAlarm('info', '초기위치 확정', detail);
+    toast('초기위치가 확정되었습니다', detail, 'success');
+  }
+
+  /** ingest 가 /icp_result 로 부른다. */
+  function onLocalizationConverged(pose) {
+    completeLocalization(pose);
   }
 
   function manualInitialPose() {
     if (!canOperate()) return;
+    if (isLive()) {
+      // 붙일 대상이 없다. 이 브랜치의 teaser_fpfh_localizer 는 /initialpose 를
+      // 구독하지 않는다 (구독하는 것은 안 쓰는 icp_node 다). 눌러도 아무 일이
+      // 없는 버튼을 '되는 척' 두지 않는다.
+      toast('수동 초기위치는 아직 연결되지 않았습니다',
+        'FPFH + TEASER++ 는 초기 추정 없이 전역에서 찾습니다 — 자동 탐색을 쓰세요.',
+        'warning');
+      return;
+    }
     state.manualPose = true; state.addWaypoint = false;
     $('#addWaypointMode').classList.remove('active');
     $('#mapModeHint').textContent = '맵을 클릭해 초기 위치를 지정하세요. 방향은 0°로 모의 적용됩니다.';
     toast('수동 초기위치 지정 모드', '맵에서 로봇 위치를 클릭하세요.');
   }
 
-  function relocalize() {
+  /* ── 정합 로그 ───────────────────────────────────────────────────────
+   * 출처가 둘이고 잡는 실패가 다르다.
+   *   ros     : /rosout — 정상 동작 중의 진행. 노드가 떠야만 나온다.
+   *   process : launch 의 stdout/stderr — 기동 실패, 맵 로딩 중 크래시, PCL 예외.
+   *             ROS 로그가 **비어 있는 것 자체가 증상**일 때 볼 곳이다.
+   */
+  const LOC_LOG_MAX = 200;
+
+  function addLocalizationLog(entry) {
+    const line = { time: nowTime(), source: 'ros', ...entry };
+    applyLocalizationProgress(line);
+
+    // [ACCUM] 은 목록에 넣지 않는다. 시도마다 열 줄이 똑같이 찍혀서, 200줄
+    // 버퍼가 20초 만에 그것들로만 채워진다 — 정작 읽어야 할 거절 사유
+    // ([MATCH]/[TEASER]/[GICP]) 가 밀려나간다. 프레임 진행은 진행바가 보여준다.
+    if (line.stage === 'ACCUM') return;
+
+    state.localizationLogs.push(line);
+    if (state.localizationLogs.length > LOC_LOG_MAX) state.localizationLogs.shift();
+    if (state.locLogSource === 'ros') renderLocalizationLogs();
+  }
+
+  /** 로그 한 줄에서 진행 상태와 수치를 뽑는다. 화면이 지어내지 않는 유일한 근거. */
+  function applyLocalizationProgress(line) {
+    const loc = state.localization;
+    const text = line.text || '';
+    const next = LOC_STAGE_STATE[line.stage];
+    if (next && !['CONVERGED'].includes(loc.state)) loc.state = next;
+
+    // "[ACCUM] frame 6/10, points=121083 (robot must remain stationary)"
+    const frame = /frame (\d+)\/(\d+)/.exec(text);
+    if (frame) {
+      loc.frame = Number(frame[1]);
+      loc.frameTotal = Number(frame[2]);
+    }
+    // "[MATCH] mutual+ratio matches=9 (required >= 20), time=.."
+    const matches = /matches=(\d+)(?:\s*\(required >= (\d+)\))?/.exec(text);
+    if (matches) {
+      loc.matches = Number(matches[1]);
+      if (matches[2]) loc.matchesNeeded = Number(matches[2]);
+    }
+    // "[TEASER] matches=.. clique=.. overlap=62.4% rmse=0.183 time=.."
+    const overlap = /overlap=([\d.]+)%/.exec(text);
+    if (overlap) loc.overlap = Number(overlap[1]);
+    const rmse = /rmse=([\d.]+)/.exec(text);
+    if (rmse) loc.rmse = Number(rmse[1]);
+    // "[CONSISTENCY] accepted 1/2"
+    const consistency = /accepted (\d+)\/(\d+)/.exec(text);
+    if (consistency) {
+      loc.accepted = Number(consistency[1]);
+      loc.needed = Number(consistency[2]);
+    }
+    // "[ATTEMPT 3] rejected; accumulating a fresh scan"
+    const attempt = /^\[ATTEMPT (\d+)\]/.exec(text);
+    if (attempt) {
+      loc.attempts = Number(attempt[1]);
+      loc.accepted = 0;
+    }
+    if (/localization succeeded/i.test(text)) loc.state = 'CONVERGED';
+    renderLocalization();
+  }
+
+  function renderLocalizationLogs() {
+    const box = $('#locLogWindow');
+    if (!box) return;
+    const rows = state.localizationLogs.filter((line) =>
+      (line.source || 'ros') === state.locLogSource);
+    $('#locLogCount').textContent = `${rows.length} 줄`;
+
+    if (!rows.length) {
+      box.innerHTML = `<div class="loc-log-empty">${state.locLogSource === 'ros'
+        ? '아직 측위 노드 로그가 없습니다. 측위를 시작하면 여기에 단계별로 흐릅니다.<br>'
+          + '기동했는데도 계속 비어 있다면 <b>프로세스 출력</b> 쪽을 보세요 — 노드가 뜨기 전에 죽으면 ROS 로그는 한 줄도 안 남습니다.'
+        : '프로세스 출력이 없습니다. 측위를 한 번도 기동하지 않았거나 로그 파일이 아직 비어 있습니다.'}</div>`;
+      return;
+    }
+
+    box.innerHTML = rows.map((line) => {
+      const level = (line.level || 'INFO').toLowerCase();
+      const ok = /succeeded|converged/i.test(line.text || '');
+      const stageClass = line.stage ? ` t-${line.stage.toLowerCase()}` : '';
+      const tag = line.stage || (line.source === 'process' ? 'OUT' : level.toUpperCase());
+      return `<div class="loc-line ${ok ? 'ok' : esc(level)}${stageClass}">
+        <div class="loc-head"><time>${esc(line.time)}</time>
+        <span class="loc-tag">${esc(tag)}</span>
+        <span class="loc-node">${esc(line.node || '')}</span></div>
+        <p>${esc(line.text || '')}</p></div>`;
+    }).join('');
+
+    // 사용자가 위로 스크롤해 읽는 중이면 밀지 않는다. 매핑 탭 로그창은 무조건
+    // 맨 아래로 밀어서, 읽으려고 올리면 새 줄이 올 때마다 튕겨 내려간다.
+    if (state.locLogFollow) box.scrollTop = box.scrollHeight;
+  }
+
+  function startLocalizationLogPoll() {
+    stopLocalizationLogPoll();
+    state.locLogTimer = setInterval(pollLocalizationLog, 1000);
+    pollLocalizationLog();
+  }
+
+  function stopLocalizationLogPoll() {
+    clearInterval(state.locLogTimer);
+    state.locLogTimer = null;
+  }
+
+  async function pollLocalizationLog() {
+    const api = cmd();
+    if (!api || !api.hasToken()) return;
+    try {
+      const result = await api.localizationLog(state.locLogOffset);
+      state.locLogOffset = result.offset ?? state.locLogOffset;
+      // [ACCUM] 은 초당 열 줄씩 찍힌다 (실측 18줄/s). 걸러내지 않으면 200줄
+      // 버퍼가 11초 만에 그것들로 채워져, 이 뷰의 존재 이유인 **기동 실패
+      // 출력**이 맨 위로 밀려나간다. 프레임 진행은 진행바가 이미 보여준다.
+      for (const text of (result.lines || []).filter((line) => !line.includes('[ACCUM]'))) {
+        state.localizationLogs.push({
+          time: nowTime(), source: 'process', node: 'launch',
+          level: /error|Traceback|what\(\):|terminate called/i.test(text) ? 'ERROR' : 'INFO',
+          stage: '', text,
+        });
+      }
+      if (state.localizationLogs.length > LOC_LOG_MAX) {
+        state.localizationLogs.splice(0, state.localizationLogs.length - LOC_LOG_MAX);
+      }
+      if ((result.lines || []).length && state.locLogSource === 'process') {
+        renderLocalizationLogs();
+      }
+      // 프로세스가 내려갔으면 더 볼 것이 없다. 마지막 한 번을 읽고 멈춘다.
+      if (!result.running && !(result.lines || []).length) stopLocalizationLogPoll();
+    } catch {
+      // 백엔드가 잠깐 끊긴 것일 수 있다. 다음 주기에 다시 시도한다.
+    }
+  }
+
+  /**
+   * 서버가 본 localization 슬롯 상태가 바뀌었다 (main.js 의 health 폴링).
+   * onSlamRunningChange 와 같은 이유다 — CLI 나 다른 탭에서 시작한 측위도
+   * 화면이 알아야 한다.
+   */
+  function onLocalizationRunningChange(running, slot, { external = false, nodes = [] } = {}) {
+    // 첫 폴링에서 null → false 로 확정되는 것은 '종료'가 아니라 '원래 안 돌고
+    // 있었다'다. 여기서 종료 처리를 하면 페이지를 열 때마다 로그에 거짓
+    // 종료가 한 줄씩 남는다.
+    const first = state.localization.running === null;
+    const was = state.localization.running;
+    state.localization.running = running;
+    state.localization.external = external;
+    if (first && !running) return;
+    if (running === was) { renderLocalization(); return; }   // external 만 바뀐 경우
+    if (running) {
+      if (state.localization.state === 'IDLE') {
+        state.localization.state = 'ACCUMULATING';
+        addLog('WARN', 'alm_web_backend', external
+          ? `웹 밖에서 시작된 측위를 감지했습니다 (${nodes.join(', ')}). `
+            + '웹에서는 내릴 수 없습니다 — 띄운 터미널에서 Ctrl-C 하세요.'
+          : `이 탭 밖에서 시작된 측위를 감지했습니다 (pid=${slot?.pid}).`);
+      }
+      // 기동 인자에 실제로 쓰인 맵이 진실이다. active.yaml 은 그 사이 바뀌었을 수 있다.
+      const arg = (slot?.args || []).find((item) => item.startsWith('map_pcd:='));
+      if (arg) {
+        const parts = arg.split('/');
+        state.localization.map = parts[parts.length - 2] || state.localization.map;
+      }
+      startLocalizationLogPoll();
+    } else {
+      stopLocalizationLogPoll();
+      if (state.localization.state !== 'CONVERGED') state.localization.state = 'STOPPED';
+      if (state.systemState === 'LOCALIZING') state.systemState = 'IDLE';
+      addLog('INFO', 'alm_web_backend', '측위 프로세스가 종료되었습니다.');
+    }
+    renderLocalization(); renderGlobal();
+  }
+
+  /**
+   * 재측위 = 측위 슬롯 재기동.
+   *
+   * teaser_fpfh_localizer 는 성공하면 finished_ 플래그로 영구히 유휴 상태가
+   * 되고, 리셋 서비스가 없다. 그래서 다시 찾게 하려면 프로세스를 새로 띄우는
+   * 수밖에 없는데, 같은 launch 에 fast_lio 가 들어 있어서 **추적 오도메트리도
+   * 함께 리셋된다.** 조작자가 그걸 모르고 누르면 안 된다.
+   */
+  async function relocalize() {
+    if (!canOperate()) return;
     if (state.nav.state === 'RUNNING') {
       toast('주행 중 재측위할 수 없습니다', '주행을 중단하거나 일시정지한 뒤 시도하세요.', 'warning');
       return;
     }
-    state.localization = { state: 'IDLE', frame: 0, fitness: null, pose: null };
+    if (isLive() && state.localization.running) {
+      const ok = await confirmModal({
+        title: '측위를 다시 시작할까요?',
+        body: '측위 스택을 통째로 재기동합니다. teaser_fpfh_localizer 에는 리셋 '
+          + '기능이 없어서 프로세스를 새로 띄우는 방법뿐이고, 같은 launch 에 있는 '
+          + 'FAST-LIO 도 함께 재시작되어 <b>지금까지의 추적 오도메트리가 초기화</b>됩니다.',
+        confirm: '재측위',
+      });
+      if (!ok) return;
+      if (!await stopLocalizationProcess($('#relocalize'))) return;
+      // 슬롯이 완전히 내려간 뒤에 다시 띄운다. stop() 은 SIGINT→SIGTERM 까지
+      // 기다렸다가 돌아오므로 여기서 추가로 잴 것은 없다.
+      state.localization.running = false;
+    }
+    state.localization = {
+      ...state.localization,
+      state: 'IDLE', frame: 0, attempts: 0, accepted: 0, needed: 0,
+      matches: null, matchesNeeded: null, rmse: null, overlap: null, pose: null,
+    };
     renderLocalization();
     autoLocalization();
   }
@@ -1436,7 +1894,7 @@
     $('#stopMapping').addEventListener('click', stopMapping);
     $('#savePcd').addEventListener('click', savePcd);
     $('#openPcd2Pgm').addEventListener('click', openPcd2Pgm);
-    $('#buildFpfhDb').addEventListener('click', buildFpfhDb);
+    $('#buildFpfhDb').addEventListener('click', openFpfhBuilder);
     $('#openMapManager').addEventListener('click', openMapManager);
     $('#newMapButton').addEventListener('click', openNewMapModal);
     $('#clearLogs').addEventListener('click', () => { state.logs = []; renderLogs(); });
@@ -1459,7 +1917,47 @@
     $$('[data-map-layer]').forEach((input) => input.addEventListener('change', () => $(`#${input.dataset.mapLayer}`).classList.toggle('hidden-layer', !input.checked)));
     $('#manualInitialPose').addEventListener('click', manualInitialPose);
     $('#autoLocalization').addEventListener('click', autoLocalization);
+    $('#stopLocalizationBtn')?.addEventListener('click', stopLocalizationClicked);
     $('#relocalize').addEventListener('click', relocalize);
+
+    // ── 정합 로그 ──
+    $('#locLogSource')?.addEventListener('change', (event) => {
+      state.locLogSource = event.target.value;
+      state.locLogFollow = true;
+      renderLocalizationLogs();
+    });
+    $('#clearLocLogs')?.addEventListener('click', () => {
+      state.localizationLogs = [];
+      renderLocalizationLogs();
+    });
+    $('#copyLocLogs')?.addEventListener('click', async () => {
+      const rows = state.localizationLogs
+        .filter((line) => (line.source || 'ros') === state.locLogSource)
+        .map((line) => `${line.time} ${line.level || ''} ${line.node || ''} ${line.text || ''}`);
+      if (!rows.length) { toast('복사할 로그가 없습니다', '', 'warning'); return; }
+      try {
+        await navigator.clipboard.writeText(rows.join('\n'));
+        toast('로그를 복사했습니다', `${rows.length} 줄`, 'success');
+      } catch {
+        // https 가 아니면 clipboard API 가 없다. 로봇은 http 로 뜨므로 흔한 경우다.
+        toast('클립보드를 쓸 수 없습니다', 'http 접속에서는 브라우저가 막습니다 — 직접 선택해 복사하세요.', 'warning');
+      }
+    });
+    // 위로 올려 읽는 중이면 자동 스크롤을 멈춘다. 매핑 탭 로그창은 새 줄이
+    // 올 때마다 무조건 맨 아래로 밀어서, 읽으려고 올리면 계속 튕겨 내려간다.
+    $('#locLogWindow')?.addEventListener('scroll', (event) => {
+      const box = event.currentTarget;
+      const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 24;
+      if (atBottom === state.locLogFollow) return;
+      state.locLogFollow = atBottom;
+      $('#locLogFollow')?.classList.toggle('hidden', atBottom);
+    });
+    $('#locLogFollow')?.addEventListener('click', () => {
+      state.locLogFollow = true;
+      $('#locLogFollow').classList.add('hidden');
+      const box = $('#locLogWindow');
+      if (box) box.scrollTop = box.scrollHeight;
+    });
     $('#startNavigation').addEventListener('click', startNavigation);
     $('#pauseNavigation').addEventListener('click', pauseNavigation);
     $('#cancelNavigation').addEventListener('click', () => cancelNavigation(true));
@@ -1571,6 +2069,9 @@
     renderMappingSteps, renderMapOptions,
     // 서버가 본 slam 프로세스 상태 변화 (다른 경로로 시작·종료된 매핑)
     onSlamRunningChange,
+    // 측위: 슬롯 상태 변화 / /rosout 진행 로그 / /icp_result 수렴
+    onLocalizationRunningChange, addLocalizationLog, onLocalizationConverged,
+    renderLocalizationLogs,
     addLog, addAlarm, toast, openSettings,
     // command_manager 의 실제 속도 한계를 받아 하드코딩을 덮는다
     applyLimits,
