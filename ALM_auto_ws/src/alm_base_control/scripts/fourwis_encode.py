@@ -175,8 +175,14 @@ def wz_from_steer(steer_deg, vx, params):
     사람도, 그 값을 쓰는 노드도 속는다.
 
     부호 규약은 ``_encode_normal`` 과 같다: STM32 가 내부에서 부호를 반전하므로
-    좌회전(wz>0) 명령은 **음수** ``steer_deg`` 다. 따라서 여기서도 부호를 뒤집는다.
-    ``vx`` 의 부호는 조향각 부호와 무관하다(전/후진은 rpm 부호가 표현).
+    **전진** 좌회전(wz>0)은 음수 ``steer_deg`` 다.
+
+    ★ ``vx`` 의 부호도 반드시 들어간다. 요레이트는 ω = v / R 이고 R 의 부호는
+      조향각이 정하므로, **같은 조향각에서 후진하면 요레이트가 뒤집힌다.**
+      (예전에는 ``wz`` 부호만 보고 계산해서 후진 선회가 반대로 나왔다.
+       ``_encode_normal`` 과 이 함수가 **같이** 틀려 있었기 때문에
+       '인코딩 -> 역산' 방식의 자체 시험은 이를 통과시켰다 — _selftest 의
+       물리 독립 검증 항목 참고.)
     """
     d = math.radians(abs(float(steer_deg)))
     if d < 1e-6 or abs(vx) < 1e-9:
@@ -184,7 +190,33 @@ def wz_from_steer(steer_deg, vx, params):
     icr_y = params._icr_y(d)
     if not math.isfinite(icr_y) or icr_y <= 0.0:
         return 0.0
-    return math.copysign(abs(vx) / icr_y, -float(steer_deg))
+    # 전진 기준 회전 방향(조향 부호가 결정) x 진행 방향(vx 부호)
+    sign = -math.copysign(1.0, float(steer_deg)) * math.copysign(1.0, float(vx))
+    return math.copysign(abs(vx) / icr_y, sign)
+
+
+def rpm_for_steer(steer_deg, vx, params):
+    """**실제로 명령한** 조향각과 목표 차체속도 -> 내측 전륜 rpm.
+
+    슬루 제한으로 조향각을 깎은 뒤 rpm 을 다시 계산하기 위한 함수다.
+    STM32 는 받은 rpm 을 '내측 전륜' 값으로 보고 나머지 3륜을 **자기가 들고 있는
+    조향각 기준으로** 스케일한다. 그래서 우리가 목표 조향각으로 계산한 rpm 을
+    보내면서 조향각만 깎으면, 조향각과 rpm 이 서로 다른 선회를 가리킨다.
+
+    실측 오차: 목표 29.5° 인데 슬루로 1° 만 나간 순간 차체속도가 -15.8% 어긋난다.
+    """
+    v = float(vx)
+    if abs(v) < _EPS_V:
+        return 0.0
+    d = math.radians(abs(float(steer_deg)))
+    # STM32 직진 데드밴드(CONS(4)) 이하는 STM32 가 직진으로 처리한다.
+    if math.degrees(d) <= params.straight_angle_deg:
+        return mps_to_rpm(v, params)
+    icr_y = params._icr_y(d)
+    if not math.isfinite(icr_y) or icr_y <= 0.0:
+        return mps_to_rpm(v, params)
+    v_inner = abs(v) * params._icr_distance_to_inner_front(d) / icr_y
+    return math.copysign(mps_to_rpm(v_inner, params), v)
 
 
 def slew_limit(target_deg, prev_deg, max_rate_deg_s, dt):
@@ -293,11 +325,23 @@ def _encode_normal(vx, wz, params):
     if math.degrees(d) <= params.straight_angle_deg:
         return _finish(0.0, mps_to_rpm(vx, params), MODE_NORMAL, params)
 
-    v_inner = abs(wz) * params._icr_distance_to_inner_front(d)
+    # ★ 내측 전륜 속도는 **vx 기준**으로 계산한다 (wz 기준이 아니다).
+    #   비클램프 구간에서는 icr_y(d) == |vx|/|wz| 이므로 둘이 완전히 같다.
+    #   클램프 구간(요청 R < R_min)에서만 갈리는데, 그때 wz 기준으로 계산하면
+    #   **낼 수 없는 요레이트를 맞추려고 전진속도를 부풀린다.**
+    #   실측: vx=0.10, wz=0.10 요청(R=1.0 m < R_min 1.643) 시 rpm 12.67 vs 7.71
+    #        -> 명령한 것보다 1.64 배 빠르게 달린다.
+    #   기구 한계로 못 도는 것은 '덜 도는' 것으로 처리해야지 '더 빨리 가는' 것으로
+    #   처리하면 안 된다. 곡률 오차는 MPPI 가 메우지만 속도 폭주는 못 메운다.
+    v_inner = abs(vx) * params._icr_distance_to_inner_front(d) / params._icr_y(d)
 
     # ★ 부호반전: STM32 가 normalDriveMode(-steer_deg, ...) 로 호출하므로
-    #   좌회전(wz>0)을 원하면 음수를 보내야 한다.
-    steer_deg = -math.copysign(math.degrees(d), wz)
+    #   **전진** 좌회전(wz>0)을 원하면 음수를 보내야 한다.
+    # ★★ vx 부호도 들어간다. ω = v/R 이고 R 부호는 조향각이 정하므로, 같은
+    #     조향각에서 후진하면 요레이트가 뒤집힌다. 즉 후진에서 같은 wz 를 내려면
+    #     조향 부호를 뒤집어야 한다. Hybrid-A* 가 후진(reverse_penalty 3.0)을
+    #     실제로 쓰므로 이 부호가 틀리면 후진 선회가 통째로 반대로 돈다.
+    steer_deg = -math.copysign(math.degrees(d), wz * math.copysign(1.0, vx))
     # 전/후진은 rpm 부호로 표현
     rpm = math.copysign(mps_to_rpm(v_inner, params), vx)
 
@@ -355,17 +399,23 @@ def _selftest():
                 if steer_deg == 0.0:          # 직진 데드밴드로 접힌 경우도 제외
                     continue
                 # 정방향: 보낸 각도로 ICR 을 다시 계산해 vx/wz 복원
+                # ★ vx 부호가 들어간다 — 같은 조향각에서 후진하면 요레이트가 뒤집힌다
                 d = math.radians(abs(steer_deg))
                 icr_y = p._icr_y(d)
-                wz_hat = math.copysign(abs(vx) / icr_y, -steer_deg)
+                wz_hat = math.copysign(
+                    abs(vx) / icr_y,
+                    -math.copysign(1.0, steer_deg) * math.copysign(1.0, vx))
                 err = abs(wz_hat - wz)
                 if err > 1e-4:
                     ok = False
                     print(f"  FAIL rws={rws} vx={vx} wz={wz}: wz_hat={wz_hat:.5f}")
-                # 좌회전이면 음수를 보내야 한다
-                if wz > 0 and steer_deg > 0:
+                # **전진** 좌회전이면 음수를 보내야 한다. 후진이면 반대.
+                if vx > 0 and wz > 0 and steer_deg > 0:
                     ok = False
-                    print(f"  FAIL 부호: wz={wz} -> steer={steer_deg}")
+                    print(f"  FAIL 부호(전진): wz={wz} -> steer={steer_deg}")
+                if vx < 0 and wz > 0 and steer_deg < 0:
+                    ok = False
+                    print(f"  FAIL 부호(후진): wz={wz} -> steer={steer_deg}")
     print("[normal] 역산<->정방향 일치 및 부호규약:", "OK" if ok else "FAIL")
 
     p = FourWISParams()
@@ -431,8 +481,66 @@ def _selftest():
         print("  실제:", got.hex(" ").upper())
     print("[frame] 문서 예시 프레임과 바이트 일치:", "OK" if frame_ok else "FAIL")
 
+    # ---- 물리 독립 검증: 요레이트 부호 ------------------------------------
+    # ##왜 따로 두나## 위의 [inv] 검증은 encode() 로 만든 값을 wz_from_steer() 로
+    # 되돌리는 방식이다. 두 함수가 **같은 규약으로 같이 틀리면 그대로 통과한다.**
+    # 실제로 후진 조향 부호 버그가 이 방식을 통과했다.
+    # 그래서 여기서는 코드를 전혀 참조하지 않고, 자전거 모델 ω = v/R 만으로
+    # 기대 부호를 세워 대조한다.
+    sign_ok = True
+    for rws in (0.0, 0.5):
+        pp = FourWISParams(rws_ratio=rws)
+        for vx in (0.30, -0.30, 0.08, -0.08):
+            for wz in (0.10, -0.10, 0.04, -0.04):
+                steer_deg, rpm, mode, _ = encode(vx, 0.0, wz, "normal", False, pp)
+                if mode != MODE_NORMAL or abs(steer_deg) < 1e-9:
+                    continue
+                d = math.radians(abs(steer_deg))
+                # 조향 부호 -> 전진 기준 회전 방향 (STM32 내부 부호반전 규약)
+                turn_fwd = -math.copysign(1.0, steer_deg)
+                # 진행 방향까지 곱해야 실제 요레이트 부호가 된다
+                expect = turn_fwd * math.copysign(1.0, vx)
+                got = math.copysign(1.0, wz)
+                if expect != got:
+                    sign_ok = False
+                    print(f"   [sign] vx={vx:+.2f} wz={wz:+.3f} -> steer {steer_deg:+.2f}° "
+                          f"실제 요레이트 부호 {expect:+.0f}, 요청 {got:+.0f}")
+                # rpm 부호는 진행 방향을 표현해야 한다
+                if rpm != 0.0 and math.copysign(1.0, rpm) != math.copysign(1.0, vx):
+                    sign_ok = False
+                    print(f"   [sign] rpm 부호가 vx 와 다름: vx={vx:+.2f} rpm={rpm:+.1f}")
+                # wz_from_steer 도 같은 부호여야 한다
+                if math.copysign(1.0, wz_from_steer(steer_deg, vx, pp)) != got:
+                    sign_ok = False
+                    print(f"   [sign] wz_from_steer 부호 불일치: vx={vx:+.2f} steer={steer_deg:+.2f}")
+    print("[sign] 요레이트 부호 (전/후진 모두, 물리 독립):", "OK" if sign_ok else "FAIL")
+
+    # ---- 슬루 제한 후 rpm 재계산 -------------------------------------------
+    # rpm_for_steer(목표조향, vx) 는 encode() 의 rpm 과 같아야 한다(같은 조향각이므로).
+    rpm_ok = True
+    for pp in (FourWISParams(), FourWISParams(rws_ratio=0.0)):
+        for vx in (0.20, -0.07, 0.10):
+            for wz in (0.10, -0.05, 0.02):
+                steer_deg, rpm, mode, _ = encode(vx, 0.0, wz, "normal", False, pp)
+                if mode != MODE_NORMAL:
+                    continue
+                again = rpm_for_steer(steer_deg, vx, pp)
+                if abs(again - rpm) > 1e-6:
+                    rpm_ok = False
+                    print(f"   [rpm] vx={vx:+.2f} wz={wz:+.3f} steer={steer_deg:+.2f}° "
+                          f"encode {rpm:.3f} != rpm_for_steer {again:.3f}")
+    # 조향각을 깎으면 rpm 도 바뀌어야 한다 (안 바뀌면 재계산이 무의미)
+    pz = FourWISParams()
+    r_full = rpm_for_steer(-29.0, 0.10, pz)
+    r_small = rpm_for_steer(-1.0, 0.10, pz)
+    if abs(r_full - r_small) < 1e-3:
+        rpm_ok = False
+        print(f"   [rpm] 조향각이 달라도 rpm 이 같다: {r_full:.3f} vs {r_small:.3f}")
+    print(f"[rpm] 슬루 후 rpm 재계산 (29°->1° 에서 {r_full:.2f}->{r_small:.2f} rpm):",
+          "OK" if rpm_ok else "FAIL")
+
     return (ok and straight_ok and deadband_ok and stop_ok and map_ok
-            and inv_ok and sl_ok and frame_ok)
+            and inv_ok and sl_ok and frame_ok and sign_ok and rpm_ok)
 
 
 if __name__ == "__main__":

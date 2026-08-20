@@ -564,9 +564,9 @@ class CommandManager(Node):
                 and not self.warned_no_orient):
             self.warned_no_orient = True
             self.get_logger().warn(
-                "/plan 의 pose orientation 이 전부 같습니다 — 플래너가 헤딩을 안 채웠습니다. "
-                "ALIGN 은 세그먼트 방위각으로 대체하는데, 이러면 후진 구간을 "
-                "헤딩오차 180° 로 오인할 수 있습니다.")
+                "/plan 의 pose orientation 이 경로 형상과 맞지 않습니다 — 플래너가 헤딩을 "
+                "안 채운 것으로 봅니다. **ALIGN 을 쉬게 둡니다**(추측해서 돌지 않습니다). "
+                "경로 추종 자체는 MPPI 가 계속 합니다.")
 
     def _robot_pose(self):
         """map 프레임 로봇 자세 (x, y, yaw). TF 가 없으면 None."""
@@ -934,6 +934,15 @@ class CommandManager(Node):
         steer_deg, wz_actual = self._apply_steer_slew(steer_deg, effective, self.out_vx, dt)
         if wz_actual is not None:
             self.out_wz = wz_actual
+            # ★ rpm 도 **깎인 조향각 기준으로 다시** 계산해야 한다.
+            #   STM32 는 받은 rpm 을 '내측 전륜' 값으로 보고 나머지 3륜을 자기가
+            #   들고 있는 조향각으로 스케일한다. 목표 조향각으로 계산한 rpm 을
+            #   보내면서 조향각만 깎으면 둘이 다른 선회를 가리킨다.
+            #   실측: 목표 29.5° 인데 슬루로 1° 만 나간 순간 차체속도 -15.8%.
+            #   (mode 0 정지 프레임은 건드리지 않는다 — 그건 rpm 0 이 맞다.)
+            if mode_id == fourwis_encode.MODE_NORMAL:
+                speed_rpm = fourwis_encode.rpm_for_steer(
+                    steer_deg, self.out_vx, self.wis)
 
         # ---- McuCommand 발행 ----
         self.sequence = (self.sequence + 1) & 0xFFFFFFFF

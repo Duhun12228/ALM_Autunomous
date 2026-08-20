@@ -81,20 +81,44 @@ class PathHeadingError:
             cum.append(cum[-1] + math.hypot(pts[i][0] - pts[i - 1][0],
                                             pts[i][1] - pts[i - 1][1]))
         self._cum = cum
-        if len(pts) >= 3:
-            ys = [p[2] for p in pts]
-            self._has_orient = (max(ys) - min(ys)) > 1e-6
-        else:
-            self._has_orient = False
-        if not self._has_orient and len(pts) >= 2:
-            # 플래너가 orientation 을 안 채웠다 -> 세그먼트 방위각으로 대체.
-            fixed = []
-            for i, (x, y, _) in enumerate(pts):
-                j = min(i + 1, len(pts) - 1)
-                k = i if j > i else max(i - 1, 0)
-                dx, dy = pts[j][0] - pts[k][0], pts[j][1] - pts[k][1]
-                fixed.append((x, y, math.atan2(dy, dx) if (dx or dy) else 0.0))
-            self._pts = fixed
+        self._has_orient = self._orientations_consistent(pts)
+
+    @staticmethod
+    def _orientations_consistent(pts, tol_deg=35.0, frac=0.7):
+        """경로의 pose.yaw 가 **경로 형상과 맞는가**를 본다.
+
+        ##왜 이렇게 판정하나##
+        예전에는 'yaw 값이 전부 같으면 플래너가 안 채운 것' 으로 보고 세그먼트
+        방위각으로 대체했다. 그 판정이 틀렸다 — **직선 경로는 전진이든 후진이든
+        yaw 가 상수**다. 그래서 정상적인 직선 후진 경로(yaw=0, 위치는 -x 로 진행)를
+        '미채움' 으로 오판하고 방위각(=180°)으로 갈아끼웠고, ALIGN 이 오차 180° 를
+        보고 **불필요한 제자리 회전을 명령**했다. 실측 재현: +180.0°.
+
+        올바른 기준은 'yaw 가 변하는가' 가 아니라 **'yaw 가 진행 방향과 정합하는가'**
+        다. Hybrid-A* 의 pose.yaw 는 차체 헤딩이므로, 각 점에서
+
+            전진 구간: yaw ≈ 세그먼트 방위각
+            후진 구간: yaw ≈ 세그먼트 방위각 + 180°
+
+        둘 중 하나에 가깝다. 둘 다에서 멀면 yaw 가 안 채워진 것이다.
+        (yaw 를 안 채운 경로가 우연히 +x 로 곧게 뻗으면 방위각 0 == yaw 0 이라
+         '정합' 으로 판정되는데, 그 경우엔 실제로 값이 맞으므로 문제없다.)
+        """
+        if len(pts) < 3:
+            return False
+        good = total = 0
+        for i in range(len(pts) - 1):
+            dx = pts[i + 1][0] - pts[i][0]
+            dy = pts[i + 1][1] - pts[i][1]
+            if math.hypot(dx, dy) < 1e-6:      # 중복점은 방위각이 무의미
+                continue
+            b = math.atan2(dy, dx)
+            e_fwd = abs(wrap_pi(pts[i][2] - b))
+            e_rev = abs(wrap_pi(pts[i][2] - b - math.pi))
+            total += 1
+            if min(e_fwd, e_rev) <= math.radians(tol_deg):
+                good += 1
+        return total > 0 and (good / total) >= frac
 
     def clear(self):
         self._pts = []
@@ -105,6 +129,11 @@ class PathHeadingError:
         """(err_rad, remaining_m, cross_m, idx) 또는 경로가 없으면 None."""
         n = len(self._pts)
         if n < 2:
+            return None
+        # ★ orientation 을 못 믿으면 **추측하지 않는다.**
+        #   틀린 추측의 대가가 '불필요한 180° 제자리 회전' 이라 너무 비싸다.
+        #   ALIGN 을 쉬게 두는 편이 훨씬 안전하다 (경로 추종은 MPPI 가 계속 한다).
+        if not self._has_orient:
             return None
         best_i, best_d2 = 0, float("inf")
         for i, (px, py, _) in enumerate(self._pts):
@@ -248,26 +277,40 @@ def _selftest():
         ok = ok and cond
 
     print("PathHeadingError")
-    # 직선 경로 (+x 방향), 로봇이 90° 틀어져 있음
+    # 직선 **전진** 경로 (+x 로 진행, yaw=0). 로봇이 90° 틀어져 있음
     pe = PathHeadingError(lookahead_m=1.0)
     pe.set_path([(float(i) * 0.1, 0.0, 0.0) for i in range(50)])
-    chk("orientation 있음으로 판정", pe.has_orientation() is False,
-        "(전부 yaw=0 이므로 세그먼트 대체 경로를 탐)")
+    chk("직선 전진 경로의 orientation 을 신뢰", pe.has_orientation() is True)
     r = pe.evaluate(0.0, 0.0, math.radians(90.0))
     chk("헤딩오차 -90°", abs(math.degrees(r[0]) + 90.0) < 1e-6,
         f"got {math.degrees(r[0]):.3f}")
     chk("남은거리 4.9 m", abs(r[1] - 4.9) < 1e-6, f"got {r[1]:.4f}")
     chk("횡오차 0", abs(r[2]) < 1e-9)
 
-    # yaw 가 실제로 변하는 경로: 후진 구간 흉내 (pose.yaw=0 인데 -x 로 진행)
-    pts = [(-0.1 * i, 0.0, 0.0) for i in range(30)]
-    pts = [(x, y, t + 1e-3 * i) for i, (x, y, t) in enumerate(pts)]  # yaw 미세 변화
-    pe2 = PathHeadingError(lookahead_m=1.0)
-    pe2.set_path(pts)
-    chk("orientation 채워짐 감지", pe2.has_orientation() is True)
-    e2 = pe2.evaluate(0.0, 0.0, 0.0)[0]
-    chk("후진 경로를 180° 오차로 오인하지 않음", abs(math.degrees(e2)) < 5.0,
-        f"got {math.degrees(e2):.3f}°")
+    # ★ 회귀 시험: 직선 **후진** 경로 (yaw=0 인데 위치는 -x 로 진행).
+    #   예전 판정('yaw 가 변하지 않으면 미채움')은 이걸 방위각 180° 로 갈아끼워
+    #   ALIGN 이 불필요한 제자리 회전을 명령했다.
+    pe_rev = PathHeadingError(lookahead_m=1.0)
+    pe_rev.set_path([(-0.1 * i, 0.0, 0.0) for i in range(30)])
+    chk("직선 후진 경로의 orientation 을 신뢰", pe_rev.has_orientation() is True)
+    e_rev = pe_rev.evaluate(0.0, 0.0, 0.0)[0]
+    chk("직선 후진을 180° 오차로 오인하지 않음", abs(math.degrees(e_rev)) < 1e-6,
+        f"got {math.degrees(e_rev):+.1f}° (예전 코드는 +180.0°)")
+
+    # yaw 가 형상과 전혀 안 맞는 경로 = 플래너가 안 채운 것 -> 판단 보류
+    pe_bad = PathHeadingError(lookahead_m=1.0)
+    pe_bad.set_path([(0.0, 0.1 * i, 0.0) for i in range(30)])   # +y 로 가는데 yaw=0
+    chk("미채움 orientation 감지", pe_bad.has_orientation() is False)
+    chk("미채움이면 판단 보류(None)", pe_bad.evaluate(0.0, 0.0, 0.0) is None,
+        "추측해서 도는 것보다 안 도는 게 낫다")
+
+    # 곡선 경로(전진)도 정상 신뢰
+    pts_c = []
+    for i in range(40):
+        th = 0.02 * i
+        pts_c.append((math.sin(th) * 5.0, 5.0 - math.cos(th) * 5.0, th))
+    pe_c = PathHeadingError(1.0); pe_c.set_path(pts_c)
+    chk("곡선 전진 경로 신뢰", pe_c.has_orientation() is True)
 
     print("AlignManeuver")
     am = AlignManeuver(enter_deg=50.0, exit_deg=10.0, enter_dur=0.5,
