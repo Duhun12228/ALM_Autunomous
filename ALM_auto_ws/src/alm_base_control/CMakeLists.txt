@@ -18,6 +18,8 @@ install(
   PROGRAMS
     scripts/command_manager.py
     scripts/fourwis_encode.py
+    scripts/path_align.py
+    scripts/steering_observer.py
     scripts/cmd_arbiter.py
     scripts/keyboard_teleop.py
   DESTINATION lib/${PROJECT_NAME}

@@ -11,6 +11,7 @@
 
   <depend>rclcpp</depend>
   <exec_depend>rclpy</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
   <depend>geometry_msgs</depend>
   <depend>nav_msgs</depend>
   <depend>std_msgs</depend>

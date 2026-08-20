@@ -166,6 +166,46 @@ def mps_to_rpm(v_mps, params):
     return v_mps / (2.0 * math.pi * params.r) * 60.0 * params.gear
 
 
+def wz_from_steer(steer_deg, vx, params):
+    """조향 명령각 -> 그 각도로 실제 나오는 요레이트 [rad/s]. ``_encode_normal`` 의 역함수.
+
+    조향 슬루 제한을 건 뒤 ``McuCommand.cmd_vel`` 을 재정합하는 데 쓴다.
+    슬루 제한으로 ``steer_deg`` 를 깎아놓고 ``cmd_vel.angular.z`` 는 원래 목표를
+    그대로 두면, 한 메시지 안의 두 필드가 서로 다른 이야기를 한다 — 로그를 읽는
+    사람도, 그 값을 쓰는 노드도 속는다.
+
+    부호 규약은 ``_encode_normal`` 과 같다: STM32 가 내부에서 부호를 반전하므로
+    좌회전(wz>0) 명령은 **음수** ``steer_deg`` 다. 따라서 여기서도 부호를 뒤집는다.
+    ``vx`` 의 부호는 조향각 부호와 무관하다(전/후진은 rpm 부호가 표현).
+    """
+    d = math.radians(abs(float(steer_deg)))
+    if d < 1e-6 or abs(vx) < 1e-9:
+        return 0.0
+    icr_y = params._icr_y(d)
+    if not math.isfinite(icr_y) or icr_y <= 0.0:
+        return 0.0
+    return math.copysign(abs(vx) / icr_y, -float(steer_deg))
+
+
+def slew_limit(target_deg, prev_deg, max_rate_deg_s, dt):
+    """조향각 명령의 변화율을 제한한다. ``max_rate_deg_s <= 0`` 이면 제한 없음.
+
+    왜 twist 가속제한(``max_accel_theta``)으로는 부족한가: normal 모드 조향각은
+    ``wz`` 가 아니라 **비율 wz/vx** 로 결정된다. 성분별 가속제한은 이 비를 전혀
+    묶지 못해서, 특히 ``vx`` 가 작은 출발 구간에서 ``dδ/dt`` 가 사실상 무한대가
+    된다(실측 재현: 20 ms 만에 0° -> 30°, 1500 deg/s). 어떤 조향 모터도 못 따라간다.
+
+    ⚠ ``max_rate_deg_s`` 를 실제 액추에이터 슬루율보다 **낮게** 잡는 것은 안전하다
+      (액추에이터가 여유롭게 따라오므로 명령 = 실제가 되어 모델이 자명하게 맞다).
+      **높게** 잡는 것이 위험하다(못 따라가고, 그 사실을 알 방법이 없다).
+      실측 전에는 낮게 잡을 것.
+    """
+    if max_rate_deg_s is None or max_rate_deg_s <= 0.0 or dt <= 0.0:
+        return float(target_deg)
+    step = float(max_rate_deg_s) * float(dt)
+    return float(max(prev_deg - step, min(float(target_deg), prev_deg + step)))
+
+
 def solve_inner_front_steer(vx, wz, params):
     """목표 (vx, wz) 를 만드는 내측 전륜 조향각 [rad, 부호없음] 을 역산.
 
@@ -359,6 +399,28 @@ def _selftest():
     _, _, _, note = encode(0.05, 0.0, 0.8, "normal", False, p)
     print("[clamp] 급선회 경고:", "OK" if note else "FAIL")
 
+    # wz_from_steer 가 _encode_normal 의 정확한 역함수인지 (조향 슬루 제한 재정합용)
+    inv_ok = True
+    for rws in (0.0, 0.3, 0.5, 0.6):
+        pi_ = FourWISParams(rws_ratio=rws)
+        for vx in (0.1, 0.25, 0.45, -0.15):
+            for wz in (0.05, 0.2, -0.35):
+                steer_deg, _, _, note_i = encode(vx, 0.0, wz, "normal", False, pi_)
+                if note_i or steer_deg == 0.0:      # clamp/데드밴드는 복원 대상 아님
+                    continue
+                wz_hat = wz_from_steer(steer_deg, vx, pi_)
+                if abs(wz_hat - wz) > 1e-4:
+                    inv_ok = False
+                    print(f"  FAIL rws={rws} vx={vx} wz={wz}: wz_hat={wz_hat:.5f}")
+    print("[inverse] wz_from_steer == encode 역함수:", "OK" if inv_ok else "FAIL")
+
+    # slew_limit: 상한 이내면 그대로, 넘으면 step 만큼만
+    sl_ok = (slew_limit(10.0, 0.0, 45.0, 0.02) == 0.9              # 45*0.02 = 0.9
+             and slew_limit(0.5, 0.0, 45.0, 0.02) == 0.5           # 상한 이내
+             and slew_limit(-10.0, 0.0, 45.0, 0.02) == -0.9
+             and slew_limit(10.0, 0.0, 0.0, 0.02) == 10.0)         # 0 = 제한 없음
+    print("[slew] 조향 슬루 제한:", "OK" if sl_ok else "FAIL")
+
     # 프레임이 uart_protocol.md 의 예시와 바이트 단위로 같아야 한다.
     # (mcu_bridge.py 의 CMD_FMT 경로와 이 도구가 갈라지지 않도록 고정)
     expect = bytes.fromhex("AA55010A000048410000964301018EDD")
@@ -369,7 +431,8 @@ def _selftest():
         print("  실제:", got.hex(" ").upper())
     print("[frame] 문서 예시 프레임과 바이트 일치:", "OK" if frame_ok else "FAIL")
 
-    return ok and straight_ok and deadband_ok and stop_ok and map_ok and frame_ok
+    return (ok and straight_ok and deadband_ok and stop_ok and map_ok
+            and inv_ok and sl_ok and frame_ok)
 
 
 if __name__ == "__main__":
