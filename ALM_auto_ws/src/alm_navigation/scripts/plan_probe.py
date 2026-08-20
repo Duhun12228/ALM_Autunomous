@@ -11,6 +11,8 @@ RViz 로 "경로가 그려지네" 를 보는 것과 다르다. 화면으로는 �
   · 계획 시간이 max_planning_time(2.0 s) 과 재계획 주기(1 Hz) 안에 드는가
   · 경로의 최소 선회반경이 R_min(1.643 m) 을 지키는가
     → Hybrid-A* 를 쓴 이유 그 자체다. 여기가 깨지면 경로가 나와도 못 따라간다
+    → cusp(전진<->후진 전환) 주변은 빼고 잰다. 거기서 경로가 접히므로 외접원
+      반경이 무의미해지고, 안 빼면 Reeds-Shepp 경로가 전부 위반으로 찍힌다
   · 후진(cusp) 이 몇 번 들어갔는가 — 후진은 전진의 1/3 속도다
   · 경로가 **관측된 자유공간**을 지나는가, 아니면 미관측 영역을 가로지르는가
     → grid.pgm 원본을 직접 읽어 판정한다. costmap 이 미관측을 어떻게 해석하든
@@ -132,20 +134,10 @@ def path_metrics(poses, occ_map):
     segments = np.linalg.norm(np.diff(xy, axis=0), axis=1)
     out["length"] = float(segments.sum())
 
-    # 최소 선회반경: 연속 세 점의 외접원 반경. 직선 구간(면적 0)은 무한대로 둔다.
-    radii = []
-    for i in range(len(xy) - 2):
-        a, b, c = xy[i], xy[i + 1], xy[i + 2]
-        ab, bc, ca = (np.linalg.norm(b - a), np.linalg.norm(c - b), np.linalg.norm(a - c))
-        area2 = abs((b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1]))
-        # 점이 겹치거나 거의 일직선이면 곡률 추정이 수치적으로 무의미하다.
-        if area2 < 1e-9 or min(ab, bc, ca) < 1e-6:
-            continue
-        radii.append(ab * bc * ca / (2.0 * area2))
-    out["min_radius"] = float(min(radii)) if radii else float("inf")
-
-    # cusp(진행방향 반전) 횟수. Reeds-Shepp 경로에서 후진 구간의 시작점이다.
-    cusps = 0
+    # cusp(진행방향 반전) 지점. Reeds-Shepp 경로에서 후진 구간의 시작점이다.
+    # ##순서주의## 최소 선회반경보다 **먼저** 구한다 — 반경 계산이 이 결과로
+    # cusp 주변을 걸러내야 하기 때문이다. 아래 주석 참고.
+    cusp_at = []
     previous = None
     for i in range(len(poses) - 1):
         step = xy[i + 1] - xy[i]
@@ -154,9 +146,36 @@ def path_metrics(poses, occ_map):
         heading = yaw_of(poses[i])
         forward = math.cos(heading) * step[0] + math.sin(heading) * step[1]
         if previous is not None and forward * previous < 0:
-            cusps += 1
+            cusp_at.append(i)          # 점 i 에서 전진<->후진이 뒤집힌다
         previous = forward
-    out["cusps"] = cusps
+    out["cusps"] = len(cusp_at)
+
+    # 최소 선회반경: 연속 세 점의 외접원 반경. 직선 구간(면적 0)은 무한대로 둔다.
+    #
+    # ##중요## cusp 주변은 제외한다. 외접원 공식은 세 점이 **하나의 원호 위에**
+    # 있다고 가정하는데, cusp 을 사이에 둔 세 점은 경로가 접혀 되돌아오므로 그
+    # 가정이 깨진다. 거기서 나오는 반경은 로봇이 실제로 도는 반경이 아니다 —
+    # cusp 은 조향이 아니라 기어 전환이고, 로봇은 서서 방향을 바꾼다.
+    #
+    # 걸러내지 않으면 Reeds-Shepp 경로는 cusp 이 항상 있으므로 이 지표가 **상시**
+    # R_min 위반으로 찍힌다. 실측: cschool 4개 목표에서 전체최소 0.07~0.32 m 로
+    # 전부 위반 판정이었는데, cusp 을 빼면 4개 모두 정확히 1.643 m = R_min 이었다.
+    # 늘 빨간불이면 진짜 위반이 생겨도 묻힌다.
+    skip = set()
+    for i in cusp_at:
+        skip.update(range(i - 2, i + 3))   # 반전 지점 앞뒤 2점
+    radii = []
+    for i in range(len(xy) - 2):
+        if (i + 1) in skip:                # 삼각형의 꼭짓점이 cusp 근방이면 버린다
+            continue
+        a, b, c = xy[i], xy[i + 1], xy[i + 2]
+        ab, bc, ca = (np.linalg.norm(b - a), np.linalg.norm(c - b), np.linalg.norm(a - c))
+        area2 = abs((b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1]))
+        # 점이 겹치거나 거의 일직선이면 곡률 추정이 수치적으로 무의미하다.
+        if area2 < 1e-9 or min(ab, bc, ca) < 1e-6:
+            continue
+        radii.append(ab * bc * ca / (2.0 * area2))
+    out["min_radius"] = float(min(radii)) if radii else float("inf")
 
     if occ_map is not None:
         counts = {"자유": 0, "미관측": 0, "점유": 0, "밖": 0}
@@ -230,7 +249,7 @@ def report(label, metrics, planning_time, occ_map):
         print("   (경로가 너무 짧아 채점 불가)")
         return
     print(f"  길이 {metrics['length']:6.2f} m"
-          f"  최소반경 {metrics['min_radius']:6.2f} m"
+          f"  최소반경(cusp제외) {metrics['min_radius']:6.2f} m"
           f"  cusp {metrics['cusps']}"
           f"  계획 {planning_time * 1000:6.1f} ms")
 
