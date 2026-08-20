@@ -27,9 +27,15 @@
 #
 # ---- 파생: 선회 한계 (fourwis_encode.min_turn_radius) ----
 #   최소 선회반경 R_min      = 1.643 m
-#   normal 모드 최대 요레이트 = 0.274 rad/s  @ vx=0.45   (= vx / R_min)
+#   normal 모드 최대 요레이트 = 0.122 rad/s  @ vx=0.20   (= vx / R_min)
 #   ⚠ 후륜 역조향(rws=0.5)이 반영된 값입니다. 후륜 고정(rws=0)으로 계산하면
 #     2.079 m 가 나오는데, 그건 이 플랫폼의 실제 기구가 아닙니다.
+#
+# ---- 속도: 조향 슬루율 실측 전 안전 설정 (2026-08-19) ----
+#   vx_max 0.45 -> 0.20,  max_steer_rate_deg_s 45 -> 20  (비 100 deg/m 유지)
+#   → 코너 진입 거리 0.300 m 로 동일, '명령 슬루율 < 실제 슬루율' 이 사실상 보장.
+#   → MPPI 지평선도 63×0.10 으로 함께 조정해 예측거리 1.26 m 를 복원.
+#   전체 근거: docs/control_pipeline.md §5.12,  base_control.yaml max_linear_x 주석
 #
 #   조향각별 선회반경:  10°→4.25 m   20°→2.31 m   25°→1.91 m   30°→1.643 m
 #
@@ -105,7 +111,16 @@ amcl:
     robot_model_type: "nav2_amcl::DifferentialMotionModel"
     save_pose_rate: 0.5
     sigma_hit: 0.2
-    tf_broadcast: true
+    # ★ false. 이 amcl 블록은 **죽은 설정**입니다 —
+    #   lifecycle_manager_localization.node_names 가 ["map_server"] 뿐이라
+    #   AMCL 은 애초에 뜨지 않고, map->odom 은 FAST-LIO + ICP 재측위가 담당합니다.
+    #   그런데 tf_broadcast: true 로 두면, 누군가 실수로 AMCL 을 띄우는 순간
+    #   map->odom 을 두 노드가 동시에 발행합니다. TF 프레임 하나에 부모가 둘이면
+    #   트리가 깨지고, 증상이 '가끔 로봇이 순간이동함' 으로 나와 원인 추적이
+    #   아주 어렵습니다. 블록을 지우지 않는 이유는 AMCL 로 되돌릴 선택지를
+    #   남겨두기 위함이며, 되돌릴 때는 이 값을 true 로 바꾸고 FAST-LIO 의
+    #   send_odom_base_tf 와 소유권을 정리해야 합니다.
+    tf_broadcast: false
     transform_tolerance: 1.0
     update_min_a: 0.1
     update_min_d: 0.1
@@ -200,23 +215,53 @@ controller_server:
       stateful: True
       plugin: "nav2_controller::SimpleGoalChecker"
       xy_goal_tolerance: 0.20
+      # ⚠ 2026-08-20: 여기를 3.15(무시)로 바꿔 'yaw 는 goal_yaw_aligner 가 맡는'
+      #   2단 분업을 시도했다가 **되돌렸다.** 시뮬레이션에서 효과가 없었다:
+      #       yaw_goal_tolerance 0.20 -> 3.15 로 해도 결과 동일
+      #       (0.331 m / 92.1° 에서 300 s 타임아웃, 정렬기는 트리거조차 안 됨)
+      #
+      #   구속하는 것은 **체커가 아니라 경로**였다. Hybrid-A* 가 만든 경로의
+      #   마지막 pose 가 여전히 목표 yaw 를 담고 있고, MPPI 는
+      #   PathAlignCritic(use_path_orientations=true, 가중치 14=최대)로 그 자세를
+      #   따라간다. 도달 불가능한 최종 헤딩을 계속 쫓느라 0.33 m 궤도에서 맴돈다.
+      #
+      #   체커만 풀면 **yaw 강제만 잃고 얻는 게 없다** — 그래서 원복.
+      #   해결하려면 플래너에게도 도달 가능한 목표를 줘야 한다
+      #   (docs/control_pipeline.md §12.5.2 의 후속 후보 참고).
+      #
       # Hybrid-A* 는 목표 자세를 지키므로 2D 시절처럼 넉넉히 열어둘 필요가 없다.
-      # 최종 자세 정렬은 command_manager 의 auto 모드가 spin 으로 처리한다
-      # (normal 모드는 제자리 회전을 못 하므로 이 tolerance 를 너무 조이면
-      #  spin 진입/이탈이 반복될 수 있다 — 0.20 rad ≈ 11.5°).
+      # 0.20 rad ≈ 11.5°.
       yaw_goal_tolerance: 0.20
 
     # ---------------- MPPI (샘플링 기반 MPC) ----------------
-    # 지평선 = time_steps * model_dt = 56 * 0.05 = 2.80 s
-    #   vx=0.45 기준 예측거리 1.26 m (차체 길이 1.37 m 와 비슷한 수준)
-    # model_dt 는 1/controller_frequency(=0.05) 와 맞춥니다.
+    # 지평선 = time_steps * model_dt = 63 * 0.10 = 6.30 s
+    #   vx=0.20 기준 예측거리 1.26 m (차체 길이 1.37 m 와 비슷한 수준)
+    #
+    # ★ 56×0.05 -> 63×0.10 (2026-08-19). vx_max 를 0.45 -> 0.20 으로 낮추면서
+    #   함께 바꿨습니다. 지평선은 '시간'으로 고정돼 있어 속도를 낮추면
+    #   **보이는 거리**가 줄어듭니다:
+    #        vx=0.45, 2.80 s -> 1.26 m   (차체 1.37 m 의 0.92배)
+    #        vx=0.20, 2.80 s -> 0.56 m   (0.41배)  ← 근시안. 코너를 미리 못 봄
+    #   63 × 0.10 = 6.30 s 로 늘려 0.20 m/s 에서 1.26 m 를 정확히 복원했습니다.
+    #
+    #   왜 126×0.05 가 아니라 63×0.10 인가: 둘 다 6.30 s 지만 CPU 가 2.25배 vs
+    #   1.12배입니다. 그리고 저속에서는 스텝당 이동거리가 0.02 m 밖에 안 되므로
+    #   dt 를 키워도 공간 해상도가 충분합니다(0.45 m/s + dt 0.05 일 때가 0.0225 m
+    #   였으니 오히려 비슷합니다). model_dt 가 제어주기(0.05)의 2배가 되지만,
+    #   첫 제어만 한 주기 적용되는 구조라 저속에서는 문제되지 않습니다.
+    #   ⚠ 대가: 지평선 '시간'이 6.3 s 로 길어져, 정지한 costmap 스냅샷에 대고
+    #     평가하는 오차가 커집니다(장애물 예측 부재 — docs/control_pipeline.md §5.8).
+    #     로봇이 느려져 반응 여유는 늘었으므로 감수합니다.
+    #   ⚠ vx_max 를 되돌리면 여기도 함께 되돌릴 것 — **곱(time_steps × model_dt ×
+    #     vx_max)이 1.26 m** 가 되게 유지하는 것이 규칙입니다.
+    #
     # ##TODO## Orin Nano 에서 controller_server CPU 가 포화되면
-    #          batch_size 1600 -> 1000, time_steps 56 -> 40 순으로 낮추세요.
+    #          batch_size 1600 -> 1000, time_steps 63 -> 45 순으로 낮추세요.
     #          코너에서 안쪽으로 파고들면 반대로 time_steps 를 올리세요.
     FollowPath:
       plugin: "nav2_mppi_controller::MPPIController"
-      time_steps: 56
-      model_dt: 0.05
+      time_steps: 63
+      model_dt: 0.10
       batch_size: 1600
       iteration_count: 1
 
@@ -235,16 +280,32 @@ controller_server:
 
       # 전진 = +x. vy 는 crab 전용이라 Nav2 경로에서는 쓰지 않습니다
       # (command_manager 가 crab 모드로 별도 처리).
-      vx_max: 0.45          # base_control.yaml max_linear_x
-      vx_min: -0.15         # base_control.yaml min_linear_x
+      # ★ 0.45/-0.15 -> 0.20/-0.07 (2026-08-19). 조향 슬루율 실측 전 안전 설정.
+      #   근거와 유도는 base_control.yaml 의 max_linear_x 주석에 있습니다
+      #   (요지: max_steer_rate/vx 비 100 deg/m 를 유지한 채 둘을 같이 낮추면
+      #    경로 모양은 그대로이고 '명령 < 실제 슬루율'이 보장된다).
+      #   ⚠ base_control.yaml · velocity_smoother 와 **셋이 같아야** 합니다.
+      #     nav2_kinematic_check.py 가 검사합니다.
+      vx_max: 0.20          # base_control.yaml max_linear_x
+      vx_min: -0.07         # base_control.yaml min_linear_x
       vy_max: 0.0
       # spin 모드 상한(auto_spin_max_angular_speed 0.45)에 맞춥니다.
-      # normal 모드에서 실제로 낼 수 있는 값은 vx/R_min = 0.274 @vx=0.45 이며,
-      # 그 사이 구간은 command_manager 가 조향각 한계로 클램프합니다.
+      # ★ 여기는 낮추지 않았습니다. spin 은 STM32 고정 자세(47°)로 도는 모드라
+      #   우리가 조향각을 연속 제어하지 않습니다 — 이번에 derisk 한 대상이 아닙니다.
+      #   normal 에서 실제로 낼 수 있는 값은 vx/R_min = 0.122 @vx=0.20 이며,
+      #   그 사이 구간은 command_manager 가 조향각 한계로 클램프합니다.
       wz_max: 0.45
 
       # 탐색 노이즈 표준편차 (제어 범위의 1/3 정도가 무난)
-      vx_std: 0.15
+      # ★ vx_std 0.15 -> 0.09. 제어 범위가 0.60 -> 0.27 로 줄었으므로 함께 줄입니다.
+      #   안 줄이면 표본 상당수가 vx_max 밖으로 나가 낭비됩니다 (0.27/3 = 0.09).
+      #   wz_std 는 유지합니다 — spin 상한(0.45)이 그대로라 탐색 범위가 필요합니다.
+      #   ⚠ 다만 normal 에서 실제 가능한 wz 는 0.122 뿐인데 MPPI 는
+      #     DiffDrive 모델이라 그걸 모릅니다. 초과분은 command_manager 클램프가
+      #     받아내고, 그 오차는 MPPI 가 위치 피드백으로 메웁니다(설계 의도).
+      #     이 간극이 vx 를 낮추면서 1.64배 -> 3.7배로 커졌다는 점은 기록해 둡니다
+      #     — 실차에서 선회 추종이 나쁘면 여기부터 의심하세요.
+      vx_std: 0.09
       vy_std: 0.0
       wz_std: 0.20
 
@@ -394,8 +455,16 @@ local_costmap:
 global_costmap:
   global_costmap:
     ros__parameters:
-      update_frequency: 1.0
-      publish_frequency: 1.0
+      # ★ 동적 장애물 반응 지연의 큰 몫이 여기 있었습니다.
+      #   회피의 주체는 로컬이 아니라 글로벌입니다 — MPPI 지평선(2.8 s = 1.26 m)
+      #   안에서 R_min=1.643 m 로 낼 수 있는 횡변위가 0.24 m 뿐이라
+      #   차체 반폭(0.53 m)을 못 비킵니다. 즉 MPPI 는 감속만 하고 실제 우회는
+      #   전역 재계획이 만듭니다. 그런데 그 재계획은 이 costmap 을 봅니다.
+      #   1.0 Hz -> 3.0 Hz 로 올리면 최악 대기가 0.45 m -> 0.15 m 로 줄어듭니다.
+      #   BT 의 IsPathValid 도 이 costmap 기준으로 판정하므로 함께 빨라집니다.
+      #   ##TODO## Orin Nano 에서 CPU 가 모자라면 2.0 으로 낮추세요.
+      update_frequency: 3.0
+      publish_frequency: 1.0        # 시각화용 — 올릴 이유 없음
       global_frame: map
       robot_base_frame: base_link
       use_sim_time: false
@@ -462,6 +531,28 @@ planner_server:
     use_sim_time: false
     # BT 의 RateController 가 1 Hz 로 재계획하므로 기대 주기도 1 Hz
     expected_planner_frequency: 1.0
+    # ★ 2026-08-20: 플래너 두 개. BT 가 순서대로 시도한다(Fallback).
+    #
+    #   GridBased  = SmacPlannerHybrid  — 평소. R_min 호만 쓰므로 빠르고 매끄럽다.
+    #   TightSpace = SmacPlannerLattice — GridBased 가 실패했을 때만.
+    #                제자리회전 프리미티브가 있어 "R_min 으로는 못 가는 길" 을 푼다.
+    #
+    # 왜 필요한가: SmacPlannerHybrid 는 R_min 호로만 탐색해 **제자리 회전을
+    # 표현할 수 없다.** 이 로봇은 4륜 독립조향이라 spin 으로 제자리 회전이
+    # 되는데, 그 능력이 계획 단계에서 접근 불가였다.
+    # 실제 맵(alm_lab)에서 통행가능 영역의 **33.1%** 는 R_min 만으로 방향을
+    # 되돌릴 수 없다(제자리회전 허용 시 96.4% 가 하나로 이어짐).
+    # 상세: docs/control_pipeline.md §12.5.2, alm_navigation/lattice_primitives/README.md
+    #
+    # ⚠ GridBased 가 성공하면 TightSpace 는 아예 호출되지 않는다 —
+    #   즉 평소 거동은 **이전과 완전히 동일**하고 회귀 위험이 없다.
+    # ⚠ TightSpace(Lattice)를 넣었다가 **뺐다.** control set 은 만들어 뒀고
+    #   (alm_navigation/lattice_primitives/) 개활 주행에는 회귀가 없었지만,
+    #   하드케이스에서 자주 실패해 GridBased 와 번갈아 나오며 경로가 불안정해져
+    #   오히려 크게 나빠졌다(0.237 m -> 1.255~1.651 m). 상세: docs/control_pipeline.md §8
+    #   아래 TightSpace 블록은 남겨 뒀다 — 다시 켜려면 이 목록에 추가하고
+    #   BT 의 ComputePathToPose 를 Fallback 으로 되돌리면 된다.
+    #   ⚠ 목록에 없으면 플러그인이 로드되지 않으므로 기동 비용도 들지 않는다.
     planner_plugins: ["GridBased"]
     GridBased:
       plugin: "nav2_smac_planner/SmacPlannerHybrid"
@@ -469,18 +560,25 @@ planner_server:
       allow_unknown: true        # 미탐사 영역 통과 허용 (track_unknown_space 와 세트)
       max_iterations: 1000000
       max_on_approach_iterations: 1000
-      # 1 Hz 재계획이므로 이 안에 끝나야 합니다. 넘으면 tolerance 내 최선해 반환.
-      max_planning_time: 2.0
+      # 재계획 주기 안에 끝나야 합니다. 넘으면 tolerance 내 최선해 반환.
+      # ★ 2.0 -> 1.0. 이 값은 '장애물 발견 후 새 경로가 나올 때까지' 의 지연에
+      #   그대로 더해집니다(0.90 m -> 0.45 m @0.45 m/s). 아래 downsample_costmap
+      #   과 세트로 낮췄습니다 — 시간만 줄이면 복잡한 상황에서 해를 못 찾습니다.
+      max_planning_time: 1.0
 
       # ---- 탐색 격자 ----
       # 각도 72 bin = 5.0°. R_min 에서 5° 회전 = 호길이 0.143 m = costmap 2.9셀
       # 이라 격자 해상도(0.05 m)와 균형이 맞습니다.
       angle_quantization_bins: 72
-      # ##TODO## Orin Nano 에서 계획시간이 2 s 를 넘기면 여기부터 손대세요:
-      #   downsample_costmap: true + downsampling_factor: 2  (0.05 → 0.10 m)
-      #   맵 자유공간 84.1% 가 여유 0.53 m 이상이라 통로가 막히지 않습니다.
-      downsample_costmap: false
-      downsampling_factor: 1
+      # ★ 켰습니다 (0.05 → 0.10 m). max_planning_time 을 2.0 -> 1.0 으로 줄이면서
+      #   탐색 격자도 같이 성기게 해야 복잡한 상황에서 해를 놓치지 않습니다.
+      #   근거: 맵 자유공간의 84.1% 가 여유 0.53 m 이상이라 0.10 m 격자로도
+      #   통로가 막히지 않습니다. 셀 수가 1/4 이 되어 탐색이 크게 빨라집니다.
+      #   ⚠ 충돌검사는 여전히 SE2 footprint 로 하므로 안전 여유가 줄지 않습니다.
+      #     격자가 성겨지는 것은 '탐색 해상도' 이지 '충돌 판정' 이 아닙니다.
+      #   좁은 통로에서 경로를 못 찾으면 여기부터 false 로 되돌리세요.
+      downsample_costmap: true
+      downsampling_factor: 2
       # 장애물 휴리스틱 캐시. 전역 costmap 에 동적 obstacle_layer 가 붙어 있어
       # 캐시가 낡으면 탐색이 엉뚱하게 퍼집니다. 성능이 급하면 true 로.
       cache_obstacle_heuristic: false
@@ -506,8 +604,10 @@ planner_server:
       # 전진만으로는 좁은 곳에서 돌아설 수 없습니다. 후진을 허용하되
       # 아래 reverse_penalty 로 비싸게 매겨 평소엔 전진 경로가 나오게 합니다.
       motion_model_for_search: "REEDS_SHEPP"
-      # 후진 1 m 의 비용배수. 실제 속도비(0.45 / 0.15 = 3.0)를 그대로 씁니다 —
-      # 후진은 3배 느리므로 3배 비싼 게 맞습니다.
+      # 후진 1 m 의 비용배수. 실제 속도비를 그대로 씁니다 — 후진이 3배 느리므로
+      # 3배 비싼 게 맞습니다.
+      # 속도를 낮출 때 min_linear_x 도 비율을 유지해 함께 낮췄기 때문에
+      # 이 값은 그대로입니다: 0.45/0.15 = 3.00 -> 0.20/0.07 = 2.86 ≈ 3.0.
       reverse_penalty: 3.0
       change_penalty: 0.0        # 조향방향 전환 페널티 (Hybrid 에선 0 권장)
       non_straight_penalty: 1.20 # 직진이 아닌 프리미티브 페널티
@@ -532,6 +632,52 @@ planner_server:
 #
 # Hybrid-A* 경로는 이미 실현가능하므로 여기서는 '구제'가 아니라 '마감'입니다.
 # 그래서 SmacPlanner2D 를 쓸 때보다 원경로를 존중하는 설정이 맞습니다.
+    # ------- TightSpace (SmacPlannerLattice) — ⚠ 현재 **비활성** (planner_plugins 에 없음)
+    # 제자리회전 프리미티브를 가진 플래너. R_min 으로는 못 가는 길을 풀 수 있다.
+    # 시뮬 결과가 나빠 뺐지만(§8), 설정과 control set 은 검증돼 있어 그대로 둔다.
+    # 되살릴 때: planner_plugins 에 "TightSpace" 추가 + BT 를 Fallback 으로.
+    TightSpace:
+      plugin: "nav2_smac_planner/SmacPlannerLattice"
+      # ★ 이 플랫폼 전용 control set. R_min=1.6425 호 + 제자리회전 32개.
+      #   기본 제공 세트(0.5 m/1 m)를 쓰면 **로봇이 못 도는 반경**의 경로가 나온다.
+      #   생성법과 검증은 alm_navigation/lattice_primitives/README.md
+      #   ⚠ 기구 상수를 바꾸면 이 파일도 다시 구워야 한다.
+      lattice_filepath: "$(find-pkg-share alm_navigation)/lattice_primitives/alm_1.643m_diff.json"
+      allow_unknown: true
+      tolerance: 0.50
+      max_iterations: 1000000
+      max_on_approach_iterations: 1000
+      # ★ 3.0 s. Lattice 는 프리미티브 408개 x 헤딩 16개라 Hybrid 보다 분기가
+      #   훨씬 크다. Hybrid 와 같은 1.0 s 로 뒀더니 16 m 경로에서 48회 연속
+      #   'no valid path found' 로 실패했다(실측). 실패하면 GridBased 폴백으로
+      #   넘어가는데, 계획이 두 플래너 사이를 오가며 불안정해져 MPPI 가 수렴을
+      #   못 한다 — 하드케이스가 오히려 나빠졌다(0.237 m -> 1.255 m).
+      max_planning_time: 3.0
+      # 후진 허용 — Hybrid 의 REEDS_SHEPP 과 같은 취지
+      allow_reverse_expansion: true
+      # 전/후진 속도비 0.20/0.07 = 2.86 -> 3.0 (Hybrid 의 reverse_penalty 와 같은 근거)
+      reverse_penalty: 3.0
+      # ★ 제자리 회전 1회의 상대 비용. "넓은 곳에서는 절대 안 쓰고,
+      #   그것 말고 길이 없을 때만" 을 만드는 손잡이다.
+      #   유도: 회전 1회 실비용 ~= 모드전환 dwell(3.0 s) x 2회 = 6 s.
+      #         같은 시간에 normal 로 갈 수 있는 거리 = 6 x 0.20 = 1.20 m
+      #         격자 0.05 m 기준 24셀 -> 보수적으로 5.0
+      #   ↑ 올리면 회전을 더 꺼리고(우회 선호), ↓ 내리면 더 자주 돈다.
+      rotation_penalty: 5.0
+      change_penalty: 0.0
+      non_straight_penalty: 1.20
+      cost_penalty: 2.0
+      retrospective_penalty: 0.015
+      lookup_table_size: 10.0
+      # ★ true. Lattice 탐색이 무거워 장애물 휴리스틱을 매번 다시 계산하면
+      #   max_planning_time 안에 못 끝난다. 캐시가 낡을 위험이 있지만,
+      #   TightSpace 는 '좁은 곳' 전용이고 그런 곳은 대개 정적이다.
+      #   (GridBased 는 false 로 두어 동적 장애물 대응을 유지한다)
+      cache_obstacle_heuristic: true
+      smooth_path: true
+      analytic_expansion_ratio: 3.5
+      analytic_expansion_max_length: 3.5
+
 smoother_server:
   ros__parameters:
     use_sim_time: false
@@ -622,10 +768,19 @@ velocity_smoother:
     #   command_manager 의 조향 클램프가 최종 보장하지만, 여기서 맞춰두면
     #   클램프가 개입할 일 자체가 줄어듭니다.
     scale_velocities: True
+    # ⚠ 지뢰 주의 — OPEN_LOOP 를 유지할 것.
+    #   CLOSED_LOOP 는 odom_topic 의 twist 를 '현재 속도' 로 읽어 램프를 잇는데,
+    #   /Odometry(FAST-LIO)의 twist 는 **항상 0** 입니다(pose 만 채워 발행).
+    #   지금 CLOSED_LOOP 로 바꾸면 매 틱 "로봇이 정지해 있다" 고 읽어서 가속
+    #   램프가 계속 처음부터 다시 시작하고, 로봇이 vx_max 를 영영 못 냅니다.
+    #   → laserMapping.cpp 의 publish_odometry() 가 twist 를 채우게 된 **뒤에만**
+    #     CLOSED_LOOP 로 바꾸세요. 같은 커밋에서 함께 바꾸는 것이 안전합니다.
     feedback: "OPEN_LOOP"
     # [vx, vy, wz]. wz 는 MPPI wz_max / spin 상한과 동일하게 0.45.
-    max_velocity: [0.45, 0.0, 0.45]
-    min_velocity: [-0.15, 0.0, -0.45]
+    # ★ vx 0.45 -> 0.20, 후진 -0.15 -> -0.07 (2026-08-19).
+    #   base_control.yaml · MPPI 와 셋이 같아야 합니다 (nav2_kinematic_check.py 검사).
+    max_velocity: [0.20, 0.0, 0.45]
+    min_velocity: [-0.07, 0.0, -0.45]
     max_accel: [1.0, 0.0, 1.5]
     max_decel: [-1.5, 0.0, -1.5]
     odom_topic: "/Odometry"
