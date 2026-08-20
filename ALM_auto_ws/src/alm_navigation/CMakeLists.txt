@@ -24,7 +24,6 @@ install(
     scripts/migrate_maps.py
     scripts/prior_cloud_publisher.py
     scripts/nav2_kinematic_check.py
-    scripts/goal_yaw_aligner.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

@@ -196,6 +196,24 @@ bt_navigator:
 controller_server:
   ros__parameters:
     use_sim_time: false
+    # 20.0 -> 10.0 (2026-08-20). MPPI 는 **제어주기 == model_dt** 를 요구합니다.
+    # 어긋나면 nav2 가 이렇게 경고하고 control sequence shifting 을 꺼버립니다:
+    #     [controller_server] Controller period is less then model dt, consider setting it equal
+    # (실제로 우리 시뮬 로그에 계속 찍히고 있었습니다.)
+    # shifting 은 이전 최적 제어열을 한 스텝 밀어 다음 최적화의 씨앗으로 쓰는
+    # warm-start 인데, 꺼지면 씨앗이 한 스텝 낡은 채로 들어갑니다.
+    #
+    # 맞추는 방법이 둘인데 이쪽을 골랐습니다:
+    #   (a) model_dt 0.10 -> 0.05, time_steps 63 -> 126   : ★ 채택. 20 Hz 유지, CPU 증가
+    #   (b) controller_frequency 20 -> 10                  : 시도했다가 **되돌림**
+    #
+    # (b)를 먼저 넣어봤다가 되돌렸습니다. 시뮬에서 명백히 나빠졌습니다:
+    #     BT tick rate exceeded  0 -> 815 회
+    #     Optimizer fail to compute path  0 -> 4 회
+    #     3목표 전부 실패 (F3 는 102 m 헤매다 충돌 1틱)
+    # 10 Hz 제어는 이 조합에서 너무 느렸습니다. 계산상 0.05 s 차이지만 실제로는
+    # 추종이 무너지고 재계획 폭풍으로 번졌습니다 — docs/control_pipeline.md §8.10.
+    # ⚠ 이 값을 바꾸면 model_dt 도 같이 바꿔야 합니다 — 둘은 **항상 같아야** 합니다.
     controller_frequency: 20.0
     min_x_velocity_threshold: 0.001
     min_y_velocity_threshold: 0.001
@@ -260,8 +278,13 @@ controller_server:
     #          코너에서 안쪽으로 파고들면 반대로 time_steps 를 올리세요.
     FollowPath:
       plugin: "nav2_mppi_controller::MPPIController"
-      time_steps: 63
-      model_dt: 0.10
+      # 63 x 0.10 -> 126 x 0.05 (2026-08-20). 지평선은 6.30 s 로 **그대로**이고,
+      # model_dt 를 제어주기(0.05)와 맞춰 MPPI 의 control sequence shifting(warm-start)을
+      # 켰습니다. 대가는 CPU — 롤아웃 스텝 수가 2배입니다.
+      # ##TODO## Orin Nano 에서 controller_server 가 포화되면
+      #          batch_size 1600 -> 1000 을 먼저 낮추세요(지평선을 지키는 편이 낫습니다).
+      time_steps: 126
+      model_dt: 0.05
       batch_size: 1600
       iteration_count: 1
 
@@ -403,7 +426,12 @@ controller_server:
 local_costmap:
   local_costmap:
     ros__parameters:
-      update_frequency: 5.0
+      # 5.0 -> 10.0 (2026-08-20). MPPI 가 20 Hz 로 도는데 장애물 지도가 5 Hz 면
+      # 최대 0.2 s 낡은 코스트맵에 대고 1600개 궤적을 평가합니다. 0.20 m/s 에서
+      # 4 cm 이라 정적 환경에선 무시할 만하지만, 동적 장애물에는 그대로 지연입니다.
+      # 8x8 m @0.05 = 160x160 셀이라 2배로 올려도 부담이 작습니다.
+      # ##TODO## Orin Nano 에서 빠듯하면 되돌리세요 — 제어 주파수보다 먼저 양보할 값입니다.
+      update_frequency: 10.0
       publish_frequency: 2.0
       global_frame: odom
       robot_base_frame: base_link
@@ -530,7 +558,16 @@ planner_server:
   ros__parameters:
     use_sim_time: false
     # BT 의 RateController 가 1 Hz 로 재계획하므로 기대 주기도 1 Hz
-    expected_planner_frequency: 1.0
+    # 1.0 -> 3.0 (2026-08-20). 계획 동작을 바꾸지 않고 **경고 문턱**만 정합니다:
+    #   "Planner loop missed its desired rate of %.4f Hz"
+    # BT 가 PathExpiringTimer(0.33 s)로 3 Hz 재계획을 요구하는데 여기가 1.0 이면
+    # 3 Hz 를 못 맞춰도 경고가 안 뜹니다. 둘을 맞춰야 진단이 의미를 가집니다.
+    #
+    # 값은 3.0 이 아니라 2.5 입니다. 3.0 으로 두고 실측해보니 실제 달성률이
+    # 2.92~2.96 Hz 라 **정상인데도 경고가 20회 중 6회** 떴습니다(타이머 지터).
+    # 문턱을 명목치에 딱 붙이면 항상 울려서 진짜 경고가 묻힙니다.
+    # 2.5 = 약 17% 여유 -> 이제 경고가 뜨면 실제로 느려진 것입니다.
+    expected_planner_frequency: 2.5
     # ★ 2026-08-20: 플래너 두 개. BT 가 순서대로 시도한다(Fallback).
     #
     #   GridBased  = SmacPlannerHybrid  — 평소. R_min 호만 쓰므로 빠르고 매끄럽다.

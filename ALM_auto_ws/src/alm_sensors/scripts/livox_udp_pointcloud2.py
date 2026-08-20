@@ -124,6 +124,25 @@ class LivoxUdpPointCloud2(Node):
                 f"수평거리 <= {self.mask_max_range:.2f}m, "
                 f"z {self.mask_min_z:.2f}~{self.mask_max_z:.2f}m"
                 + (f" (제거된 점 -> {debug_topic})" if self.debug_pub else ""))
+            # ★ 이 마스크는 /livox/lidar 자체를 깎으므로 FAST-LIO·ICP·Nav2 costmap·
+            #   /scan 에 **동시에** 적용된다. 즉 마스크 영역은 '적재물이 안 보이는'
+            #   것이 아니라 **아무것도 안 보이는** 영역이다.
+            #   local_costmap 에는 static_layer 가 없으므로(장애물 레이어만) 뒤쪽은
+            #   맵에 있는 벽조차 전역 costmap 에서만 알 수 있다.
+            #   이 로봇은 후진을 실제로 쓴다(Hybrid-A* reverse_penalty 3.0,
+            #   BackUp 리커버리 0.30 m, min_linear_x -0.07) — 그래서 경고로 남긴다.
+            self.get_logger().warn(
+                f"★ 후방 사각지대 {self.mask_max_range:.2f} m "
+                f"(방위 {self.get_parameter('mask_center_deg').value:.0f}"
+                f"±{self.get_parameter('mask_width_deg').value / 2.0:.0f}deg). "
+                "이 영역의 장애물은 **어떤 센서에도 잡히지 않습니다.** "
+                "후진 중 새로 나타나는 물체는 감지 못 합니다.")
+            self.get_logger().warn(
+                "  마스크는 적재물을 정확히 덮는 **최소값**으로 줄이세요. "
+                "너무 크면 위 사각지대가 커지고, 너무 작으면 적재물 점이 FAST-LIO "
+                "정합에 섞여 측위가 흔들립니다. 튜닝: "
+                "ros2 launch alm_sensors lidar.launch.py mask_debug:=/livox/lidar_masked "
+                "-> RViz 에서 잘려나간 점(빨강)이 적재물만 덮는지 확인.")
         else:
             self.get_logger().warn("자기가림 마스크 OFF — 적재물 점이 그대로 발행됨")
 
