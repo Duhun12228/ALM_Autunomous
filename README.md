@@ -50,7 +50,8 @@ Nav2 (odom_topic=/Odometry) → /cmd_vel
   ├ smoother  ConstrainedSmoother (Ceres 곡률/장애물 제약)
   └ controller MPPI (샘플링 MPC) ※ 연결은 커스텀 BT(navigate_*_w_smoothing.xml)
 alm_base_control · command_manager: /cmd_vel + /drive_mode
-      → 모드해석(auto→normal/spin/crab) + 안전게이팅 → /mcu/command (McuCommand)
+      → 모드해석(auto→normal/spin/crab) + ALIGN(경로 헤딩 정렬) + 안전게이팅
+      → /mcu/command (McuCommand)
 alm_mcu_interface · mcu_bridge: /mcu/command ⇄ STM32 (UART) → /wheel_odom, /mcu/state, /joint_states
 STM32: 역기구학(twist→2조향+4구동) · 모터 PID · 엔코더 정기구학(→odom)
 ```
@@ -245,6 +246,13 @@ ros2 run alm_base_control keyboard_teleop.py
 `normal`(전후+회전) · `spin`(제자리 회전) · `crab`(게걸음, 기본 비활성) · `auto`(자동 선택).
 auto 는 Nav2 의 `/cmd_vel`(vx+wz)을 보고 normal↔spin 을 자동 전환합니다(참고 레포 로직 포팅).
 
+여기에 더해 `command_manager` 는 **`/plan` 을 직접 보고** 경로가 요구하는 헤딩과 실제
+헤딩이 60° 넘게(0.6 s 지속) 벌어지면 스스로 `spin` 을 걸어 헤딩을 고칩니다(`ALIGN`).
+전역 플래너는 `R_min` 원호/직선만 이어 붙여 **제자리 회전을 표현하지 못하므로**, 4륜
+독립조향의 제자리 회전을 실제로 쓰는 경로는 이것뿐입니다.
+설계 근거는 `alm_base_control/scripts/path_align.py` docstring,
+검증 결과는 `docs/control_pipeline.md` §6.8 · §7.3.
+
 `normal` 모드는 자동차형이라 **최소 선회반경 1.643 m**(내측 전륜 30°, 후륜 50% 역조향
 포함) 아래로는 못 돕니다. 그보다 급한 요청은 `command_manager` 가
 `|wz| ≤ |vx|/R_min` 으로 접어 조향각이 포화되지 않게 합니다 — 그래야
@@ -255,6 +263,8 @@ auto 는 Nav2 의 `/cmd_vel`(vx+wz)을 보고 normal↔spin 을 자동 전환합
 - **Jetson 처음부터 설치·실행 → `docs/JETSON_SETUP.md`**
 - 매핑→저장→자율주행 운영 → `docs/OPERATION_GUIDE.md`
 - **Nav2 경로계획(Hybrid-A*)·조향각 한계 → `docs/nav2_planning.md`**
+- **제어 루프 현황 분석(피드백 끊긴 지점·해결 방향) → `docs/control_feedback_analysis.md`**
+  (처음 보는 사람용 전체 파이프라인 해설 포함)
 - **Jetson→STM32 UART 연동·확인 절차 → `docs/uart.md`** (변경사항 정리 + 제어단 점검 체크리스트)
 - UART 프로토콜 규격 v2 → `ALM_auto_ws/src/alm_mcu_interface/docs/uart_protocol.md`
 - 실차 전 확인/수정할 값 → `SETUP_CHECKLIST.md`

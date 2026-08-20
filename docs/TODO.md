@@ -1,7 +1,7 @@
 # TODO — 남은 작업
 
 3D LIO 측위 전환(FAST-LIO2 매핑 + FAST-LIO-Localization) 이후 남은 작업 목록.
-최종 업데이트: 2026-08-11 (dev/fastlio2-sc: Nav2 경로 파이프라인 Hybrid-A* 전환 + 조향각 한계).
+최종 업데이트: 2026-08-20 (feat/nav2-hybrid-astar: ALIGN 경로 헤딩 정렬 기동 + dwell 재유도).
 
 ## ✅ 완료 (방식 A, 집에서 LiDAR 핸드헬드 검증)
 - 센서 UDP 직접 파싱 (per-point time 포함), 런치 통합
@@ -82,11 +82,120 @@
 - [ ] ⚠ **저속 사각지대**: `vx < 0.03` 이면서 `|wz| < auto_spin_angular_threshold(0.35)`
       인 구간은 wz 가 0 으로 접히고 spin 도 안 걸린다. MPPI 가 스스로 wz 를 키워
       빠져나오는 것에 기대고 있다. 실차에서 이 구간에 머물면 임계값을 0.20 으로 낮출 것.
-- [ ] ⚠ **URDF vs STM32 CONS 지오메트리 불일치**. URDF 는 휠베이스 0.9116 m /
+- [ ] ⚠ **URDF vs STM32 CONS 지오메트리 불일치**. (2026-08-19: nav2_kinematic_check.py §6 이 이제 이걸 검출한다. 실측 확정만 남음.) URDF 는 휠베이스 0.9116 m /
       윤거 1.0 m (front_x 0.6106, rear_x -0.3010, half_track 0.5), CONS 는
       B=1.0 m / T=0.919 m 로 **사실상 뒤바뀌어 있다.** 둘 다 '실측'이라 주장하므로
       어느 쪽이 맞는지 확인해야 한다. 현재 nav2/조향 제한은 CONS 를 따르고
       footprint 만 URDF 를 따른다 — R_min 과 footprint 가 서로 다른 출처인 셈이다.
+
+### 3.97 제어 파이프라인 보강 (2026-08-19) — docs/control_pipeline.md
+- [x] **조향 슬루 제한 + cmd_vel 재정합**. 출발 선회에서 조향 명령이 1500 deg/s 로
+      튀던 문제(|wz|<=|vx|/R_min 클램프가 걸리면 R=R_min = 정의상 풀락). 45 deg/s 로
+      제한하고, 제한된 조향각에서 wz 를 역산해 McuCommand 두 필드를 정합시킴.
+- [x] **기동 조향 정렬 dwell** (자동 1.33 s) — 전원 투입 시 조향각을 모르는 채로 출발하던 문제.
+- [x] **모드 전환 dwell** (0.5 s) — normal(±30°)/crab(90°)/spin(47°) 전환 중 조향축 스윕.
+- [x] **정지 2등급 분리** — e-stop/fault=즉시, cmd timeout/odom stale=감속 램프.
+- [x] **MCU 업링크 부재 경고** — stop_on_mcu_fault 가 실차에서 죽은 안전장치임을 기동 시 경고.
+- [x] **fake_mcu 조향 액추에이터 모델** (슬루+지연, 실제 조향각으로 데드레커닝).
+      publish_state:=false 로 실차(업링크 미구현) 조건 재현 가능.
+- [x] **BT IsPathValid** — 재계획이 순수 시간 구동이던 문제. 경로 무효화 시 즉시 재계획.
+- [x] **동적 장애물 지연** 4.30 s/1.94 m → 약 1.44 s/0.65 m
+      (global costmap 1→3 Hz, max_planning_time 2.0→1.0, downsample_costmap on,
+       through_poses hz 0.333→1.0).
+- [x] **죽은 설정 정리** — max_angular_z 0.8→0.45, amcl tf_broadcast→false,
+      velocity_smoother CLOSED_LOOP 지뢰 주석.
+- [x] **steering_observer 신규** — /Odometry.pose 만으로 κ=Δθ/Δs → 실효 조향각 역산.
+      twist 가 0 이어도 동작한다(곡률은 시간이 아니라 거리로 정의되므로). 로깅 전용.
+- [x] **nav2_kinematic_check 확장** — §5 조향 응답, §6 URDF↔CONS 대조 추가.
+- [x] **속도·슬루율 동시 축소** (0.45 m/s·45 deg/s -> 0.20 m/s·20 deg/s, 비 100 deg/m 유지).
+      경로 품질은 조향슬루율/속도 비가 정하고 안전성은 슬루율 절대값이 정한다는 관계를
+      이용. 경로 모양은 그대로이면서 S>=20 deg/s 인 모든 액추에이터에서 조향 오차 0.
+      MPPI 지평선도 63x0.10 으로 조정해 예측거리 1.26 m 복원. docs/control_pipeline.md §5.12
+- [ ] ⚠ **조향 슬루율 S 실측** — `max_steer_rate_deg_s: 20.0` 은 **가정값**이다.
+      (주행용 S 는 이제 급하지 않다 — 20 deg/s 는 사실상 모든 액추에이터가 넘는다.
+       **S_정지 확인이 남는다**: 기동 dwell 5.0 s / 모드전환 dwell 4.0 s 가 vx=0 구간이라
+       저속 전략이 안 통한다. 정확한 값보다 '지면에서 조향이 도는가 · 스톨하는가' 확인.)
+      ⭐ **도구 생김**: `ros2 run alm_bringup steer_bench.py` (2026-08-20).
+      command_manager 를 끄고 mcu_bridge 만 띄운 뒤 실행 → -30°/+30° 스텝 3회,
+      바퀴가 멈출 때 Enter → S_정지 계산 + dwell 충분 여부까지 판정.
+      구동은 항상 0 rpm(바퀴 안 구름). ★ 손으로 돌리는 건 이 측정이 아니다 —
+      조향 '모터'가 접지 마찰을 이기는 속도를 재는 것이다.
+      필요 조건: startup 5.0 s -> S>=12, dwell 4.0 s -> S>=19.3, crab -> S>=30 deg/s.
+      대안 측정법: 폰 슬로모 240fps / 자이로 스텝응답 / 관측기 상한 탐색.
+      ★ 정지 상태 S 와 주행 중 S 를 **따로** 재야 한다(정지가 훨씬 느리고 스톨 가능).
+      ★ 잭업 상태로 재지 말 것(무부하 값이라 실제보다 훨씬 빠름).
+- [ ] ⚠ **STM32 업링크 요청** — msg_type 0x03 "MiniState" 11 B 제안
+      (status_flags 1 + fault_code 2 + steer_actual 4 + ack_seq 4).
+      질문 Q1~Q6(액추에이터 종류/내부 램프 여부/슬루율/mode 0 거동/CONS(4)) 은
+      docs/control_pipeline.md §7.2.
+- [x] **시뮬레이션 통합 검증** (docs/control_pipeline.md §12). 실측 SLAM 맵(alm_lab)에서
+      실제 파라미터/BT 그대로, 하드웨어만 대역(sim_world + fake_mcu)으로 전 구간 주행.
+      · 조향 슬루 제한·cmd_vel 재정합·기동정렬·모드dwell 전부 실측 확인 (정합오차 2.6e-9 rad/s,
+        명령 vs 실제 조향 간극 평균 0.010°)
+      · **충돌 0** (전 시험 통틀어)
+      · 검증 과정에서 **내가 심은 결함 3개**를 잡음:
+          ① BT 재계획이 1 Hz 아닌 18.4 Hz (RateController halt 시 타이머 리셋)
+             -> PathExpiringTimer 로 교체
+          ② auto_mode_min_hold_sec 4.0 상향이 협착 목표 회귀 유발 -> 0.80 으로 되돌림
+          ③ steering_observer 가 직진(κ=0)에서 ZeroDivisionError -> 가드 추가
+      · 재계획 주기 1 Hz -> 3 Hz (전역 costmap 갱신률과 짝. 근거 §12.5.1)
+- [x] **ALIGN — 경로 헤딩 정렬 기동 신규** (2026-08-20). 아래 후보 (c) 를 구현한 것이다.
+      `scripts/path_align.py`(신규) + `command_manager` 가 **`/plan` 을 직접 구독**해
+      경로가 요구하는 헤딩 대비 오차가 60° 넘게(0.6 s 지속) 벌어지면 목표 헤딩을
+      **절대각으로 래치**하고 spin 으로 정정 후 normal 복귀(이탈 15° · 쿨다운 3 s).
+      기존 spin 진입 조건(`|wz|>=0.35 and lin<=0.04`)은 Nav2 twist 의 **사후 분류**라
+      플래너가 제자리 회전을 안 내는 이상 BT 리커버리 때만 발동했다 — ALIGN 이
+      4WIS 의 제자리 회전을 **선제적으로** 쓰는 유일한 경로다.
+      · 자체 시험 19항목 (`python3 path_align.py`), 정합성 검사 §7 추가
+      · 실측: alm_lab 640 s 중 1회 발동 (-62.4° -> -14.9°, 5.2 s), 왕복 없음
+      · A/B (개활 2회·협착 1회): 발동 안 하는 목표는 숫자가 소수점까지 동일 = **회귀 0**
+      · 문턱 60° 는 실측 분포 근거 (경로 추종 중 헤딩오차 p90 9.7°, 30°로 낮추면 틱의 35%)
+      상세 docs/control_pipeline.md §6.8 · §7.3
+- [x] **mode_switch_dwell_sec 3.0 -> 4.0** (2026-08-20). 기구학 미달이었다:
+      최악 스윕 normal 풀락(30°) -> spin(47°) = 77°, ÷20 deg/s = **3.85 s**.
+      ALIGN 이 이 전환을 더 자주 만들어 중요해졌다. `nav2_kinematic_check` §5 가 검사한다.
+      ⚠ crab(90°) 은 6.0 s 필요 — 수동 crab 을 쓸 거면 올릴 것.
+- [ ] ⚠ **경로가 아예 안 나오는 목표** (ALIGN 으로도 못 고침, 2026-08-20 실측).
+      막다른 포켓형 목표에서 `replans: 0` — `/plan` 이 한 번도 발행되지 않는다.
+      ALIGN 은 경로가 입력이라 개입할 수 없다.
+      ★ **원인은 헤딩이 아니다.** 시작 헤딩 0°/-45°/-90° 전부 `no valid path found`.
+        리커버리 spin 이 실제로 0°->96°->187° 로 돌려놨는데도 계획은 계속 실패했다.
+      의심 순서: ① `inflation_radius` 1.2 m vs 포켓 폭 2.8 m (중앙조차 팽창비용 높음)
+                 ② `max_planning_time` 1.0 s  ③ Hybrid-A* 각도 이산화
+      재현: 협착 ㄱ자 합성맵 (scratchpad `make_lmap.py`, R_min 유턴 가능 셀 0개)
+- [ ] 🔬 **하네스 실행편차 — 단일 실행 A/B 는 못 믿는다** (2026-08-20).
+      같은 목표가 실행마다 323 s -> ABORT -> 163 s -> TIMEOUT 로 흔들린다.
+      **ALIGN 이 0회 발동한 실행에서도** 좌우가 갈렸다 = 전부 잡음이다.
+      원인: MPPI 가 매 틱 1600 궤적을 무작위 표본으로 굴리고, 시뮬이 벽시계로 돈다.
+      ##TODO## 위 §3.97 의 "되돌림" 판정 중 성공/실패로 갈린 둘
+      (`auto_mode_min_hold_sec 4.0`, `spin 문턱 0.10`)은 **재검증 대상**이다.
+      반복 실행 스크립트: scratchpad `run_ab.sh` (`ALIGN` 토글, `REPS` 반복).
+      판단은 성공/실패가 아니라 연속량(소요시간·자세오차·우회율)으로 할 것.
+- [ ] `goal_yaw_aligner.py` 제거 검토 — ALIGN 이 같은 일을 더 앞에서, 액션 선점 없이
+      한다. 실측에서 한 번도 발동하지 않았다("자세 이미 정렬됨 — spin 생략").
+      두 주체가 회전을 명령하는 구조 자체가 위험하다.
+- [~] ⚠ **플래너가 제자리 회전을 표현하지 못한다** (검증으로 새로 드러난 구조적 공백).
+      ※ 2026-08-20: 이 설명은 **불완전했다.** 제자리 회전을 쓸 수 있게 해도(리커버리
+        spin 이 96°·187° 로 실제로 돌려놨다) 계획은 여전히 실패했다. 위 '경로가 아예
+        안 나오는 목표' 항목 참고. ALIGN 은 '경로가 있는데 헤딩만 어긋난' 경우를 덮는다.
+      해결 시도 2건 모두 되돌림 — docs/control_pipeline.md §8.5, §8.6:
+        · SmacPlannerLattice(회전 프리미티브) 도입 -> 개활은 무회귀였으나 하드케이스 악화
+          (control set 은 alm_navigation/lattice_primitives/ 에 검증된 채로 보존)
+        · spin 진입 문턱 0.35->0.10 -> G3 못 고치고 G4 회귀
+      ##TODO## 다음 후보: (a) TightSpace 계획 실패율 규명  (b) 도킹 접근 패턴
+      (목표 앞 1 m 경유지 + 직진 진입, 클라이언트 레벨)  (c) spin 탈출 조건을
+      요레이트 기반 -> 헤딩오차 기반으로.
+      SmacPlannerHybrid 는 minimum_turning_radius=1.643 m 프리미티브로만 탐색하므로
+      '가까운 거리에서 큰 자세변화'에 해가 없다 -> 빈 경로 반환 -> 리커버리 소진 -> abort.
+      실측: 목표 0.16 m 앞에서 180deg 회전만 하면 되는데 4.05 m 헤매다 실패(우회 24.6배).
+      **플랫폼에 spin 이 있는데 플래너가 쓸 수 없다** (MPPI 가 우연히 낼 때만 발동).
+      · 자유 주행(자세 무관)에는 지장 없음 — G1/G2/G4/Y1/Y3 전부 성공
+      · 도킹 등 **자세 지정 목표**를 쓸 계획이면 대책 필요
+      · 유력안: BT 에 '위치 먼저 -> 도착 후 Spin 으로 자세 정렬' 단계 추가
+      · crab 은 해법이 아님(회전을 못 만듦). 상세 docs/control_pipeline.md §12.5.2
+- [ ] **실차 주행 미검증** — 위는 전부 시뮬레이션까지만이다.
+      가정: 조향 슬루율 60 deg/s(임의값) · 측위 오차 0 · 슬립 없음 · 정적 장애물만 ·
+      개발 PC 8코어. Orin Nano CPU 여유 미확인.
 
 ### 4. TF/구조 정리
 - [ ] 매핑 모드에서 EKF 필요성 재검토 (맵에 무관 — 켤 이유 없으면 정리).
