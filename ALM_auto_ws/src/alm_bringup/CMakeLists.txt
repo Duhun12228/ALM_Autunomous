@@ -18,6 +18,7 @@ install(
     scripts/jetson_stats_publisher.py
     scripts/fake_mcu.py
     scripts/voice_announcer.py
+    scripts/steer_bench.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

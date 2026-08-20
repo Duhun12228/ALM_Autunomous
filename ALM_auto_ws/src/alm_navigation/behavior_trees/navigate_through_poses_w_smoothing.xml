@@ -12,12 +12,39 @@
   <BehaviorTree ID="MainTree">
     <RecoveryNode number_of_retries="6" name="NavigateRecovery">
       <PipelineSequence name="NavigateWithReplanning">
-        <RateController hz="0.333">
-          <RecoveryNode number_of_retries="1" name="ComputePathThroughPoses">
+        <RecoveryNode number_of_retries="1" name="ComputePathThroughPoses">
+          <!-- ★ navigate_to_pose_w_smoothing.xml 과 같은 구조. 상세 주석은 그쪽 참고.
+               여기서 추가로 바뀐 것: RateController hz 0.333 -> 1.0.
+               웨이포인트 주행 중 재계획 대기가 최악 3 s (0.45 m/s 에서 1.35 m)
+               였다. NavigateToPose 와 같은 1 Hz 로 맞춘다.
+               경유점 계획이 단일 목표보다 무겁지만, max_planning_time 을 1.0 으로
+               낮추고 downsample_costmap 을 켰으므로 1 Hz 안에 들어온다.
+               ##TODO## Orin Nano 실측에서 못 맞추면 0.5 로 절충. -->
+          <ReactiveFallback name="ReplanIfNeeded">
+            <ReactiveSequence name="NoNeedToReplan">
+              <Inverter>
+                <GlobalUpdatedGoal/>
+              </Inverter>
+              <IsPathValid path="{path}" server_timeout="100"/>
+              <Inverter>
+                <PathExpiringTimer seconds="0.33" path="{path}"/>
+              </Inverter>
+            </ReactiveSequence>
             <Sequence name="PlanAndSmooth">
               <ReactiveSequence>
                 <RemovePassedGoals input_goals="{goals}" output_goals="{goals}" radius="0.7"/>
-                <ComputePathThroughPoses goals="{goals}" path="{path}" planner_id="GridBased"/>
+                <!-- ⚠ 플래너 2단(TightSpace=Lattice)을 시도했다가 **되돌렸다.**
+                   Lattice control set 은 만들어 뒀고(alm_navigation/lattice_primitives/)
+                   개활 주행에는 회귀가 없었지만(95.7 s vs 87.9 s), 하드케이스에서
+                   TightSpace 가 자주 실패해 GridBased 와 번갈아 나오며 경로가
+                   불안정해졌다 — 오히려 크게 나빠졌다:
+                       GridBased 단독      0.237 m / 14.8°
+                       TightSpace 주(기본) 1.255 m / 64.3°
+                       TightSpace 주(튜닝) 1.651 m / 38.9°
+                   되살리려면 nav2.yaml 의 planner_plugins 에 TightSpace 를 넣고
+                   여기를 Fallback 으로 되돌리면 된다. 상세: docs/control_pipeline.md §8
+              -->
+              <ComputePathThroughPoses goals="{goals}" path="{path}" planner_id="GridBased"/>
               </ReactiveSequence>
               <Fallback name="SmoothIfPossible">
                 <SmoothPath unsmoothed_path="{path}" smoothed_path="{path}"
@@ -27,9 +54,9 @@
                 <AlwaysSuccess/>
               </Fallback>
             </Sequence>
-            <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
-          </RecoveryNode>
-        </RateController>
+          </ReactiveFallback>
+          <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
+        </RecoveryNode>
         <RecoveryNode number_of_retries="1" name="FollowPath">
           <FollowPath path="{path}" controller_id="FollowPath"/>
           <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap"/>

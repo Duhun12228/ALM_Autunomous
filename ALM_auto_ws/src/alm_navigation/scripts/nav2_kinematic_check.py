@@ -21,6 +21,7 @@ minimum_turning_radius 가 대표적이다 — wheelbase/track/rws_ratio/max_ste
 
 import math
 import os
+import re
 import sys
 
 try:
@@ -126,6 +127,39 @@ def note(label, value, hint=""):
         print(f"         {DIM}{hint}{RESET}")
 
 
+def check_present(label, value, hint=""):
+    """값이 선언돼 있기만 하면 통과 (기대값이 아직 없는 ##CONFIRM## 항목용)."""
+    ok = value is not None
+    mark = f"{GREEN}OK  {RESET}" if ok else f"{RED}없음  {RESET}"
+    shown = "없음" if value is None else f"{value}"
+    print(f"  [{mark}] {label:44s}      ={shown:>10s}")
+    if not ok:
+        _problems.append((label, "없음", "선언 필요", hint))
+    return ok
+
+
+def _xacro_props(path):
+    """URDF xacro 의 <xacro:property name=".." value=".."/> 를 dict 로.
+
+    URDF 를 완전히 파싱하지 않는 이유: xacro 전개에는 xacro 패키지가 필요하고,
+    이 검사기는 '빌드 전에도 돌아야 한다'는 전제가 있다. 여기서 필요한 것은
+    최상단 상수 몇 개뿐이라 정규식으로 충분하다.
+    """
+    props = {}
+    try:
+        with open(path, "r", encoding="utf-8") as fp:
+            text = fp.read()
+    except OSError:
+        return props
+    for name, value in re.findall(
+            r'<xacro:property\s+name="([^"]+)"\s+value="([^"]+)"', text):
+        try:
+            props[name] = float(value)
+        except ValueError:
+            pass                      # ${...} 같은 식은 건너뛴다
+    return props
+
+
 def main():
     bc_path, bc_src = _share("alm_base_control", "config", "base_control.yaml")
     nav_path, nav_src = _share("alm_navigation", "config", "nav2.yaml")
@@ -193,6 +227,53 @@ def main():
         note("planner 가 Hybrid/Lattice 계열이 아님", plugin,
              "격자 플래너는 R_min 개념이 없어 스무더가 사후에 펴야 한다.")
 
+    # TightSpace(Lattice) 폴백 플래너의 control set 검증
+    tight = _params(nav_doc, "planner_server").get("TightSpace", {}) or {}
+    if tight:
+        note("폴백 planner", str(tight.get("plugin", "?")))
+        lat_path, lat_src = _share("alm_navigation", "lattice_primitives",
+                                   "alm_1.643m_diff.json")
+        if lat_path is None:
+            _problems.append(("lattice control set", "없음", "생성 필요",
+                              "alm_navigation/lattice_primitives/README.md 참고"))
+            print(f"  [{RED}없음{RESET}] {'lattice control set 파일':44s}")
+        else:
+            import json as _json
+            try:
+                lat = _json.load(open(lat_path, encoding="utf-8"))
+                md = lat.get("lattice_metadata", {})
+                prims = lat.get("primitives", [])
+                rots = [q for q in prims
+                        if q.get("poses") and abs(q["poses"][-1][0]) < 1e-6
+                        and abs(q["poses"][-1][1]) < 1e-6]
+                note(f"lattice [{lat_src}]",
+                     f"{len(prims)}개 프리미티브, 제자리회전 {len(rots)}개")
+                check("lattice.turning_radius", md.get("turning_radius"), r_min,
+                      tol=0.01,
+                      hint="control set 의 선회반경이 R_min 과 다르면 로봇이 못 도는 "
+                           "경로가 나온다. 기구 상수를 바꿨으면 다시 구울 것 "
+                           "(lattice_primitives/README.md).")
+                radii = [q["trajectory_radius"] for q in prims
+                         if q.get("trajectory_radius", 0) > 0]
+                if radii:
+                    check_ge("lattice 최소 실제 선회반경", min(radii), r_min - 1e-6,
+                             hint="프리미티브 중 R_min 보다 급한 호가 있으면 안 된다.")
+                if not rots:
+                    _problems.append(("lattice 제자리회전", "0개", ">0",
+                                      "회전이 없으면 TightSpace 를 쓸 이유가 없다 "
+                                      "(motion_model 을 diff 로 구웠는지 확인)."))
+                    print(f"  [{RED}불일치{RESET}] {'lattice 제자리회전 프리미티브':44s} 0개")
+                cm_res = (_params(nav_doc, "global_costmap", "global_costmap")
+                          .get("resolution"))
+                if cm_res is not None:
+                    check("lattice.grid_resolution", md.get("grid_resolution"),
+                          cm_res, tol=1e-6,
+                          hint="control set 격자와 costmap 해상도가 달라선 안 된다.")
+            except Exception as exc:                      # pragma: no cover
+                note("lattice 파일 읽기 실패", str(exc)[:60])
+        note("rotation_penalty", str(tight.get("rotation_penalty")),
+             "제자리회전을 얼마나 꺼릴지. ↑이면 우회 선호, ↓이면 자주 돈다.")
+
     check("smoother.minimum_turning_radius",
           smoother.get("minimum_turning_radius"), r_min, tol=0.01,
           hint="플래너와 다르면 스무더가 플래너의 결정을 되돌린다. 두 값은 같아야 한다.")
@@ -210,6 +291,11 @@ def main():
           hint="spin 모드 상한(auto_spin_max_angular_speed)에 맞춘다. normal 로 "
                "낼 수 있는 값은 이보다 작지만(vx/R_min), 그 구간은 "
                "command_manager 의 조향 클램프가 처리한다.")
+    # base_control 의 max_angular_z 는 예전에 검사 대상이 아니었다. 0.8 로 남아
+    # 있었는데 어디서도 도달할 수 없는 죽은 값이었다 — 읽는 사람만 헷갈린다.
+    check("base_control.max_angular_z", bc.get("max_angular_z"), spin_max_wz,
+          hint="command_manager 의 wz 클램프. spin 상한과 같은 값이어야 한다. "
+               "이보다 크게 두면 도달 불가능한 값이라 혼동만 만든다.")
     note("normal 모드 실제 상한", f"{wz_normal:.4f} rad/s @ vx={max_lx}",
          f"MPPI wz_max({fp.get('wz_max')})와의 차이는 조향 클램프 + spin 라우팅이 흡수한다.")
 
@@ -279,6 +365,165 @@ def main():
     else:
         print(f"  [{GREEN}OK  {RESET}] {'저속 사각지대 없음 (spin_lin >= min_vx)':44s} "
               f"     ={spin_lin:>10.3f}  요구>={min_vx:.3f}")
+
+    # ---- 5) 조향 응답 (기구가 명령을 따라올 수 있는가) ----
+    print("\n" + "=" * 78)
+    print("5) 조향 응답 — 명령이 기구가 낼 수 있는 속도인가")
+    print("=" * 78)
+    rate = bc.get("max_steer_rate_deg_s")
+    check_present("base_control.max_steer_rate_deg_s", rate,
+                  hint="조향 슬루 제한. 없거나 0 이면 출발 선회에서 조향 명령이 "
+                       "1500 deg/s 로 튄다(|wz|<=|vx|/R_min 클램프가 걸리는 순간 "
+                       "R=R_min = 정의상 최대 조향각이 되기 때문).")
+    if rate is not None and float(rate) > 0:
+        full = math.degrees(wis.max_steer_rad)
+        t_full = full / float(rate)
+        note("0° -> 최대조향 전환시간", f"{t_full:.2f} s "
+             f"(vx={max_lx} 에서 주행 {max_lx * t_full:.2f} m)",
+             "코너 진입 거리다. 너무 길면 코너에서 안쪽으로 파고든다.")
+        align = bc.get("startup_steer_align_sec")
+        auto_align = 2.0 * full / float(rate)
+        if align is not None and float(align) == 0.0:
+            note("기동 조향 정렬 (자동)", f"{auto_align:.2f} s",
+                 "전원 투입 시 조향각을 모르므로 최악 가동범위를 개루프로 기다린다.")
+        elif align is not None and float(align) < 0:
+            _problems.append(("startup_steer_align_sec", f"{align}", ">= 0",
+                              "비활성이면 조향각을 모르는 채로 출발한다."))
+            print(f"  [{RED}불일치{RESET}] {'startup_steer_align_sec':44s} "
+                  f"     ={float(align):>10.2f}  요구>=0")
+        else:
+            note("기동 조향 정렬 (수동)", f"{float(align or 0):.2f} s",
+                 f"자동 계산값은 {auto_align:.2f} s 다.")
+    else:
+        _problems.append(("max_steer_rate_deg_s", str(rate), "> 0",
+                          "0/미선언이면 조향 슬루 제한이 없다."))
+    # 모드 전환 dwell 이 조향축 스윕을 실제로 덮는가.
+    # STM32 는 모드마다 조향 자세가 고정이다: normal ±max_steer, spin CONS(9),
+    # crab CONS(8). 액추에이터는 '지금 각도'에서 새 자세까지 슬루로 간다.
+    dwell = bc.get("mode_switch_dwell_sec")
+    if dwell is not None and rate and float(rate) > 0:
+        d = float(dwell)
+        ms = float(bc.get("max_steer_deg", 30.0))
+        spin_a, crab_a = 47.0, 90.0          # STM32 CONS(9), CONS(8)
+        worst, worst_spin = ms + crab_a, ms + spin_a
+        need, need_spin = worst / float(rate), worst_spin / float(rate)
+        note("mode_switch_dwell_sec", f"{d:.2f} s",
+             f"normal(±{ms:.0f}°)/spin({spin_a:.0f}°)/crab({crab_a:.0f}°) 전환 시 "
+             "조향축 스윕 시간.")
+        if d < need_spin:
+            print(f"  [{YELLOW}주의{RESET}] {'dwell 이 normal->spin 최악 스윕을 덮는가':44s} "
+                  f"     ={d:>10.2f} s  필요~{need_spin:.2f} s")
+            note("", "",
+                 f"최악은 반대쪽 풀락({ms:.0f}°)에서 제로턴 자세({spin_a:.0f}°)까지 "
+                 f"{worst_spin:.0f}° 를 {rate} deg/s 로 도는 것 = {need_spin:.2f} s. "
+                 "dwell 이 짧으면 조향축이 아직 도는 중에 바퀴가 굴러 의도와 다른 "
+                 "궤적이 난다. ALIGN(7절)이 켜져 있으면 이 전환이 더 잦아진다.")
+        else:
+            print(f"  [{GREEN}OK  {RESET}] {'dwell 이 normal->spin 최악 스윕을 덮는가':44s} "
+                  f"{d:>10.2f} s >= {need_spin:.2f} s")
+        if d < need:
+            note("crab 전환은 더 오래 걸림", f"필요~{need:.2f} s (현재 {d:.2f} s)",
+                 "crab 은 자율주행에서 거의 안 쓰이므로 경고로만 남긴다.")
+    else:
+        note("mode_switch_dwell_sec", f"{dwell}",
+             "normal/crab/spin 전환 시 조향축 스윕 시간.")
+    if bc.get("hard_stop_on_timeout") is True:
+        note("hard_stop_on_timeout", "true",
+             "cmd timeout/odom stale 도 즉시 정지한다. 감속 램프를 원하면 false.")
+
+    # ---- 6) URDF vs STM32 CONS (단일 진실 공급원 정합) ----
+    print("\n" + "=" * 78)
+    print("6) URDF vs STM32 CONS — 같은 로봇을 같은 숫자로 부르는가")
+    print("=" * 78)
+    urdf_path, urdf_src = _share("alm_description", "urdf", "alm_robot.urdf.xacro")
+    props = _xacro_props(urdf_path) if urdf_path else {}
+    if not props:
+        note("URDF", "읽지 못함",
+             "alm_description 이 없거나 xacro 상수 형식이 바뀌었다. 건너뛴다.")
+    else:
+        note("URDF 출처", f"[{urdf_src}] {urdf_path}")
+        fx, rx = props.get("front_x"), props.get("rear_x")
+        ht, wr = props.get("half_track"), props.get("wheel_radius")
+        if fx is not None and rx is not None:
+            check("URDF 휠베이스 (front_x - rear_x)", fx - rx, wis.B, tol=0.02,
+                  hint="STM32 CONS(2) 와 다르면 선회 계산과 실제 기구가 어긋난다. "
+                       "어느 쪽이 실측인지 확인 필요 (docs/TODO.md §3.95).")
+        if ht is not None:
+            check("URDF 윤거 (half_track * 2)", ht * 2.0, wis.half_track * 2.0,
+                  tol=0.02, hint="STM32 CONS(3) 와 다르면 위와 같은 문제.")
+        # footprint 를 URDF 에서 다시 유도해 nav2.yaml 값과 대조
+        body_l = props.get("body_length")
+        body_w = props.get("body_width")
+        wheel_w = props.get("wheel_width")
+        if None not in (fx, rx, ht, wr, body_l, body_w, wheel_w):
+            front = fx + wr
+            back = min(rx - wr, -body_l / 2.0)
+            side = max(ht + wheel_w / 2.0, body_w / 2.0)
+            note("URDF 유도 footprint",
+                 f"x[{back:.4f}, {front:.4f}]  y[±{side:.4f}]")
+            cm = _params(nav_doc, "local_costmap", "local_costmap")
+            raw = cm.get("footprint")
+            pts = yaml.safe_load(raw) if isinstance(raw, str) else raw
+            if pts:
+                nf = max(x for x, _ in pts)
+                nb = min(x for x, _ in pts)
+                ns = max(abs(y) for _, y in pts)
+                ok = nf >= front - 1e-6 and nb <= back + 1e-6 and ns >= side - 1e-6
+                mark = f"{GREEN}OK  {RESET}" if ok else f"{RED}부족{RESET}"
+                print(f"  [{mark}] {'nav2 footprint 가 URDF 를 덮는가':44s} "
+                      f"nav2 x[{nb:.3f}, {nf:.3f}] y[±{ns:.3f}]")
+                if not ok:
+                    _problems.append((
+                        "costmap footprint", f"x[{nb:.3f},{nf:.3f}] y[±{ns:.3f}]",
+                        f"x[{back:.3f},{front:.3f}] y[±{side:.3f}] 이상",
+                        "footprint 가 실제 차체보다 작으면 충돌검사가 통과시키는 "
+                        "경로에서 실제로 부딪힌다."))
+
+    # ---- 7) ALIGN (경로 헤딩 정렬 기동) ----
+    print("\n" + "=" * 78)
+    print("7) ALIGN — 전역 경로가 표현 못 하는 제자리 회전을 제어단이 메우는가")
+    print("=" * 78)
+    if bc.get("align_enabled") is not True:
+        note("align_enabled", str(bc.get("align_enabled")),
+             "OFF 다. 전역 경로는 R_min 원호/직선만 담으므로, 접근 자세가 크게 "
+             "어긋난 목표는 실패할 수 있다.")
+    else:
+        enter = float(bc.get("align_enter_deg", 0.0))
+        exit_ = float(bc.get("align_exit_deg", 0.0))
+        if exit_ >= enter:
+            _problems.append((
+                "align_exit_deg", f"{exit_}", f"< align_enter_deg({enter})",
+                "히스테리시스가 없으면 진입/이탈이 매 틱 왕복한다 — "
+                "예전 반경기반 라우팅이 정확히 이렇게 실패했다."))
+            print(f"  [{RED}불일치{RESET}] {'align_exit_deg < align_enter_deg':44s} "
+                  f"     ={exit_:>10.1f}  요구<{enter}")
+        else:
+            print(f"  [{GREEN}OK  {RESET}] {'히스테리시스 (exit < enter)':44s} "
+                  f"{exit_:>10.1f}° < {enter:.1f}°")
+        # ALIGN 의 wz 상한은 spin 상한과 같아야 한다 (command_manager 가 그렇게 넘긴다)
+        note("ALIGN 회전속도 상한", f"{bc.get('auto_spin_max_angular_speed')} rad/s",
+             "auto_spin_max_angular_speed 를 그대로 쓴다. spin 모드의 상한과 "
+             "따로 놀 이유가 없다.")
+        # 타임아웃이 dwell 보다 충분히 커야 한 번은 실제로 돈다
+        dwell = float(bc.get("mode_switch_dwell_sec", 0.0) or 0.0)
+        amax = float(bc.get("align_max_sec", 0.0))
+        wzmax = float(bc.get("auto_spin_max_angular_speed", 0.45))
+        need = math.radians(180.0) / max(wzmax, 1e-6)
+        if amax < need:
+            print(f"  [{YELLOW}주의{RESET}] {'align_max_sec 가 180° 회전에 부족':44s} "
+                  f"     ={amax:>10.1f} s  필요~{need:.1f} s")
+            note("", "", f"{wzmax} rad/s 로 180° 를 돌려면 {need:.1f} s 걸린다. "
+                 "타임아웃이 그보다 짧으면 큰 각도는 절대 못 맞춘다.")
+        else:
+            print(f"  [{GREEN}OK  {RESET}] {'align_max_sec 가 180° 회전을 담는가':44s} "
+                  f"{amax:>10.1f} s >= {need:.1f} s")
+        note("모드 전환 dwell 과의 관계",
+             f"dwell {dwell:.1f} s x 2 (진입+복귀) = {2*dwell:.1f} s",
+             "ALIGN 1회의 고정비다. dwell 동안은 타임아웃 시계가 멈추므로 "
+             "align_max_sec 를 잡아먹지는 않는다.")
+        note("진입 문턱 근거", f"{enter:.0f}° / {bc.get('align_enter_hold_sec')} s 지속",
+             "alm_lab 실측 |경로 헤딩오차| p50 8.8° p90 39.8° p99 67.2°. "
+             "30° 로 낮추면 정상 주행 틱의 35% 가 걸려 vx 가 무너진다.")
 
     # ---- 결과 ----
     print("\n" + "=" * 78)

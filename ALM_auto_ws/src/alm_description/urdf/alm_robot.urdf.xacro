@@ -24,10 +24,27 @@
   <xacro:property name="wheel_width"  value="0.0488"/>    <!-- 48.8 mm -->
 
   <!-- 바퀴 중심 위치 (base_link=차체중심 기준). 앞/뒤 x가 대칭이 아님(CAD 값). -->
-  <xacro:property name="front_x" value="0.6106"/>   <!-- 앞축: FL/RL 평균 X -->
-  <xacro:property name="rear_x"  value="-0.3010"/>  <!-- 뒤축: FR/RR 평균 X -->
-  <xacro:property name="half_track" value="0.500"/> <!-- 좌우 ±500 mm → 트레드 1000 mm -->
-  <!-- 휠베이스 = front_x - rear_x = 0.9116 m (≈912 mm) -->
+  <!--
+    ★ 2026-08-20: STM32 CONS 가 정답임이 확인되어 그 값에 맞춤.
+      이전:  front_x 0.6106 · rear_x -0.3010 · half_track 0.500
+             -> 휠베이스 0.9116 m, 윤거 1.000 m
+      CONS:  CONS(2) 휠베이스 1.000 m,  CONS(3) 윤거 0.919 m
+
+      두 값이 **뒤바뀌어 적힌** 것으로 보인다:
+        이전 URDF 윤거     1.0000 m  ==  CONS 휠베이스 1.000 m  (정확히 일치)
+        이전 URDF 휠베이스 0.9116 m  ~=  CONS 윤거     0.919 m  (차이 7 mm)
+
+    ##CONFIRM## front_x / rear_x 배분은 CAD 확인이 필요하다. 휠베이스 합(1.000 m)만
+      CONS 로 확정됐고, base_link 가 축 사이 어디인지는 CONS 에 정보가 없다.
+      아래는 **footprint 를 바꾸지 않는** 안을 택했다 (front_x 유지, rear_x 를 뒤로):
+      앞쪽 최전방 x 가 그대로라 기존 footprint x[-0.65, +0.72] 가 계속 유효하고
+      안전 여유가 줄지 않는다. 배분이 다르면 이 두 줄과 nav2.yaml footprint 를
+      함께 고칠 것.  검사: ros2 run alm_navigation nav2_kinematic_check.py (§6)
+  -->
+  <xacro:property name="front_x" value="0.6106"/>   <!-- 앞축: FL/FR 평균 X (유지) -->
+  <xacro:property name="rear_x"  value="-0.3894"/>  <!-- 뒤축: RL/RR 평균 X (CONS 휠베이스 1.000) -->
+  <xacro:property name="half_track" value="0.4595"/><!-- 좌우 ±459.5 mm -> 윤거 919 mm = CONS(3) -->
+  <!-- 휠베이스 = front_x - rear_x = 1.0000 m = CONS(2) -->
 
   <!-- 조향 기계적 한계: toe-in 90°, toe-out 45° (URDF 조인트는 시각화용으로 ±90°) -->
   <xacro:property name="steer_lower" value="-1.5708"/>

@@ -11,7 +11,7 @@ find_package(ament_cmake REQUIRED)
 # behavior_trees: SmoothPath 를 끼운 커스텀 BT. navigation.launch.py 가
 # 설치 경로를 RewrittenYaml 로 bt_navigator 에 주입하므로 반드시 설치돼야 한다.
 install(
-  DIRECTORY behavior_trees config launch maps rviz
+  DIRECTORY behavior_trees config launch lattice_primitives maps rviz
   DESTINATION share/${PROJECT_NAME}
 )
 
