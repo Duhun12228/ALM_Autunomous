@@ -209,18 +209,24 @@ ros2 launch alm_navigation slam.launch.py rviz:=true
 ros2 service call /map_save std_srvs/srv/Trigger
 ```
 
-기본 PCD:
+기본 PCD (`config/fastlio_mid360.yaml` 의 `map_file_path`):
 
 ```text
-$MAPS/alm_3d_map.pcd
+$MAPS/alm_lab/cloud.pcd
 ```
+
+⚠ 맵은 **폴더 하나 = 맵 하나**입니다. 새 맵을 만들 때는 매핑 전에
+`map_file_path` 를 새 폴더로 바꾸고 그 폴더에 `manifest.yaml` 을 두세요
+(fast_lio 파라미터라 launch 인자로 치환되지 않아, 안 바꾸면 기존 맵을 덮어씁니다).
 
 ## 9. 2D 맵 생성
 
 ```bash
+MAP=$MAPS/alm_lab
+
 ros2 run alm_navigation pcd2pgm.py \
-  --pcd $MAPS/alm_3d_map.pcd \
-  --out $MAPS/alm_map \
+  --pcd $MAP/cloud.pcd \
+  --out $MAP/grid \
   --resolution 0.05 \
   --z-min 0.3 \
   --z-max 0.8
@@ -229,21 +235,34 @@ ros2 run alm_navigation pcd2pgm.py \
 출력:
 
 ```text
-$MAPS/alm_map.pgm
-$MAPS/alm_map.yaml
+$MAP/grid.pgm
+$MAP/grid.yaml
 ```
+
+## 9-1. FPFH 초기측위 DB 생성
+
+```bash
+ros2 run icp_relocalization fpfh_map_builder \
+  --map $MAP/cloud.pcd \
+  --output-prefix $MAP/fpfh_map
+```
+
+`fpfh_map.meta` 에 부모 PCD 의 지문이 기록되어, `teaser_fpfh_localizer` 가
+기동할 때 짝이 맞는지 검증합니다. PCD 를 다시 만들면 이 DB 도 다시 만들어야
+합니다 — `map_manager` 가 불일치를 감지해 WebUI 에 경고로 띄웁니다.
 
 ## 10. 측위 검증
 
 ```bash
 ros2 launch alm_sensors lidar.launch.py
-ros2 launch alm_navigation localization.launch.py map_pcd:=$MAPS/alm_3d_map.pcd
+# 인자를 비우면 maps/active.yaml 이 가리키는 맵을 자동으로 쓴다
+ros2 launch alm_navigation localization.launch.py
 ```
 
 RViz 확인:
 
 ```bash
-ros2 run alm_navigation map_publisher.py --ros-args -p yaml:=$MAPS/alm_map.yaml
+ros2 run alm_navigation map_publisher.py --ros-args -p yaml:=$MAP/grid.yaml
 rviz2 -d $WS/install/alm_navigation/share/alm_navigation/rviz/localization.rviz
 ```
 
@@ -252,9 +271,7 @@ rviz2 -d $WS/install/alm_navigation/share/alm_navigation/rviz/localization.rviz
 ## 11. 자율주행
 
 ```bash
-ros2 launch alm_bringup navigation.launch.py \
-  map:=$MAPS/alm_map.yaml \
-  map_pcd:=$MAPS/alm_3d_map.pcd
+ros2 launch alm_bringup navigation.launch.py
 ```
 
 RViz에서 **2D Pose Estimate** 후 **Nav2 Goal**을 지정합니다.

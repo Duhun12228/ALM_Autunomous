@@ -11,5 +11,37 @@ __pycache__/
 _backup_local_*/
 # Livox SDK 빌드트리 (UDP 직접파싱으로 전환, 재생성 가능)
 ALM_auto_ws/thirdparty/
-# 3D 점군맵 (대용량 바이너리, 실주행맵 확보 후 별도관리)
-ALM_auto_ws/src/alm_navigation/maps/*.pcd
+# 맵은 폴더 하나가 곧 맵 하나다 — maps/<맵이름>/{manifest.yaml, cloud.pcd,
+# grid.pgm+grid.yaml, fpfh_map*}. 이 중 대용량 바이너리와 로컬 재생성이 가능한
+# 것만 무시하고, manifest.yaml / grid.* / active.yaml 은 계속 추적한다.
+#
+# 3D 점군맵 + FPFH DB 점군 (대용량, 매핑/빌더로 각 환경에서 재생성)
+ALM_auto_ws/src/alm_navigation/maps/*/*.pcd
+# FPFH DB 메타 (부모 pcd 지문을 담고 있어 환경마다 달라진다)
+ALM_auto_ws/src/alm_navigation/maps/*/fpfh_map.meta
+# map_manager 의 지문 캐시
+ALM_auto_ws/src/alm_navigation/maps/*/.fingerprint
+# Scan Context DB. 이 브랜치는 SC 를 쓰지 않지만(FPFH+TEASER++ 로 교체) 로컬에
+# 남은 sc_db_*.npz 가 실수로 커밋되지 않도록 규칙은 유지한다.
+ALM_auto_ws/src/alm_navigation/maps/**/*.npz
+# 방식 C(SC-LIO-SAM) 매핑 산출물 — 157MB 바이너리, dev/sc-lio-sam 에서 재생성
+ALM_auto_ws/src/alm_navigation/maps/sc_lio_sam_mid360_test/
+# 점군 뷰어(CloudCompare/pcl_viewer)가 남기는 카메라 위치 파일
+*.cam
+
+# 로컬 측위 실행 로그/빌드 보조 파일
+ALM_auto_ws/*.log
+ALM_auto_ws/logs/
+ALM_auto_ws/symlink_install_manifest.txt
+
+# TEASER++ 런타임 빌드에 사용하지 않는 upstream 자료
+ALM_auto_ws/src/thirdparty/TEASER-plusplus/.github/
+ALM_auto_ws/src/thirdparty/TEASER-plusplus/doc/
+ALM_auto_ws/src/thirdparty/TEASER-plusplus/examples/
+ALM_auto_ws/src/thirdparty/TEASER-plusplus/matlab/
+ALM_auto_ws/src/thirdparty/TEASER-plusplus/python/
+ALM_auto_ws/src/thirdparty/TEASER-plusplus/test/
+ALM_auto_ws/src/thirdparty/TEASER-plusplus/.clang-format
+ALM_auto_ws/src/thirdparty/TEASER-plusplus/.readthedocs.yml
+ALM_auto_ws/src/thirdparty/TEASER-plusplus/README.md
+ALM_auto_ws/src/thirdparty/TEASER-plusplus/THANKS.md

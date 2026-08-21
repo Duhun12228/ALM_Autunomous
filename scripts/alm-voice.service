@@ -1,0 +1,35 @@
+[Unit]
+# 부팅 즉시 음성 안내를 띄운다. 실차에서는 SSH 로 붙어 손으로 실행할 수 없다 —
+# 화면도 키보드도 없이 전원만 들어오는 상황이 정상 운용이다.
+#
+# **사용자 서비스**인 이유: 오디오가 PulseAudio 를 거치는데, PulseAudio 는
+# 사용자 세션에 딸린 프로세스다. 시스템 서비스(root)로 띄우면 사용자의
+# PulseAudio 소켓에 닿지 못해 소리가 안 난다.
+Description=ALM 음성 안내 (voice_announcer)
+Documentation=file:///home/kdh/ALM_Autunomous/docs/OPERATION_GUIDE.md
+After=pulseaudio.service
+Wants=pulseaudio.service
+
+[Service]
+Type=simple
+# ROS 환경은 상속되지 않는다. 서비스는 로그인 셸이 아니므로 .bashrc 를 읽지
+# 않는다 — 여기서 직접 source 해야 한다.
+#
+# ROS_DOMAIN_ID 등을 쓰게 되면 ~/.config/alm-voice.env 에 넣는다.
+# 앞의 '-' 는 파일이 없어도 기동에 실패하지 않게 한다.
+EnvironmentFile=-%h/.config/alm-voice.env
+ExecStart=/bin/bash -c 'source /opt/ros/humble/setup.bash && \
+  source %h/ALM_Autunomous/ALM_auto_ws/install/setup.bash && \
+  exec ros2 run alm_bringup voice_announcer.py --ros-args --params-file \
+  %h/ALM_Autunomous/ALM_auto_ws/install/alm_bringup/share/alm_bringup/config/voice.yaml'
+
+# 노드가 죽어도 다시 띄운다. BlueZ 플레이어 등록은 프로세스 수명과 함께
+# 사라지므로, 죽은 채로 두면 스피커 버튼도 같이 죽는다.
+Restart=always
+RestartSec=5
+# 부팅 직후 PulseAudio/BlueZ 가 아직 안 떴으면 몇 번 재시작할 수 있다.
+# 그 정도로 실패 판정을 내려 영영 포기하면 안 된다.
+StartLimitIntervalSec=0
+
+[Install]
+WantedBy=default.target

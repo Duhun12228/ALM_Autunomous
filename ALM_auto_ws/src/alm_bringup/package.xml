@@ -14,8 +14,21 @@
   <exec_depend>alm_navigation</exec_depend>
   <exec_depend>alm_base_control</exec_depend>
   <exec_depend>alm_mcu_interface</exec_depend>
+  <exec_depend>alm_msgs</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <!-- voice_announcer 가 /emergency_stop (Bool) 을 직접 구독한다 -->
+  <exec_depend>std_msgs</exec_depend>
+  <!-- voice_announcer 가 BlueZ 에 MPRIS 플레이어를 등록해 스피커 버튼을 받는다.
+       없어도 노드는 뜬다 — 버튼 수신만 조용히 비활성화된다. -->
+  <exec_depend>python3-dbus</exec_depend>
+  <exec_depend>python3-gi</exec_depend>
+  <!-- WebUI 읽기: 텔레메트리 브리지 / 쓰기: 명령 백엔드 -->
+  <exec_depend>foxglove_bridge</exec_depend>
+  <exec_depend>alm_web_backend</exec_depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>

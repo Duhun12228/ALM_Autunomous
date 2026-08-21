@@ -1,12 +1,37 @@
+# ============================================================================
+# cmd_arbiter: 자율/텔레옵 동작권 중재. 여기 출력(mux)이 command_manager 입력이 된다.
+# 동작권 전환:  ros2 service call /cmd_arbiter/set_owner
+#                 alm_msgs/srv/SetControlOwner "{owner: teleop}"   (auto | teleop)
+# 파라미터는 런타임 변경 가능: ros2 param set /cmd_arbiter teleop_timeout_sec 1.0
+# ============================================================================
+cmd_arbiter:
+  ros__parameters:
+    # 입력(소스) 토픽
+    cmd_vel_nav_topic: /cmd_vel            # Nav2(DWB) 출력
+    drive_mode_nav_topic: /drive_mode      # 수동/webui 가 설정하는 자율 모드
+    cmd_vel_teleop_topic: /cmd_vel_teleop  # keyboard_teleop 출력
+    drive_mode_teleop_topic: /drive_mode_teleop
+    # 출력 토픽 (command_manager 입력과 반드시 일치)
+    cmd_vel_out_topic: /cmd_vel_mux
+    drive_mode_out_topic: /drive_mode_mux
+    owner_topic: /cmd_arbiter/owner        # 현재 소유자 (latched, 관측용)
+    # 동작
+    default_owner: "auto"                  # 부팅 시 소유자 (자율)
+    publish_rate_hz: 50.0
+    nav_timeout_sec: 0.5                   # Nav2 가 이 시간 끊기면 0 twist
+    teleop_timeout_sec: 0.5               # 텔레옵 끊기면 정지 유지(HELD)
+
 command_manager:
   ros__parameters:
     # ---- 토픽 ----
-    cmd_vel_topic: /cmd_vel            # Nav2/teleop 입력
-    drive_mode_topic: /drive_mode      # 원하는 모드 (normal/crab/spin/auto)
+    cmd_vel_topic: /cmd_vel_mux         # cmd_arbiter 출력 (자율/텔레옵 중재 결과)
+    drive_mode_topic: /drive_mode_mux   # cmd_arbiter 출력 모드
     estop_topic: /emergency_stop       # std_msgs/Bool
     command_topic: /mcu/command        # alm_msgs/McuCommand (MCU 전송용)
     mcu_state_topic: /mcu/state        # alm_msgs/McuState (MCU fault 감시)
-    odom_topic: /odometry/filtered     # nav_msgs/Odometry (워치독)
+    # 워치독 대상. 주행 모드에선 EKF 를 끄므로 /odometry/filtered 가 없어
+    # 워치독이 조용히 비활성된다 -> FAST-LIO 출력을 본다.
+    odom_topic: /Odometry              # nav_msgs/Odometry (워치독)
 
     # ---- 동작 ----
     publish_rate_hz: 50.0
@@ -14,11 +39,54 @@ command_manager:
     enable_motors_on_start: true
     cmd_timeout_sec: 0.5               # 이 시간 넘게 cmd_vel 없으면 정지
 
+    # ---- E-STOP 래치 ----
+    # /emergency_stop 은 "세워라"만 뜻한다. true 는 받고 false 는 무시하며,
+    # 해제는 /emergency_stop/release (alm_msgs/srv/ReleaseEstop) 로만 가능하다.
+    # 토픽으로 풀 수 있으면 래치가 아니다 — 노드 하나가 실수로 false 를 주기적
+    # 발행하면 정지가 조용히 풀린다. 웹 UI 도 래치를 전제로 만들어져 있다.
+    estop_latch: true
+    # 해제 시 MCU 가 아직 fault/estop 을 보고 중이면 거부한다.
+    # 소프트웨어가 물리 상태를 앞질러 '해제됨'을 표시하지 않기 위함.
+    estop_release_requires_clear_mcu: true
+
     # ---- 속도/가속 제한 (안전 게이팅). ##TODO## 실제 플랫폼 사양으로 조정 ----
-    max_linear_x: 0.45
-    min_linear_x: -0.15
+    # ★ 실측 전 안전 설정 (2026-08-19). 원래 값: 0.45 / -0.15
+    #
+    # 왜 낮췄나 — 조향 슬루율 S 를 모르는 채로 실차에 나가기 위해서다.
+    # 핵심은 **경로 품질을 정하는 것이 max_steer_rate_deg_s / max_linear_x 비**
+    # (deg/m)이지 각각의 절대값이 아니라는 점이다:
+    #
+    #     코너 진입 거리 = Δδ / (max_steer_rate_deg_s / max_linear_x)
+    #
+    #   45 deg/s / 0.45 m/s = 100 deg/m -> 0°→30° 진입에 0.300 m
+    #   20 deg/s / 0.20 m/s = 100 deg/m -> 0°→30° 진입에 0.300 m   (동일!)
+    #
+    # 비를 유지한 채 둘을 같이 낮추면 **경로 모양은 그대로**이고 시간만 늘어난다.
+    # 그런데 조향 명령 변화율의 절대값이 낮아지므로 'max_steer_rate < 실제 S'
+    # 가 확실해진다 — 어떤 조향 모터도 20 deg/s 는 넘는다.
+    #
+    # 명령 램프가 실제 S 를 넘었을 때 누적되는 헤딩 손실 (계산):
+    #      실제 S    vx=0.45(rate 45)   vx=0.20(rate 20)
+    #      10 deg/s      16.97°              4.85°
+    #      15 deg/s       9.70°              1.62°
+    #      20 deg/s       6.06°              0.00°
+    #   -> vx=0.20/rate=20 이면 S>=20 인 모든 액추에이터에서 오차 0.
+    #
+    # 실측(docs/control_pipeline.md §7.1) 후 비(100 deg/m)를 유지한 채 함께 올릴 것.
+    # ⚠ max_linear_x 는 nav2.yaml 의 MPPI vx_max · velocity_smoother 와
+    #   **셋이 같아야 한다.** nav2_kinematic_check.py 가 검사한다.
+    # ⚠ 0.20 아래로는 내리지 말 것 — auto_spin_exit_linear_threshold(0.10) 대비
+    #   여유가 2배뿐이라, 더 낮추면 spin 에서 못 빠져나오는 구간이 생긴다.
+    max_linear_x: 0.20
+    # 전/후진 속도비 유지 (0.20/0.07 = 2.86). nav2.yaml 의 reverse_penalty 3.0 은
+    # 이 비에서 온 값이므로 함께 스케일해야 Reeds-Shepp 후진 판단이 유지된다.
+    min_linear_x: -0.07
     max_linear_y: 0.30                 # crab 모드 측면 속도 한계
-    max_angular_z: 0.8
+    # spin 상한(auto_spin_max_angular_speed)과 같은 값으로 맞춘다.
+    # 예전 0.8 은 어디서도 도달할 수 없는 죽은 값이었다 — normal 은 조향 한계
+    # (|vx|/R_min = 0.274)가 먼저 걸리고, spin 은 spin_max_wz(0.45)가 먼저 걸리며,
+    # 자율 경로는 velocity_smoother 가 0.45 로 자른다. 읽는 사람만 헷갈렸다.
+    max_angular_z: 0.45
     # (9) Nav2 velocity_smoother 가 이미 가속 제한을 하므로 여기 rate_limit 은
     #     mode 전환/e-stop 해제 시점의 안전 램프 역할. 이중 제한이 굼뜨면 false 로.
     enable_rate_limit: true
@@ -32,6 +100,28 @@ command_manager:
 
     # ---- auto 모드 선택 로직 (참고 레포 selectAutoDriveMode 포팅) ----
     auto_crab_enabled: false          # localization 안정성 위해 기본 비활성
+    # ⚠ 0.10 으로 낮췄다가 **되돌렸다** (2026-08-20).
+    #
+    # 유도 자체는 이랬다: spin 진입 선속도 상한(auto_spin_linear_threshold 0.04)에서
+    #   normal 이 낼 수 있는 최대 wz 는 0.04/R_min(1.6425) = 0.0244 rad/s 이므로,
+    #   안전계수 4 를 곱한 0.10 이면 "normal 로는 못 만드는 회전" 이 된다.
+    #   (현재 0.35 는 계수 14.3 — vx_max=0.45 시절 값이 그대로 남은 것이다)
+    #
+    # 그런데 시뮬 결과가 순 효과가 없었다 (docs/control_pipeline.md §8):
+    #     문턱 0.35 : G4 협착 성공 101s/134s/127s (3/3),  G3 하드 1/4
+    #     문턱 0.10 : G4 협착 **실패** (0.571 m/37°),      G3 하드 0/2
+    #   G3 는 확실히 못 고쳤고 G4 는 나빠졌다.
+    #
+    # 해석: 0.35 에서는 spin 이 사실상 'BT 리커버리 전용'이다(Spin 이 0.45 를 명령).
+    #   0.10 으로 낮추면 MPPI 가 우연히 내는 회전에도 spin 이 걸리는데,
+    #   **spin 은 위치오차를 줄이지 못하고** 탈출 조건이 |wz| <= 0.03 이라 목표
+    #   헤딩을 지나쳐도 못 빠져나온다(체류 7~14.5 s 실측). 회전이 잦아질수록
+    #   시간예산만 태운다. **더 도는 게 더 나은 게 아니다.**
+    #
+    # ##TODO## 진짜 문제는 문턱값이 아니라 **spin 탈출 조건이 요레이트 기반**이라는
+    #   것이다. "얼마나 더 돌아야 하는가"(헤딩오차)가 아니라 "지금 얼마나 빨리
+    #   도는가"만 보므로 오버슈트를 빠져나오지 못한다. 헤딩오차 기반으로 바꾸면
+    #   문턱을 낮춰도 안전해질 가능성이 있다 — 실차 데이터 확보 후 검토.
     auto_spin_angular_threshold: 0.35
     auto_spin_release_angular_threshold: 0.03
     auto_spin_linear_threshold: 0.04
@@ -39,6 +129,278 @@ command_manager:
     auto_spin_max_angular_speed: 0.45
     auto_spin_entry_duration_sec: 0.20
     auto_spin_exit_duration_sec: 0.40
+    # ##관찰## mode_switch_dwell_sec(당시 3.0, 현재 5.0)와 이 값(0.80)의 관계가
+    # 어색하다. 아래 로그는 dwell 3.0 시절 실측이므로 지금은 낭비가 더 크다:
+    #     t=486.40  auto -> spin    (전환 dwell 3.0 s 시작, 속도 0)
+    #     t=487.56  auto -> normal  ← spin 체류 1.16 s. dwell 도 안 끝났다
+    #     t=487.56  전환 dwell 3.0 s 또 시작
+    #   -> 약 6 s 정지하고 회전은 하나도 못 했다. dwell 값만 내고 모드는 못 쓴 셈.
+    #
+    # ⚠ 그래서 4.0 ('dwell 3.0 + 유효사용 1.0')으로 올려봤다가 **되돌렸다.**
+    #   시뮬레이션 결과가 명확히 나빠졌다 (docs/control_pipeline.md §12.5):
+    #       min_hold 0.80 : 협착 목표 G3 263 s 성공 / G4 101 s 성공
+    #       min_hold 4.00 : G3, G4 둘 다 300 s **타임아웃**
+    #                       (자세오차 10.6°->93.4°, 6.0°->46.8°, 평균속도 급락)
+    #   spin 을 오래 붙들면 MPPI 가 헤딩을 지나쳐도 빠져나오지 못한다 —
+    #   spin 탈출 조건이 |wz| <= 0.03 인데 지나친 만큼 반대로 돌려는 명령이
+    #   계속 나오기 때문이다. 짧게 자주 전환하는 편이 실제로 낫다.
+    #
+    # 위 '6 s 낭비'는 여전히 실재하는 비효율이다. 다만 해법은 min_hold 상향이
+    # 아니라 (a) mode_switch_dwell_sec 축소 또는 (b) spin 탈출 조건을 헤딩오차
+    # 기반으로 바꾸는 쪽이다. 실차 데이터 없이 손대지 않는다.
     auto_mode_min_hold_sec: 0.80
     auto_crab_lateral_threshold: 0.05
     auto_crab_angular_threshold: 0.10
+
+    # ---- ALIGN: 경로 헤딩 정렬 기동 ----
+    # 위 auto_spin_* 은 Nav2 가 낸 twist 가 '제자리 회전처럼 생겼나'를 **사후
+    # 분류**할 뿐이다. 그런데 전역 플래너(SmacPlannerHybrid)는 R_min 원호와 직선만
+    # 이어 붙이므로 애초에 제자리 회전을 표현하지 못한다. 그래서 Nav2 는 그런
+    # 명령을 낼 이유가 없고, spin 은 사실상 BT 리커버리 때만 발동해 왔다.
+    #
+    # ALIGN 은 순서를 뒤집는다: **경로를 직접 보고**(/plan) 경로가 요구하는 헤딩과
+    # 실제 헤딩이 크게 벌어지면 스스로 spin 을 걸어 헤딩만 고치고 normal 로 복귀한다.
+    # 4륜 독립조향의 제자리 회전 능력을 명시적으로 쓰는 유일한 경로다.
+    # 위 auto_mode_min_hold_sec 주석의 '(b) spin 탈출 조건을 헤딩오차 기반으로'가
+    # 바로 이것이다. 설계 근거 전문: scripts/path_align.py docstring.
+    align_enabled: true
+    align_plan_topic: "/plan"
+
+    # 경로 위 어느 지점의 헤딩을 목표로 삼을지 [m].
+    # 짧으면 노이즈에 민감하고, 길면 코너를 미리 보고 과하게 돈다.
+    align_lookahead_m: 1.0
+
+    # ---- 진입/이탈 문턱 [deg] — 실측 분포로 정했다 ----
+    # alm_lab 3목표 264 s 주행에서 |경로 헤딩오차|(lookahead 1.0 m 기준):
+    #     p50 8.8° · p90 39.8° · p99 67.2° · max 129.9°
+    #     >30° 는 전체 틱의 35.1% (정상 주행에서 흔하다 — 트리거로 쓰면 안 된다)
+    #     >45° 는  3.1%,  >60° 는  1.2%,  >90° 는  0.6%
+    # 60° + 지속 0.6 s 조건에서 264 s 동안 진입은 **2회**뿐이고, 둘 다
+    # '남은경로 2.4~3.4 m' 구간 — 즉 목표 접근 자세가 어긋난 바로 그 지점이다.
+    # 낮추면 정상 선회까지 물어 vx 가 무너진다(min_hold 4.0 실험과 같은 실패).
+    align_enter_deg: 60.0
+    align_exit_deg: 15.0        # ★ 반드시 enter 보다 작아야 한다(히스테리시스)
+
+    # 진입 조건이 이만큼 연속 유지돼야 건다 [s]. 재계획 순간의 튐을 거른다.
+    # 위 실측에서 45° 초과 연속구간 6개 중 0.6 s 이상은 3개뿐이었다.
+    align_enter_hold_sec: 0.6
+
+    # 기동 최대 지속 [s]. mode_switch_dwell_sec 구간에는 시계가 흐르지 않는다
+    # (안 그러면 dwell 5.0 s 가 타임아웃을 잡아먹어 한 번도 못 돌고 끝난다).
+    align_max_sec: 25.0
+    # 이탈 뒤 재진입 금지 [s]. 왕복 방지의 마지막 방벽.
+    align_cooldown_sec: 3.0
+
+    # wz = clamp(align_kp * 남은오차, align_wz_min, auto_spin_max_angular_speed)
+    align_kp: 1.2
+    align_wz_min: 0.15
+
+    # 경로 남은 길이가 이보다 짧으면 진입하지 않는다 [m].
+    # 0 이면 목표 직전의 최종 자세 정렬도 ALIGN 이 담당한다 — 실측 진입 2회가
+    # 모두 남은경로 3 m 근처였으므로 0 이 맞다. 여기를 올리면 정작 필요한
+    # 목표 접근 정렬이 빠진다.
+    align_min_remaining_m: 0.0
+
+    # /plan 이 이 시간 넘게 안 오면 '경로 없음'으로 보고 기동을 걸지 않는다 [s].
+    # Nav2 가 목표를 끝내면 /plan 발행이 멈추므로, 이게 '주행 중인가'의 판정도 겸한다.
+    align_plan_stale_sec: 2.0
+
+    # ---- normal 모드 조향각 제한 ----
+    # normal 모드의 조향각은 선회반경 R = |vx|/|wz| 로만 결정된다. 기구가 낼 수
+    # 있는 최소 반경 R_min 을 넘어서면 조향각이 포화되는데, 그때 twist 를 그대로
+    # 두면 /mcu/command 의 cmd_vel 과 실제 조향각이 서로 다른 이야기를 한다
+    # (계획 ≠ 실제). 그래서 여기서 wz 를 접는다:  |wz| <= |vx| / R_min
+    #
+    # ##중요## R_min 을 여기 숫자로 적지 않는다. fourwis_encode.min_turn_radius()
+    # 가 wheelbase_m / track_m / rws_ratio / max_steer_deg 에서 런타임 계산한다.
+    # 아래 상수들을 바꾸면 제한도 따라 바뀐다 — 단일 진실 공급원.
+    #
+    # 현재 상수(B=1.0, T=0.919, rws=0.5, 30°) 기준 유도값:
+    #   R_min = 1.643 m,  vx=0.45 에서 |wz| <= 0.274 rad/s
+    #   ⚠ 후륜 역조향(rws=0.5)이 반영된 값. 후륜 고정(rws=0)으로 손계산하면
+    #     2.079 m 가 나오는데 그건 이 플랫폼의 실제 기구가 아니다.
+    # 확인:  ros2 run alm_navigation nav2_kinematic_check.py
+    steer_limit_enabled: true
+    # 이 속도 미만이면 조향으로 회전을 만들 수 없어 wz=0 으로 접는다
+    # (normal 모드는 제자리 회전 불가).
+    steer_limit_min_vx: 0.03
+
+    # ---- 조향 슬루(변화율) 제한 ----------------------------------------------
+    # 왜 필요한가: normal 모드 조향각은 wz 가 아니라 **비율 wz/vx** 로 결정된다.
+    # 성분별 가속제한(max_accel_theta)은 이 비를 전혀 묶지 못한다. 특히
+    # |wz| <= |vx|/R_min 클램프가 걸리는 순간 R = R_min 이 되는데 이는 정의상
+    # **최대 조향각**이다. 그래서 출발 선회에서는 매번:
+    #     vx 가 작음 -> wz 한계도 작음 -> 조금만 돌려도 클램프 -> 조향각 = 풀락
+    # 틱 루프 재현 결과 20 ms 만에 0° -> 30° (슬루 1500 deg/s)였다. 어떤 조향
+    # 모터도 못 따라가고, STM32 업링크가 없어 얼마나 못 따라갔는지 알 수도 없다.
+    #
+    # 이 값은 **주행 중(vx>0)** 슬루율 상한이다. 정지 상태는 아래
+    # steer_rate_stopped_deg_s 를 쓴다 — 두 값은 물리적으로 다른 양이다.
+    #
+    #   ⚠ 낮게 잡는 것은 안전하다 — 액추에이터가 여유롭게 따라오므로
+    #     '명령 = 실제' 가 성립하고, 피드백 없이도 모델이 자명하게 맞는다.
+    #     대가는 코너 진입이 느려지는 것뿐이다.
+    #   ⚠ 높게 잡는 것이 위험하다 — 못 따라가는데 그 사실을 알 방법이 없다.
+    #   20 deg/s 근거: max_linear_x(0.20) 와 묶어 **100 deg/m** 를 만든다
+    #                  (위 max_linear_x 주석의 유도 참고). 0°→30° 전환이 1.50 s,
+    #                  주행 0.300 m — 원래 설정(45 deg/s @ 0.45 m/s)과 경로가 동일하다.
+    #
+    # ##CONFIRM## 주행 중 슬루율은 **아직 미실측**이다. 다만 정지 실측치
+    #   S_정지 = 17.5 deg/s (2026-08-20, 아래 참조) 가 하한 근사가 된다 —
+    #   조향은 굴러갈 때가 정지 때보다 빠르다(접지면을 비트는 대신 굴리므로).
+    #   20 은 그 하한을 14% 웃돈다. 저속(vx≈0.03~0.05) 출발 순간에는 명령이
+    #   실제를 잠깐 앞설 수 있으나, 30° 스윕 기준 지연 0.26 s / 경로오차 5 cm
+    #   수준이고 MPPI 피드백이 메운다. 주행 중 값을 재려면 steering_observer
+    #   (곡률 역산, 업링크 불필요) 로 상한탐색: docs/control_pipeline.md §7.1
+    # 실측 후 max_linear_x 와 **비를 유지한 채 함께** 올릴 것.
+    # 0 이면 제한 없음 — 예전 거동. 권장하지 않는다.
+    max_steer_rate_deg_s: 20.0
+
+    # ---- 정지 상태 조향 슬루율 S_정지 [deg/s] — ★ 실측값 ----------------------
+    # ★ 2026-08-20 실차 실측 (steer_bench.py, 접지 상태, -30°→+30° 3회):
+    #       17.5 / 20.4 / 20.5 deg/s   중앙값 20.4,  **최솟값 17.5**
+    #   ⇒ 보수적으로 최솟값을 쓴다. (사람이 Enter 를 누르는 반응지연은 dt 를
+    #      키우는 방향이라 S 를 과소평가한다 — 즉 이 값 자체가 이미 안전측이다)
+    #   ⇒ **스톨하지 않았다.** '정지 중 조향 금지 = 굴리면서만 조향' 이라는
+    #      설계 제약은 발생하지 않는다. 정지 dwell 로 조향을 펴는 현재 설계 유효.
+    #
+    # 이 값은 command_manager 의 제어 루프에는 들어가지 않는다(정지 구간에는
+    # 명령 램프가 없다). vx=0 구간의 dwell 두 개 — startup_steer_align_sec 와
+    # mode_switch_dwell_sec — 가 충분한지 **판정하는 근거**이며,
+    # nav2_kinematic_check.py §5 가 이 값으로 둘을 검사한다.
+    # 재측정:  ros2 run alm_bringup steer_bench.py   (command_manager 를 끄고)
+    steer_rate_stopped_deg_s: 17.5
+
+    # ---- 기동 시 조향 정렬 dwell ---------------------------------------------
+    # 전원을 켠 시점의 조향각을 알 방법이 없다(업링크 미구현). 지난 종료 시
+    # 꺾여 있던 각도가 그대로 남아 있으므로, 주행 전에 '직진(0°) + 정지' 를
+    # 최악 가동범위만큼 유지해 조향을 편다. 피드백이 없으니 최악을 개루프로
+    # 기다리는 것 외에 방법이 없다.
+    #   > 0 : 이 시간[s] 사용
+    #   = 0 : 자동 (2 * max_steer_deg / steer_rate_stopped_deg_s)
+    #   < 0 : 비활성
+    #
+    # ★ 자동(0) 대신 5.0 을 **명시**한다. 이 dwell 은 vx=0 구간이고,
+    #   **정지 상태 조향이 가장 느리다** — 접지면 전체를 비틀어야 해서 저항이
+    #   최대다. 저속 주행 전략(위 max_linear_x)으로도 이 구간만은 해결되지 않는다.
+    #
+    # ★ 실측 검증 (2026-08-20, S_정지 = 17.5 deg/s):
+    #       전 행정 60° / 17.5 = **3.43 s 필요**  <=  5.0 s   ✔ 충분 (여유 1.46배)
+    #   자동값으로 두면 3.43 s 가 되지만 5.0 을 유지한다. 부팅 때 한 번 기다리는
+    #   것이라 비용이 사실상 없고, 배터리 전압·노면·기온에 따른 S 변동
+    #   (S >= 12 deg/s 까지 커버)을 여유로 흡수하는 편이 낫다.
+    #
+    # ⚠ 재측정 시 반드시 '지면 접지 + 정지' 조건에서 잴 것. 잭업 상태로 재면
+    #   무부하 값이라 실제보다 훨씬 빠르게 나오고, 그 값으로 이걸 정하면
+    #   조향이 안 펴진 채 출발한다.
+    startup_steer_align_sec: 5.0
+
+    # ---- 모드 전환 dwell ------------------------------------------------------
+    # normal(±30°) / crab(90°, CONS(8)) / spin(47°, CONS(9)) 는 STM32 고정 자세가
+    # 서로 크게 다르다. 전환 중에 굴러가면 조향축이 스윕하는 동안 의도와 전혀
+    # 다른 방향으로 간다. 속도만 0 으로 잡고 mode_id 는 새 모드로 먼저 보내서
+    # STM32 가 정지 중에 미리 조준하게 한다(uart_protocol.md v2: mode 가 명령에 실림).
+    # 0 이면 비활성.
+    #
+    # ★ 0.5 -> 3.0. 필요한 스윕 각도를 세어 보면 0.5 s 는 낙관적이었다:
+    #     normal(±30°) <-> spin(고정 47°, CONS(9))  = 최악 77°
+    #     normal(±30°) <-> crab(고정 90°, CONS(8))  = 최악 120°  (지금은 crab 비활성)
+    #   0.5 s 로 77° 를 돌려면 S_정지 >= 154 deg/s 가 필요하다 — 근거 없는 가정이다.
+    #   3.0 s 면 S_정지 >= 26 deg/s 로 충분하다.
+    #
+    # 여기도 기동 정렬과 같은 이유로 저속 주행이 도와주지 못한다(vx=0 구간).
+    # 다만 기동과 달리 **매번** 일어나므로 무작정 늘릴 수는 없다. 3.0 s 는
+    # auto_mode_min_hold_sec(0.80)과 함께 전환 빈도를 감안한 절충이다.
+    # 위험한 방향은 spin -> normal 이다: vx=0 에서 가속을 시작하는데 조향이 아직
+    # spin 자세(47°)면 완전히 엉뚱한 방향으로 나간다.
+    # 3.0 -> 4.0. 기구학이 요구하는 값이다:
+    #   최악 스윕 = normal 반대쪽 풀락(30°) -> spin 제로턴 자세(47°) = 77°
+    #   77° / max_steer_rate_deg_s(20) = 3.85 s   -> 3.0 s 는 부족했다.
+    # 부족하면 조향축이 아직 도는 중에 바퀴가 굴러 의도와 다른 궤적이 난다(§6.2 와 같은 부류).
+    # ALIGN(§6.8)이 전환을 더 자주 만들므로 이 미달이 더 중요해졌다.
+    #
+    # ★ 4.0 -> 5.0 (2026-08-20). **실측이 4.0 을 부족하다고 판정했다.**
+    #   위 4.0 은 max_steer_rate_deg_s(20)로 나눈 값인데, 그건 '주행 중' 슬루율이다.
+    #   이 dwell 은 vx=0 구간이므로 나눌 값은 S_정지여야 한다:
+    #       실측 S_정지 = 17.5 deg/s  (17.5 / 20.4 / 20.5 중 최솟값)
+    #       77° / 17.5 = **4.40 s 필요**   ->  4.0 s 는 0.4 s 모자랐다
+    #   4.4 를 그대로 쓰지 않고 5.0 으로 잡는 이유는 여유가 2%뿐이기 때문이다.
+    #   5.0 = 77° / 15.4 deg/s 로, S 가 12% 떨어져도(배터리 저전압·저온·거친 노면)
+    #   여전히 스윕을 덮는다. 조향각 피드백이 없어 미달을 **관측할 방법이 없으므로**
+    #   이쪽 여유는 값싸게 사둘 만하다.
+    #
+    #   비용: ALIGN 1회당 2 x dwell = 10.0 s 가 정지 고정비다(진입+복귀).
+    #   실측 진입 빈도는 264 s 주행에 2회(§6.8)이므로 약 7.6% — 감수한다.
+    #   ⚠ auto_mode_min_hold_sec(0.80)을 올려 이를 상쇄하려 들지 말 것.
+    #     4.0 으로 올렸다가 G3/G4 둘 다 타임아웃 났다(§12.5, 위 주석 참고).
+    #
+    # nav2_kinematic_check.py §5 가 steer_rate_stopped_deg_s 로 이 관계를 검사한다.
+    # ⚠ crab(90°) 전환은 최악 120° = 120/17.5 = **6.9 s** 가 필요하다. 자율주행에서
+    #   crab 은 쓰이지 않으므로 덮지 않는다. auto_crab_enabled 를 켜거나 수동 crab 을
+    #   실제로 쓸 거면 여기를 7.0 으로 올려라.
+    mode_switch_dwell_sec: 5.0
+
+    # ---- 정지 등급 분리 -------------------------------------------------------
+    # e-stop/MCU fault 는 위험 이벤트다 -> 즉시 정지(mode 0).
+    # cmd timeout/odom stale 은 통신·센서 이슈다 -> 감속 램프로 세운다.
+    # 예전에는 둘을 같이 묶어서, Nav2 가 0.5 s 끊기면 0.45 m/s 에서 즉시 mode 0 이
+    # 나갔다. STM32 의 mode 0 이 coast 인지 brake 인지도 ##CONFIRM## 인 상태다.
+    # 게다가 McuCommand 안에서 cmd_vel 은 감속 램프를 그리는데 speed_rpm 은 0 이라
+    # 두 필드가 서로 다른 이야기를 했다.
+    # true 로 두면 예전처럼 둘 다 즉시 정지.
+    hard_stop_on_timeout: false
+    soft_stop_decel: 1.5              # 감속 램프 정지용 [m/s^2]. 0 이면 max_accel_x
+
+    # ---- MCU 업링크 감시 ------------------------------------------------------
+    # uart_protocol.md v2 기준 STM32 업링크(State 프레임)는 **미구현**이다.
+    # 업링크가 없으면 위의 stop_on_mcu_fault 는 동작하지 않는 안전장치다.
+    # 기동 후 이 시간 안에 /mcu/state 가 한 번도 안 오면 경고한다(1회).
+    mcu_state_expect_sec: 5.0
+    # 업링크를 '있어야 하는 것'으로 볼지. STM32 업링크는 아직 미구현이므로 기본 false —
+    # 없는 게 정상이고 기동 시 INFO 로 1회만 알린다(매번 WARN 을 띄우면 진짜 경고가
+    # 묻힌다). 업링크가 구현되면 true 로 바꿔라. 그러면 끊김이 WARN 으로 잡힌다.
+    expect_mcu_state: false
+    #
+    # 이 제한은 **모드를 바꾸지 않는다.** 로봇은 요청보다 크게 돌고, 그 오차는
+    # Nav2(MPPI)가 피드백으로 메운다. 진짜 제자리 회전이 필요하면 Nav2 가
+    # vx≈0, wz 큰 명령을 내므로 위 auto_spin_angular_threshold 가 잡는다.
+    #   ⚠ 사이 구간(vx 작고 wz < 0.35)은 wz 가 0 으로 접히고 spin 도 안 걸린다.
+    #     MPPI 는 진척이 없으면 wz 를 키우므로 스스로 임계값을 넘어 빠져나온다.
+    #     ##TODO## 실차에서 이 구간에 머무는 게 보이면
+    #     auto_spin_angular_threshold 를 낮추세요(0.35 -> 0.20 등).
+    # ##설계메모## '요구반경 < R_min 이면 spin' 라우팅을 넣었다가 뺐다. 상태머신의
+    #   spin 정의(제자리 회전)와 충돌해 1틱 단위 왕복이 났고, spin 틱마다 vx 가
+    #   0 으로 눌려 정상 선회에서도 속도가 무너졌다. command_manager.py 의
+    #   _select_auto() 주석 참고.
+    #
+    # spin/crab 은 이 제한을 받지 않는다 — STM32 가 고정 자세(CONS(8)/CONS(9))를
+    # 쓰므로 4륜 독립조향의 기계 한계를 그대로 쓸 수 있다.
+
+    # ---- 4WIS 변환 (twist -> steer_deg/speed_rpm/mode) ----
+    # 아래 5개는 STM32 CONS 벡터와 반드시 같은 값이어야 합니다.
+    # 값 출처: STM32 Simulink 모델 ALM07.slx 의 CONS 생성 서브시스템.
+    #   wheelbase_m         <- CONS(2) B = 1000 mm
+    #   track_m             <- CONS(3) T = 919 mm   (전체 윤거, 코드가 /2 함)
+    #   rws_ratio           <- CONS(1) 후륜 보조조향률 = 50%
+    #   crab_rpm_scale      <- CONS(10) = 0.5
+    #   zero_turn_rpm_scale <- CONS(11) = 0.6
+    wheelbase_m: 1.0                  # ALM07.slx CONS(2)
+    track_m: 0.919                    # ALM07.slx CONS(3)
+    rws_ratio: 0.5                    # ALM07.slx CONS(1) — 후륜이 전륜의 50% 역방향
+    crab_rpm_scale: 0.5               # ALM07.slx CONS(10)
+    zero_turn_rpm_scale: 0.6          # ALM07.slx CONS(11)
+
+    # ##CONFIRM## 실차 사양 실측 후 확정할 값 (Simulink CONS 에 없음)
+    wheel_radius_m: 0.103             # ##CONFIRM## 접지 상태 실효 반지름. rpm 환산에 직접 영향
+    gear_ratio: 1.0                   # ##CONFIRM## 모터 rpm / 휠 rpm. STM32 rpm 명령 단위 확인 필요
+    max_steer_deg: 30.0               # ##CONFIRM## 일반 주행 내측 전륜 기구 한계.
+                                      #   크랩 90°(CONS(8)) / 제로턴 47°(CONS(9)) 는
+                                      #   STM32 고정 자세이므로 여기 넣으면 안 됨.
+    max_rpm: 3000.0                   # ##CONFIRM## 구동 드라이버 한계
+    straight_angle_deg: 2.0           # ##CONFIRM## CONS(4) 데드밴드.
+                                      #   ALM07.slx 의 '직진판정각도(DEG)' Constant 블록에서 실제 값 확인 필요
+    # 크랩/제로턴 방향 부호. 실차에서 저속으로 방향 확인 후 뒤집을 것 (+1 / -1)
+    #   +linear.y  -> 좌측 크랩 이동?      아니면 crab_steer_sign: -1.0
+    #   +angular.z -> 반시계 제자리 회전?  아니면 spin_steer_sign: -1.0
+    crab_steer_sign: 1.0              # ##CONFIRM##
+    spin_steer_sign: 1.0              # ##CONFIRM##

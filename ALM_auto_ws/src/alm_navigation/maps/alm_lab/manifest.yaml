@@ -1,0 +1,8 @@
+format_version: 1
+name: alm_lab
+label: "연구동 1층 실주행"
+created: "2026-08-04 22:54"
+sensor: livox_mid360
+# 자산의 '사실'(점 개수·해상도·feature 수)은 여기에 적지 않는다.
+# map_manager 가 파일 헤더에서 직접 읽는다 — 단일 진실 공급원.
+notes: "자기가림 마스크 OFF 상태에서 매핑 — 적재물이 궤적을 따라 번져 기록돼 있음 (docs/TODO.md 3.5)"

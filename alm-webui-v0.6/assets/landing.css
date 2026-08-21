@@ -1,0 +1,254 @@
+/* ════════════════════════════════════════════════════════════
+   ALM WebUI v0.6 — Cold Start (0번 화면)
+
+   스크롤 = 부팅 진행률. 마케팅이 아니라 시스템이 스스로를
+   점검하며 켜지는 과정. 스크롤을 다 내려야 콘솔에 진입한다.
+
+   스크롤 연출은 IntersectionObserver로 화면 진입을 감지한다.
+   JS가 꺼지거나 모션 감소 설정이면 모든 내용을 그대로 표시한다.
+   obsidian.css의 토큰(--void, --brass, --mono …)을 재사용한다.
+   ════════════════════════════════════════════════════════════ */
+
+/* ── 셸 ──────────────────────────────────────────────────── */
+.cold-start{
+  position:fixed;inset:0;z-index:500;
+  background:var(--void);
+  background-image:radial-gradient(120% 60% at 50% 0%,rgba(111,168,255,.08),transparent 55%);
+  overflow-y:auto;overflow-x:hidden;
+  scroll-behavior:smooth;
+}
+.cold-start.dismissed{
+  animation:bootOut .8s var(--ease) forwards;pointer-events:none
+}
+@keyframes bootOut{to{opacity:0;transform:scale(1.03);visibility:hidden}}
+body.booted{overflow:hidden}          /* 랜딩 중 콘솔 스크롤 잠금 */
+body.entered .cold-start{display:none}
+
+/* 배경 포인트클라우드 */
+.cs-bg{position:fixed;inset:0;z-index:0;pointer-events:none;opacity:.5}
+.cs-bg canvas{width:100%;height:100%;display:block}
+
+/* ── 좌측 부팅 게이지 (시그니처) ─────────────────────────── */
+.boot-rail{
+  position:fixed;left:38px;top:0;bottom:0;z-index:3;width:150px;
+  display:flex;flex-direction:column;justify-content:center;gap:0;pointer-events:none
+}
+.boot-track{position:absolute;left:0;top:18vh;bottom:18vh;width:1px;background:var(--hair-2)}
+.boot-fill{
+  position:absolute;left:0;top:0;width:1px;height:100%;background:var(--brass);
+  transform-origin:top;transform:scaleY(0);will-change:transform
+}
+.boot-pct{
+  position:absolute;left:14px;top:calc(18vh - 8px);
+  font-family:var(--mono);font-size:10px;letter-spacing:.16em;color:var(--brass)
+}
+.boot-checks{position:absolute;left:14px;top:18vh;bottom:18vh;display:flex;flex-direction:column;justify-content:space-between;padding:4px 0}
+.boot-check{
+  display:flex;align-items:center;gap:8px;
+  font-family:var(--mono);font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--txt-3);opacity:.4;transition:opacity .4s var(--ease),color .4s var(--ease)
+}
+.boot-check b{
+  width:14px;height:14px;border-radius:99px;border:1px solid var(--hair-2);
+  display:grid;place-items:center;font-size:8px;color:transparent;transition:all .4s var(--ease)
+}
+.boot-check.lit{opacity:1;color:var(--brass)}
+.boot-check.lit b{border-color:var(--ok);color:var(--ok)}
+
+/* ── 섹션 공통 ───────────────────────────────────────────── */
+.cs-section{
+  position:relative;z-index:2;
+  max-width:960px;margin:0 auto;padding:0 40px;
+  min-height:100vh;display:flex;flex-direction:column;justify-content:center
+}
+.cs-eyebrow{
+  font-family:var(--mono);font-size:10px;font-weight:450;letter-spacing:.28em;
+  text-transform:uppercase;color:var(--brass);opacity:.78;margin-bottom:20px
+}
+
+/* 등장 시퀀스 — JS가 화면 진입을 감지해 ALM 로고와 같은
+   페이드 · 상승 · 블러 효과를 순차 적용한다.
+   reveal-ready는 JS가 정상 기동한 뒤에만 붙으므로 JS가 꺼져도 내용은 보인다. */
+.cold-start.reveal-ready .reveal-item{
+  opacity:0;
+  transform:translateY(40px);
+  filter:blur(6px);
+  transition:
+    opacity .8s var(--ease),
+    transform .8s var(--ease),
+    filter .8s var(--ease);
+  transition-delay:var(--reveal-delay,0ms);
+  will-change:opacity,transform,filter
+}
+.cold-start.reveal-ready .reveal-item.is-visible{
+  opacity:1;
+  transform:none;
+  filter:blur(0)
+}
+
+/* ── 00 HERO ─────────────────────────────────────────────── */
+.cs-hero{min-height:100vh;justify-content:center;text-align:center;align-items:center}
+.cs-logo{
+  font-family:var(--mono);font-weight:150;font-size:clamp(64px,13vw,168px);
+  letter-spacing:-.06em;line-height:.9;color:var(--txt);
+  display:flex;gap:.04em
+}
+.cs-logo span{display:inline-block;opacity:0;animation:logoIn .8s var(--ease) forwards}
+.cs-logo span:nth-child(1){animation-delay:.15s}
+.cs-logo span:nth-child(2){animation-delay:.28s}
+.cs-logo span:nth-child(3){animation-delay:.41s}
+@keyframes logoIn{from{opacity:0;transform:translateY(40px);filter:blur(6px)}to{opacity:1;transform:none;filter:blur(0)}}
+.cs-hero-sub{
+  margin-top:28px;font-size:15px;color:var(--txt-2);letter-spacing:.01em;
+  opacity:0;animation:logoIn .8s var(--ease) .6s forwards
+}
+.cs-hero-tag{
+  margin-top:10px;font-family:var(--mono);font-size:10.5px;letter-spacing:.2em;
+  text-transform:uppercase;color:var(--txt-3);
+  opacity:0;animation:logoIn .8s var(--ease) .75s forwards
+}
+.cs-hero-sponsor{
+  margin-top:16px;font-family:var(--mono);font-size:9.5px;letter-spacing:.16em;
+  color:var(--txt-3);opacity:0;animation:logoIn .8s var(--ease) .9s forwards
+}
+.cs-hero-sponsor b{font-weight:500;color:var(--brass);letter-spacing:.02em}
+.scroll-cue{
+  position:absolute;left:50%;bottom:40px;transform:translateX(-50%);
+  display:flex;flex-direction:column;align-items:center;gap:10px;
+  font-family:var(--mono);font-size:9.5px;letter-spacing:.18em;text-transform:uppercase;color:var(--txt-3);
+  opacity:0;animation:logoIn .8s var(--ease) 1s forwards
+}
+.scroll-cue i{width:1px;height:34px;background:linear-gradient(var(--brass),transparent);animation:cue 2s var(--ease) infinite}
+@keyframes cue{0%{opacity:0;transform:translateY(-8px)}40%{opacity:1}100%{opacity:0;transform:translateY(10px)}}
+
+/* ── 01 IDENTITY ─────────────────────────────────────────── */
+.cs-identity h2{
+  font-size:clamp(30px,5vw,58px);font-weight:600;letter-spacing:-.045em;line-height:1.08;color:var(--txt)
+}
+.cs-identity h2 b{font-weight:600;color:var(--brass)}
+.cs-identity p{margin-top:24px;max-width:560px;font-size:15px;line-height:1.75;color:var(--txt-2)}
+
+/* ── 02 SUBSYSTEMS ───────────────────────────────────────── */
+.cs-subsystems{gap:0}
+.subsys{
+  display:grid;grid-template-columns:1fr 1.1fr;gap:44px;align-items:center;
+  padding:14vh 0;border-top:1px solid var(--hair)
+}
+.subsys:first-of-type{border-top:0}
+.subsys-copy .idx{font-family:var(--mono);font-size:11px;letter-spacing:.2em;color:var(--brass);opacity:.7}
+.subsys-copy h3{margin:14px 0 12px;font-size:clamp(24px,3.4vw,38px);font-weight:600;letter-spacing:-.04em}
+.subsys-copy p{font-size:14px;line-height:1.7;color:var(--txt-2);max-width:380px}
+.subsys-copy ul{margin:18px 0 0;padding:0;list-style:none;display:flex;flex-direction:column;gap:0}
+.subsys-copy li{
+  display:flex;align-items:baseline;gap:10px;padding:9px 0;border-top:1px solid var(--hair);
+  font-family:var(--mono);font-size:11px;letter-spacing:.06em;color:var(--txt-3)
+}
+.subsys-copy li:before{content:"";width:4px;height:4px;border-radius:99px;background:var(--brass);flex:none;transform:translateY(-2px)}
+
+.subsys-demo{
+  position:relative;aspect-ratio:16/11;border-radius:14px;overflow:hidden;
+  border:1px solid var(--hair-2);background:#0B0E13
+}
+.subsys-demo canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+.subsys-demo .demo-tag{
+  position:absolute;left:14px;top:12px;font-family:var(--mono);font-size:9px;
+  letter-spacing:.16em;text-transform:uppercase;color:var(--txt-3)
+}
+.subsys-demo .demo-live{position:absolute;right:14px;top:12px;display:flex;align-items:center;gap:6px;font-family:var(--mono);font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:var(--txt-3)}
+.subsys-demo .demo-live i{width:5px;height:5px;border-radius:99px;background:var(--ok);animation:pulse 1.6s var(--ease) infinite}
+
+/* 미니 지도 데모 */
+.mini-map{position:absolute;inset:0}
+.mini-map .grid{position:absolute;inset:0;background:
+  linear-gradient(rgba(255,255,255,.04) 1px,transparent 1px) 0 0/28px 28px,
+  linear-gradient(90deg,rgba(255,255,255,.04) 1px,transparent 1px) 0 0/28px 28px}
+.mini-map .route{position:absolute;left:12%;top:60%;width:76%;height:1px}
+.mini-map .route svg{overflow:visible;width:100%;height:1px}
+.mini-map .route path{fill:none;stroke:var(--ice);stroke-width:2;opacity:.5;stroke-dasharray:4 5}
+.mini-map .bot{
+  position:absolute;width:16px;height:12px;border-radius:2px;background:var(--brass);
+  offset-path:path("M0,0 C60,-40 140,30 220,-14");offset-rotate:auto;
+  animation:botRun 6s var(--ease) infinite;left:12%;top:60%
+}
+@keyframes botRun{0%{offset-distance:0%}100%{offset-distance:100%}}
+
+/* 미니 데드맨 데모 */
+.mini-pad{position:absolute;inset:0;display:grid;place-items:center}
+.mini-pad .pad{display:grid;grid-template-columns:repeat(3,38px);grid-template-rows:repeat(3,38px);gap:6px;
+  grid-template-areas:". up ." "lf st rt" ". dn ."}
+.mini-pad .k{border-radius:9px;border:1px solid var(--hair-2);display:grid;place-items:center;font-size:13px;color:var(--txt-3)}
+.mini-pad .k.up{grid-area:up}.mini-pad .k.lf{grid-area:lf}.mini-pad .k.st{grid-area:st;color:var(--danger);border-color:rgba(255,77,79,.35)}
+.mini-pad .k.rt{grid-area:rt}.mini-pad .k.dn{grid-area:dn}
+.mini-pad .k.press{background:rgba(216,196,160,.18);border-color:var(--brass);color:var(--brass);animation:none}
+@keyframes padCycle{0%,100%{}}
+
+/* ── 03 SAFETY ───────────────────────────────────────────── */
+.cs-safety{align-items:center;text-align:center}
+.safety-pin{
+  position:sticky;top:0;height:100vh;display:flex;flex-direction:column;
+  align-items:center;justify-content:center;gap:0
+}
+.safety-num{
+  font-family:var(--mono);font-weight:100;font-size:clamp(120px,26vw,320px);
+  line-height:.82;letter-spacing:-.06em;color:var(--txt);
+}
+.safety-unit{font-size:.24em;color:var(--brass);letter-spacing:-.02em}
+.safety-caption{margin-top:12px;font-size:15px;color:var(--txt-2);max-width:440px}
+.safety-caption strong{color:var(--txt);font-weight:600}
+.safety-sub{margin-top:8px;font-family:var(--mono);font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--txt-3)}
+
+/* ── 04 SPEC ─────────────────────────────────────────────── */
+.cs-spec h2{font-size:clamp(26px,4vw,44px);font-weight:600;letter-spacing:-.04em;margin-bottom:36px}
+.spec-list{border-top:1px solid var(--hair)}
+.spec-row{
+  display:flex;align-items:baseline;gap:16px;padding:16px 0;border-bottom:1px solid var(--hair)
+}
+.spec-row>span{
+  font-family:var(--mono);font-size:11px;letter-spacing:.13em;text-transform:uppercase;
+  color:var(--txt-3);width:200px;flex:none
+}
+.spec-row .lead{flex:1;height:1px;background:var(--hair);transform:translateY(-3px)}
+.spec-row>strong{font-family:var(--mono);font-size:15px;font-weight:350;color:var(--txt);white-space:nowrap}
+.spec-row>strong b{color:var(--brass);font-weight:350}
+
+/* ── 05 ENTER ────────────────────────────────────────────── */
+.cs-enter{min-height:100vh;align-items:center;text-align:center;justify-content:center}
+.enter-status{display:flex;align-items:center;gap:10px;font-family:var(--mono);font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--ok);margin-bottom:26px}
+.enter-status i{width:6px;height:6px;border-radius:99px;background:var(--ok);box-shadow:0 0 0 4px rgba(74,222,155,.16)}
+.cs-enter h2{font-size:clamp(30px,5vw,56px);font-weight:600;letter-spacing:-.045em;line-height:1.1}
+.cs-enter p{margin-top:20px;font-size:14.5px;color:var(--txt-2);max-width:440px}
+.enter-button{
+  margin-top:40px;display:inline-flex;align-items:center;gap:12px;
+  padding:17px 32px;border-radius:99px;background:var(--brass);color:#0A0C0F;
+  font-size:15px;font-weight:600;letter-spacing:-.01em;
+  transition:transform .16s var(--ease),filter .2s var(--ease)
+}
+.enter-button:hover{filter:brightness(1.08)}
+.enter-button:active{transform:scale(.97)}
+.enter-button svg{width:17px;height:17px}
+.enter-hint{margin-top:18px;font-family:var(--mono);font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--txt-3)}
+
+/* 스킵 */
+.cs-skip{
+  position:fixed;right:34px;top:26px;z-index:6;
+  font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--txt-3);padding:9px 16px;border:1px solid var(--hair);border-radius:99px;
+  transition:border-color .2s var(--ease),color .2s var(--ease)
+}
+.cs-skip:hover{border-color:var(--brass);color:var(--brass)}
+
+/* ── 반응형 ──────────────────────────────────────────────── */
+@media (max-width:900px){
+  .boot-rail{display:none}
+  .cs-section{padding:0 22px}
+  .subsys{grid-template-columns:1fr;gap:26px;padding:11vh 0}
+  .subsys-demo{order:-1}
+  .spec-row{flex-wrap:wrap;gap:6px 16px}
+  .spec-row>span{width:auto}
+  .spec-row .lead{display:none}
+}
+@media (prefers-reduced-motion:reduce){
+  .cold-start{scroll-behavior:auto}
+  .reveal-item,.safety-num,.cs-logo span,.cs-hero-sub,.cs-hero-tag,.cs-hero-sponsor,.scroll-cue{animation:none !important;transition:none !important;opacity:1 !important;transform:none !important;filter:none !important}
+  .boot-fill{animation:none;transform:scaleY(1)}
+}

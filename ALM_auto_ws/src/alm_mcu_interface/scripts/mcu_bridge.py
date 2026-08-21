@@ -32,13 +32,14 @@ MSG_COMMAND = 0x01
 MSG_STATE = 0x02
 
 # payload struct (little-endian). docs/uart_protocol.md 와 반드시 일치.
-CMD_FMT = "<fffBBI"          # vx, vy, wz, drive_mode, flags, sequence  = 18 bytes
+# v2: STM32 (jetson_uart_parse.m) 규격 = steer_deg, speed_rpm, mode, flags = 10 bytes.
+# 바퀴별 조향각/속도(역기구학)는 STM32 FourWIS_DrivingAlgorithm 이 계산하므로
+# Jetson 은 RC 조종기처럼 스칼라 3개만 보냅니다. 변환은 command_manager 담당.
+CMD_FMT = "<ffBB"            # steer_deg, speed_rpm, mode_id, flags  = 10 bytes
 STATE_FMT = "<I14fBH"        # seq, [odom_x,y,th, vx,vy,wz, steerF,steerR,
                              #        wFL,wFR,wRL,wRR, batt_v,batt_c], flags, fault = 63 bytes
 CMD_LEN = struct.calcsize(CMD_FMT)
 STATE_LEN = struct.calcsize(STATE_FMT)
-
-MODE_TO_ID = {"normal": 0, "crab": 1, "spin": 2, "auto": 3}
 
 STEER_JOINTS = ["front_left_steer_joint", "front_right_steer_joint",
                 "rear_left_steer_joint", "rear_right_steer_joint"]
@@ -126,15 +127,15 @@ class McuBridge(Node):
 
     # ---------------- 다운링크 (command -> STM32) ----------------
     def on_command(self, msg: McuCommand):
+        # flags 는 현재 STM32 파서가 언팩하지 않지만(e-stop 은 추후 과제),
+        # payload 레이아웃 유지를 위해 규격대로 채워 보냅니다.
         flags = (0x01 if msg.enable_motors else 0) | (0x02 if msg.emergency_stop else 0)
-        mode_id = MODE_TO_ID.get(msg.drive_mode, 0)
         payload = struct.pack(
             CMD_FMT,
-            float(msg.cmd_vel.linear.x),
-            float(msg.cmd_vel.linear.y),
-            float(msg.cmd_vel.angular.z),
-            mode_id, flags,
-            int(msg.sequence) & 0xFFFFFFFF,
+            float(msg.steer_deg),
+            float(msg.speed_rpm),
+            int(msg.mode_id) & 0xFF,
+            flags,
         )
         self._write_frame(MSG_COMMAND, payload)
 

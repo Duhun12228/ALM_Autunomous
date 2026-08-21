@@ -8,8 +8,10 @@ endif()
 # find dependencies
 find_package(ament_cmake REQUIRED)
 
+# behavior_trees: SmoothPath 를 끼운 커스텀 BT. navigation.launch.py 가
+# 설치 경로를 RewrittenYaml 로 bt_navigator 에 주입하므로 반드시 설치돼야 한다.
 install(
-  DIRECTORY config launch maps rviz
+  DIRECTORY behavior_trees config launch lattice_primitives maps rviz
   DESTINATION share/${PROJECT_NAME}
 )
 
@@ -17,6 +19,13 @@ install(
   PROGRAMS
     scripts/pcd2pgm.py
     scripts/map_publisher.py
+    scripts/pcd_replay.py
+    scripts/map_manager.py
+    scripts/migrate_maps.py
+    scripts/prior_cloud_publisher.py
+    scripts/nav2_kinematic_check.py
+    scripts/virtual_pose_publisher.py
+    scripts/plan_probe.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

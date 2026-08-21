@@ -1,0 +1,5 @@
+node_modules/
+# vite 빌드 산출물. 소스는 src/ 에 있으므로 커밋하지 않는다.
+assets/bundle/
+# 오프라인 배포용으로 내려받는 웹폰트 (라이선스 파일과 함께 별도 관리)
+assets/fonts/

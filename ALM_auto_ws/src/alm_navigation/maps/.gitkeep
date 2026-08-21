@@ -1,2 +1,21 @@
-# slam_toolbox 로 만든 맵(my_map.yaml + my_map.pgm)을 여기에 저장하세요.
-# 저장: ros2 run nav2_map_server map_saver_cli -f <ws>/src/alm_navigation/maps/my_map
+# 맵 저장소. **폴더 하나 = 맵 하나**이고, manifest.yaml 이 있어야 맵으로 인정한다.
+#
+#   maps/
+#     active.yaml            active: <맵이름>   ← launch 와 map_manager 가 읽는다
+#     <맵이름>/
+#       manifest.yaml        이름·라벨·생성일 (자산 '사실'은 적지 않는다)
+#       cloud.pcd            3D 점군   — FAST-LIO /map_save
+#       grid.pgm  grid.yaml  2D 격자   — pcd2pgm.py
+#       fpfh_map.meta  fpfh_map_{points,normals,fpfh}.pcd   측위 DB — fpfh_map_builder
+#
+# 새 맵 만들기:
+#   1) mkdir maps/<이름> 후 manifest.yaml 작성
+#   2) config/fastlio_mid360.yaml 의 map_file_path 를 maps/<이름>/cloud.pcd 로 변경
+#      (fast_lio 파라미터라 launch 인자로 치환되지 않는다 — 안 바꾸면 기존 맵을 덮어쓴다)
+#   3) ros2 launch alm_bringup slam.launch.py  →  ros2 service call /map_save std_srvs/srv/Trigger
+#   4) ros2 run alm_navigation pcd2pgm.py --pcd maps/<이름>/cloud.pcd --out maps/<이름>/grid
+#   5) ros2 run icp_relocalization fpfh_map_builder \
+#        --map maps/<이름>/cloud.pcd --output-prefix maps/<이름>/fpfh_map
+#   6) active.yaml 의 active: 를 <이름> 으로 변경
+#
+# 자산이 서로 짝이 맞는지는 map_manager 가 검사해 /alm/map_inventory 로 알린다.

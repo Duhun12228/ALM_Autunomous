@@ -1,0 +1,120 @@
+<!--
+  ALM NavigateToPose BT
+  = nav2 기본 navigate_to_pose_w_replanning_and_recovery.xml
+    + ComputePathToPose 뒤에 SmoothPath(ConstrainedSmoother) 삽입.
+
+  ComputePathToPose(SmacPlannerHybrid) -> {path}
+    -> SmoothPath(ConstrainedSmoother) -> 같은 {path} 로 덮어쓰기
+    -> FollowPath(MPPI)
+
+  Hybrid-A* 가 이미 R_min=1.643 m 를 지키는 경로를 내므로 스무더는 '구제'가 아니라
+  '마감'이다. 모션 프리미티브 이음매와 각도 양자화(5°) 자국을 없애고 장애물에서
+  조금 더 떨어뜨린다. 그래서 실패해도 원본 경로로 주행하면 된다 —
+  Fallback + AlwaysSuccess 로 감싼 이유다. 실패 시 블랙보드의 {path} 는 갱신되지
+  않으므로 평활화 이전 경로가 그대로 FollowPath 로 넘어간다.
+  (check_for_collisions=true 이므로 평활화 결과가 장애물을 스치면 실패로 처리됨)
+
+  ##주의## planner_id="GridBased" 는 nav2.yaml 의 planner_server.GridBased,
+  smoother_id="SmoothPath" 는 smoother_server.SmoothPath 를 가리킨다.
+  이름을 바꾸면 여기도 같이 바꿔야 한다.
+-->
+<root main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <RecoveryNode number_of_retries="6" name="NavigateRecovery">
+      <PipelineSequence name="NavigateWithReplanning">
+        <RecoveryNode number_of_retries="1" name="ComputePathToPose">
+          <!-- ★ 재계획 트리거: 시간(1 Hz) '또는' 경로 무효화.
+               예전에는 RateController 가 ComputePathToPose 를 통째로 감싸고 있어
+               재계획이 **순수 시간 구동**이었다. 경로 위에 사람이 걸어 들어와도
+               다음 1 Hz 틱까지 기다렸고, 0.45 m/s 면 그동안 0.45 m 를 더 갔다.
+
+               아래 ReactiveFallback 은 "지금 재계획할 이유가 없으면 SUCCESS/RUNNING,
+               있으면 FAILURE" 를 판정하는 첫 자식과, 실제 계획을 하는 둘째 자식으로
+               되어 있다. 첫 자식(ReactiveSequence)이 FAILURE 를 내는 경우는 셋:
+                 · GlobalUpdatedGoal  -> Inverter 로 뒤집혀 FAILURE (목표가 바뀜)
+                 · IsPathValid FAILURE               (경로가 장애물에 막힘) ← 즉시 반응
+                 · PathExpiringTimer 가 0.33 s 경과를 보고 -> Inverter 로 FAILURE (주기 도래)
+
+               ★ 주기를 1.0 -> 0.33 s (3 Hz)로 잡은 근거 — 두 방향에서 좁혀집니다.
+                 상한: 전역 costmap 이 3 Hz 로 갱신된다(nav2.yaml). 그보다 자주
+                       계획해봐야 같은 costmap 을 다시 보는 것이라 낭비다.
+                 하한: 재계획 사이 로봇은 **낡은 경로**를 따라간다.
+                       이동거리 = vx / f = 0.20/f.
+                          1 Hz -> 0.200 m,  3 Hz -> 0.067 m
+                       협착 통로는 여유가 0.53 m(=footprint 여유 0)라 0.20 m 는 너무 크다.
+                 실측 뒷받침(docs/control_pipeline.md §12.5): 1 Hz 에서 협착 목표 G3 가
+                 min_hold 값과 무관하게 2회 연속 300 s 타임아웃했고, 재계획이 사실상
+                 18 Hz 로 돌던 1차에서는 263 s 에 성공했다.
+               셋 다 아니면 SUCCESS 라 재계획을 건너뛰고, PipelineSequence 가
+               곧바로 FollowPath 를 틱해 정상 주행한다.
+
+               ⚠ 여기에 RateController + AlwaysFailure 를 쓰면 **동작하지 않는다.**
+                 ReactiveFallback 이 둘째 자식(PlanAndSmooth)으로 성공하면 첫 자식을
+                 halt 하는데, RateController::halt() 가 내부 타이머를 리셋한다.
+                 그래서 매 틱 주기가 곧바로 '도래' 판정되어 계획이 멈추지 않는다.
+                 실측: 1 Hz 를 의도했는데 **18.4 Hz** 로 돌았다(계획 시간이 곧 주기).
+                 PathExpiringTimer 는 halt 가 아니라 **{path} 가 바뀔 때** 타이머를
+                 리셋하므로 이 문제가 없다 — 의미상으로도 '마지막 계획 이후 1 s' 가 맞다.
+
+               IsPathValid 는 planner_server 의 is_path_valid 서비스를 통해
+               **전역 costmap** 기준으로 판정한다. 그래서 global_costmap 의
+               update_frequency 를 1.0 -> 3.0 으로 같이 올렸다(nav2.yaml).
+               server_timeout 을 짧게 두는 이유: 이 검사가 느려지면 그 자체가
+               제어 루프의 지연이 된다. 타임아웃 나면 FAILURE -> 재계획이라
+               안전한 쪽으로 실패한다. -->
+          <ReactiveFallback name="ReplanIfNeeded">
+            <ReactiveSequence name="NoNeedToReplan">
+              <Inverter>
+                <GlobalUpdatedGoal/>
+              </Inverter>
+              <IsPathValid path="{path}" server_timeout="100"/>
+              <Inverter>
+                <PathExpiringTimer seconds="0.33" path="{path}"/>
+              </Inverter>
+            </ReactiveSequence>
+            <Sequence name="PlanAndSmooth">
+              <!-- ⚠ 플래너 2단(TightSpace=Lattice)을 시도했다가 **되돌렸다.**
+                   Lattice control set 은 만들어 뒀고(alm_navigation/lattice_primitives/)
+                   개활 주행에는 회귀가 없었지만(95.7 s vs 87.9 s), 하드케이스에서
+                   TightSpace 가 자주 실패해 GridBased 와 번갈아 나오며 경로가
+                   불안정해졌다 — 오히려 크게 나빠졌다:
+                       GridBased 단독      0.237 m / 14.8°
+                       TightSpace 주(기본) 1.255 m / 64.3°
+                       TightSpace 주(튜닝) 1.651 m / 38.9°
+                   되살리려면 nav2.yaml 의 planner_plugins 에 TightSpace 를 넣고
+                   여기를 Fallback 으로 되돌리면 된다. 상세: docs/control_pipeline.md §8
+              -->
+              <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
+              <Fallback name="SmoothIfPossible">
+                <SmoothPath unsmoothed_path="{path}" smoothed_path="{path}"
+                            smoother_id="SmoothPath"
+                            max_smoothing_duration="0.5"
+                            check_for_collisions="true"/>
+                <AlwaysSuccess/>
+              </Fallback>
+            </Sequence>
+          </ReactiveFallback>
+          <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
+        </RecoveryNode>
+        <RecoveryNode number_of_retries="1" name="FollowPath">
+          <FollowPath path="{path}" controller_id="FollowPath"/>
+          <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap"/>
+        </RecoveryNode>
+      </PipelineSequence>
+      <ReactiveFallback name="RecoveryFallback">
+        <GoalUpdated/>
+        <RoundRobin name="RecoveryActions">
+          <Sequence name="ClearingActions">
+            <ClearEntireCostmap name="ClearLocalCostmap-Subtree" service_name="local_costmap/clear_entirely_local_costmap"/>
+            <ClearEntireCostmap name="ClearGlobalCostmap-Subtree" service_name="global_costmap/clear_entirely_global_costmap"/>
+          </Sequence>
+          <!-- Spin/BackUp 은 command_manager 의 auto 모드가 각각 spin(제자리회전)과
+               normal 후진으로 실행한다. backup_speed 는 min_linear_x(-0.15) 이내. -->
+          <Spin spin_dist="1.57"/>
+          <Wait wait_duration="5"/>
+          <BackUp backup_dist="0.30" backup_speed="0.05"/>
+        </RoundRobin>
+      </ReactiveFallback>
+    </RecoveryNode>
+  </BehaviorTree>
+</root>

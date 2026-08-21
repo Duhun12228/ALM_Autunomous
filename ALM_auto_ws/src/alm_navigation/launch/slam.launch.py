@@ -10,7 +10,11 @@
 
 3D 맵 저장 (매핑 주행 후):
     ros2 service call /map_save std_srvs/srv/Trigger
-  -> config 의 map_file_path (기본: alm_navigation/maps/alm_3d_map.pcd) 로 저장.
+  -> config 의 map_file_path (기본: alm_navigation/maps/alm_lab/cloud.pcd) 로 저장.
+
+  맵은 폴더 하나가 곧 맵 하나다 — maps/<맵이름>/{manifest.yaml, cloud.pcd,
+  grid.pgm+grid.yaml, fpfh_map*}. 새 맵을 만들 때는 fastlio_mid360.yaml 의
+  map_file_path 를 그 폴더로 먼저 바꿀 것.
 """
 
 import os

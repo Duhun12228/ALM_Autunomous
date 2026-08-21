@@ -1,0 +1,8 @@
+format_version: 1
+name: home_test
+label: "집 핸드헬드 테스트"
+created: "2026-08-10 13:10"
+sensor: livox_mid360
+# 자산의 '사실'(점 개수·해상도·feature 수)은 여기에 적지 않는다.
+# map_manager 가 파일 헤더에서 직접 읽는다 — 단일 진실 공급원.
+notes: "WebUI 누적 뷰 검증용"

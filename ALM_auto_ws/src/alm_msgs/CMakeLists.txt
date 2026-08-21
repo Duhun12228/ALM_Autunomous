@@ -15,6 +15,13 @@ find_package(std_msgs REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/McuCommand.msg"
   "msg/McuState.msg"
+  "msg/JetsonStats.msg"
+  "msg/MapAsset.msg"
+  "msg/MapEntry.msg"
+  "msg/MapInventory.msg"
+  "msg/Speech.msg"
+  "srv/SetControlOwner.srv"
+  "srv/ReleaseEstop.srv"
   DEPENDENCIES builtin_interfaces geometry_msgs std_msgs
 )
 
