@@ -53,7 +53,7 @@ def generate_launch_description():
     bt_dir = os.path.join(nav_share, "behavior_trees")
 
     use_sim_time = LaunchConfiguration("use_sim_time")
-    params_file = LaunchConfiguration("params_file")
+    params_file = LaunchConfiguration("nav2_params_file")
     map_yaml = LaunchConfiguration("map")
     map_pcd = LaunchConfiguration("map_pcd")
     fpfh_db_prefix = LaunchConfiguration("fpfh_db_prefix")
@@ -88,7 +88,7 @@ def generate_launch_description():
     return LaunchDescription(
         [
             DeclareLaunchArgument("use_sim_time", default_value="false"),
-            DeclareLaunchArgument("params_file", default_value=default_params),
+            DeclareLaunchArgument("nav2_params_file", default_value=default_params),
             DeclareLaunchArgument("map", default_value=default_map,
                                   description="2D 맵(pcd2pgm 산출 .yaml) - global costmap용"),
             DeclareLaunchArgument("map_pcd", default_value=default_map_pcd,
@@ -149,6 +149,8 @@ def generate_launch_description():
                 PythonLaunchDescriptionSource(nav2_navigation_launch),
                 launch_arguments={
                     "use_sim_time": use_sim_time,
+                    # ★ 여기는 nav2_bringup(외부 패키지)의 인자 이름이므로 "params_file" 이
+                    #   맞다. 위에서 우리 인자를 nav2_params_file 로 바꾼 것과 헷갈리지 말 것.
                     "params_file": configured_params,
                     "autostart": "true",
                     "use_composition": "False",

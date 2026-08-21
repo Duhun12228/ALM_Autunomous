@@ -136,7 +136,20 @@ bt_navigator:
     global_frame: map
     robot_base_frame: base_link
     odom_topic: /Odometry
-    bt_loop_duration: 10
+    # ★ 10 -> 20 ms (2026-08-20, CPU 정리). BT 틱 주기 [ms].
+    #   실측 log3.log 에서 `Behavior Tree tick rate 100.00 was exceeded` 가 **50회**
+    #   났다. 100 Hz 로 틱하겠다고 선언해 놓고 못 지킨 것이고, Orin Nano(6코어)
+    #   에서는 그 자체가 낭비다 — BT 가 이 주기로 하는 일에는 그만한 해상도가
+    #   필요 없다:
+    #       제어(MPPI)        20 Hz  = 50 ms
+    #       재계획            3 Hz   = 333 ms
+    #       local costmap     10 Hz  = 100 ms
+    #   즉 BT 가 100 Hz 로 돌아도 실제로 바뀌는 입력이 없어 같은 판정을 5회씩
+    #   반복할 뿐이다. 20 ms(50 Hz)면 제어 주기의 2.5배라 여전히 충분히 촘촘하다.
+    #   대가는 BT 반응 지연 최악 +10 ms — 제어 주기 50 ms 앞에서 무시할 수준이다.
+    #   ⚠ 더 늘리면(50 ms+) 제어 주기와 맞먹어 목표 취소·경로 무효 반응이 눈에
+    #     띄게 늦어진다. 20 을 넘기지 말 것.
+    bt_loop_duration: 20
     default_server_timeout: 20
     wait_for_service_timeout: 1000
     # ↓ navigation.launch.py(RewrittenYaml)가 alm_navigation/behavior_trees/*.xml
@@ -475,10 +488,32 @@ local_costmap:
           max_obstacle_height: 1.5
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        # circumscribed radius(0.894 m) 보다 커야 MPPI CostCritic 의
-        # findCircumscribedCost() 가 올바른 임계값을 얻습니다.
-        cost_scaling_factor: 3.0
-        inflation_radius: 1.00
+        # ##하한## circumscribed radius(0.894 m) 보다 **반드시 커야** 합니다.
+        # MPPI CostCritic 의 findCircumscribedCost() 가 이 값으로 임계값을 잡습니다.
+        # 아래로 내리면 Nav2 가 경고를 내며 충돌평가 경로가 달라집니다.
+        #
+        # ★ 1.00 -> 0.95 · scaling 3.0 -> 4.0 (2026-08-20, '장애물 패딩 축소' 요청).
+        #   반경은 하한 0.894 바로 위까지 내린 것이라 **여기서 더는 못 줄입니다.**
+        #   그래서 남은 레버인 감쇠율로 실효 패딩을 줄였습니다.
+        #
+        #   팽창비용 = 252 * exp(-scaling * (d - inscribed)),  inscribed = 0.530
+        #   벽에서의 거리별 비용 (반경 0.95 공통, 0.95 m 밖은 전부 0):
+        #       d      scaling 3.0    scaling 4.0
+        #       0.6 m      204            190
+        #       0.7 m      151            130
+        #       0.8 m      112             89
+        #       0.9 m       83             61
+        #   같은 거리에서 비용이 20~27% 낮아지므로 MPPI 가 벽에 더 붙는 궤적을
+        #   덜 깎아냅니다. 0.95 m 밖이 무료인 것은 그대로입니다.
+        #
+        #   ⚠ 더 올리면(5.0+) 벽 근처에서 비용이 급격히 꺾여 MPPI 롤아웃 간
+        #     변별력이 떨어집니다 — 붙는 궤적과 아주 붙는 궤적의 비용차가 작아져
+        #     회피 반응이 늦어집니다. 4.0 이 실용적인 상한으로 봅니다.
+        #   ⚠ 충돌 판정은 consider_footprint=true 의 실제 footprint 검사가 하므로
+        #     이 값들을 줄여도 안전 여유 자체가 줄지는 않습니다. 줄어드는 것은
+        #     '벽에서 떨어지려는 선호도' 입니다.
+        cost_scaling_factor: 4.0
+        inflation_radius: 0.95
 
 global_costmap:
   global_costmap:
@@ -533,11 +568,24 @@ global_costmap:
         plugin: "nav2_costmap_2d::InflationLayer"
         # Hybrid-A* 는 SE2 footprint 로 실제 충돌검사를 하므로 팽창은 '금지선'이
         # 아니라 '벽에서 떨어져 달리려는 선호도'로 작동합니다(cost_penalty 와 짝).
-        # 완만한 기울기(낮은 scaling_factor)여야 탐색이 중앙선을 타므로
-        # 2D 시절(3.0/0.55)보다 넓고 완만하게 둡니다.
-        # 맵 자유공간의 중앙값 여유가 2.75 m 라 1.20 m 팽창은 통로를 막지 않습니다.
+        # 완만한 기울기(낮은 scaling_factor)여야 탐색이 중앙선을 탑니다.
+        #
+        # ★ 1.20 -> 1.00 (2026-08-20, '장애물 패딩 축소' 요청).
+        #   넓은 통로에서는 1.20 이 통로를 막지 않았지만(맵 자유공간 중앙값 여유
+        #   2.75 m), **좁은 곳에서는 양쪽 팽창이 겹쳐 통로가 통째로 고비용이 됩니다.**
+        #   폭 W 인 통로에서 팽창이 겹치지 않을 조건은 W > 2 x inflation_radius:
+        #       1.20 -> 2.40 m 보다 좁으면 전 구간 겹침
+        #       1.00 -> 2.00 m 보다 좁으면 전 구간 겹침
+        #   docs/control_pipeline.md §9.3-K 의 '포켓형 목표 계획 불가'(포켓 폭
+        #   2.8 m)에서 첫 번째 의심 대상이 바로 이 값이었습니다. 이번 축소가
+        #   그 항목의 ① 을 실제로 검증하는 변경이기도 합니다.
+        #
+        # ##하한## 0.894 m (circumscribed radius). 그 아래로 내리면 Smac 의
+        #   충돌검사 조기종료(possible_collision_cost)가 무효화돼 경고가 뜨고
+        #   매 노드마다 전체 footprint 검사를 하게 됩니다 — 느려집니다.
+        #   더 줄이고 싶으면 0.95 까지가 실질 한계입니다.
         cost_scaling_factor: 2.0
-        inflation_radius: 1.20
+        inflation_radius: 1.00
 
 map_server:
   ros__parameters:

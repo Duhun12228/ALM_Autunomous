@@ -50,7 +50,7 @@ def generate_launch_description():
     default_map = active.grid_yaml if active else ""
 
     use_sim_time = LaunchConfiguration("use_sim_time")
-    params_file = LaunchConfiguration("params_file")
+    params_file = LaunchConfiguration("nav2_params_file")
     map_yaml = LaunchConfiguration("map")
 
     virtual_pose = os.path.join(
@@ -59,7 +59,7 @@ def generate_launch_description():
 
     return LaunchDescription([
         DeclareLaunchArgument("use_sim_time", default_value="false"),
-        DeclareLaunchArgument("params_file", default_value=default_params,
+        DeclareLaunchArgument("nav2_params_file", default_value=default_params,
                               description="실차와 같은 nav2.yaml 을 그대로 쓴다"),
         DeclareLaunchArgument("map", default_value=default_map,
                               description="2D 맵 yaml (기본: maps/active.yaml 의 활성 맵)"),

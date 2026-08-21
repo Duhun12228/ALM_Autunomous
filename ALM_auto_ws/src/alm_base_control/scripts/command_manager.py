@@ -123,19 +123,29 @@ class CommandManager(Node):
                 # wz=0 으로 접는다. normal 모드는 제자리 회전을 못 하기 때문.
                 ("steer_limit_min_vx", 0.03),
                 # ---- 조향 슬루(변화율) 제한 ----
-                # ##CONFIRM## 실제 조향 액추에이터 슬루율 미측정. 아래는 보수적 초기값.
+                # ##CONFIRM## **주행 중** 슬루율 상한. 아직 미실측이라 보수적 초기값.
                 # 낮게 잡는 것은 안전(액추에이터가 여유롭게 따라옴 -> 명령=실제),
                 # 높게 잡는 것이 위험(못 따라가는데 알 방법이 없음). 실측 전엔 낮게.
                 #   45 deg/s = 0->30° 전환에 0.67 s, vx=0.45 에서 주행 0.30 m
-                #   측정법: docs/control_pipeline.md §7.1 (폰 슬로모 / 자이로 스텝응답)
+                #   측정법: docs/control_pipeline.md §7.1 (steering_observer 상한탐색)
                 # 0 이면 제한 없음(권장하지 않음 — 현재 코드의 기존 거동).
                 ("max_steer_rate_deg_s", 45.0),
+                # ---- 정지 상태 조향 슬루율 S_정지 [deg/s] ----
+                # 주행 중과 물리적으로 다른 양이다. 정지 조향은 접지면 전체를 비틀어야
+                # 해서 가장 느리다. 제어 루프에는 안 들어가고(정지 구간엔 명령 램프가
+                # 없다) vx=0 dwell 두 개를 유도/검사하는 데만 쓴다.
+                #   실측: ros2 run alm_bringup steer_bench.py  (command_manager 를 끄고)
+                #   2026-08-20 실차 = 17.5 deg/s (최솟값 기준). base_control.yaml 참고.
+                # 0 이면 미설정으로 보고 max_steer_rate_deg_s 로 대체한다(예전 거동).
+                ("steer_rate_stopped_deg_s", 0.0),
                 # ---- 기동 시 조향 정렬 dwell ----
                 # 전원을 켠 시점의 조향각을 알 방법이 없다(STM32 업링크 없음).
                 # 지난 종료 시 꺾여 있던 각도가 그대로 남아 있으므로, 주행을 허용하기
                 # 전에 '직진 명령 + 정지' 를 최악 가동범위만큼 유지해 조향을 편다.
                 #   > 0 : 이 시간[s] 사용
-                #   = 0 : 자동 계산 (2 * max_steer_deg / max_steer_rate_deg_s)
+                #   = 0 : 자동 계산 (2 * max_steer_deg / S_정지)
+                #         ★ 나누는 값은 max_steer_rate_deg_s 가 아니라 S_정지 다 —
+                #           이 구간은 vx=0 이므로 주행 중 슬루율을 쓰면 과소평가된다.
                 #   < 0 : 비활성
                 ("startup_steer_align_sec", 0.0),
                 # ---- 모드 전환 dwell ----
@@ -258,16 +268,21 @@ class CommandManager(Node):
 
         # ---- 조향 슬루 제한 / dwell (기구 응답 시간을 명령에 반영) ----
         self.steer_rate = float(g("max_steer_rate_deg_s").value)
+        # 정지 슬루율. 미설정(0)이면 주행 중 값으로 대체하되, 그건 정지 조향을
+        # 과대평가하므로(정지가 더 느리다) dwell 이 짧아질 수 있다 — 실측 권장.
+        _stop_rate = float(g("steer_rate_stopped_deg_s").value)
+        self.steer_rate_stopped = _stop_rate if _stop_rate > 0.0 else self.steer_rate
         self.mode_dwell = max(0.0, float(g("mode_switch_dwell_sec").value))
         _align = float(g("startup_steer_align_sec").value)
         if _align > 0.0:
             self.startup_align = _align
         elif _align < 0.0:
             self.startup_align = 0.0            # 비활성
-        elif self.steer_rate > 0.0:
-            # 자동: 최악은 한쪽 풀락에서 반대쪽 풀락까지 = 전체 가동범위
+        elif self.steer_rate_stopped > 0.0:
+            # 자동: 최악은 한쪽 풀락에서 반대쪽 풀락까지 = 전체 가동범위.
+            # vx=0 구간이므로 정지 슬루율로 나눈다.
             self.startup_align = (2.0 * math.degrees(self.wis.max_steer_rad)
-                                  / self.steer_rate)
+                                  / self.steer_rate_stopped)
         else:
             self.startup_align = 0.0
 
@@ -405,7 +420,10 @@ class CommandManager(Node):
                 f"조향 슬루 제한 {self.steer_rate:.0f} deg/s "
                 f"(0°→{full:.0f}° 전환 {full / self.steer_rate:.2f} s, "
                 f"vx={self.max_lx} 에서 주행 {self.max_lx * full / self.steer_rate:.2f} m). "
-                f"##CONFIRM## 실측값 아님 — docs/control_pipeline.md §7.1 참고"
+                + (f"S_정지 실측 {self.steer_rate_stopped:.1f} deg/s. "
+                   f"##CONFIRM## 주행 중 슬루율은 미실측 — docs/control_pipeline.md §7.1"
+                   if self.steer_rate_stopped != self.steer_rate else
+                   "##CONFIRM## 실측값 아님 — docs/control_pipeline.md §7.1 참고")
             )
         else:
             self.get_logger().warn(
@@ -421,6 +439,18 @@ class CommandManager(Node):
         if self.mode_dwell > 0.0:
             self.get_logger().info(
                 f"모드 전환 dwell {self.mode_dwell:.2f} s (전환 중 속도 0, mode_id 는 먼저 전달)")
+            # 조향각 업링크가 없어 '스윕이 안 끝났다'를 관측할 방법이 없다.
+            # 그래서 기구가 요구하는 시간과 설정값을 기동 시 한 번 대조해 둔다.
+            # 최악 스윕: normal 반대쪽 풀락 -> spin 제로턴 자세(47°, CONS(9)).
+            if self.steer_rate_stopped > 0.0:
+                need = ((math.degrees(self.wis.max_steer_rad) + 47.0)
+                        / self.steer_rate_stopped)
+                if self.mode_dwell < need:
+                    self.get_logger().warn(
+                        f"모드 전환 dwell 부족: normal<->spin 최악 스윕에 {need:.2f} s 가 "
+                        f"필요한데 {self.mode_dwell:.2f} s 입니다 "
+                        f"(S_정지 {self.steer_rate_stopped:.1f} deg/s 기준). 조향축이 아직 "
+                        f"도는 중에 바퀴가 굴러 의도와 다른 방향으로 나갈 수 있습니다.")
         if not self.hard_stop_on_timeout:
             self.get_logger().info(
                 f"정지 등급 분리 ON: e-stop/MCU fault=즉시, "

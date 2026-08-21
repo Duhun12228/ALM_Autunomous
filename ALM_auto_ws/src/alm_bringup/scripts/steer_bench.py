@@ -30,6 +30,7 @@ STM32 업링크가 미구현이라(uart_protocol.md v2 §State) 실측 조향각
 """
 
 import argparse
+import os
 import sys
 import time
 
@@ -37,6 +38,35 @@ import rclpy
 from rclpy.node import Node
 
 from alm_msgs.msg import McuCommand
+
+# <ws>/src/alm_bringup/scripts/steer_bench.py  ->  <ws>/src
+_SRC = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def _load_base_control():
+    """base_control.yaml 의 command_manager 파라미터를 읽는다.
+
+    판정 문구에 현재 설정값을 그대로 쓰기 위해서다. 여기에 숫자를 하드코딩하면
+    yaml 을 고칠 때마다 벤치가 거짓말을 한다. 설치본 우선, 없으면 소스 트리.
+    읽기에 실패하면 빈 dict — 측정 자체는 설정과 무관하므로 죽이지 않는다.
+    """
+    cands = []
+    try:
+        from ament_index_python.packages import get_package_share_directory
+        cands.append(os.path.join(get_package_share_directory("alm_base_control"),
+                                  "config", "base_control.yaml"))
+    except Exception:
+        pass
+    cands.append(os.path.join(_SRC, "alm_base_control", "config", "base_control.yaml"))
+    for path in cands:
+        try:
+            import yaml
+            with open(path, "r", encoding="utf-8") as fp:
+                return (yaml.safe_load(fp) or {}).get(
+                    "command_manager", {}).get("ros__parameters", {}) or {}
+        except Exception:
+            continue
+    return {}
 
 
 class SteerBench(Node):
@@ -165,20 +195,33 @@ def main():
 
  이 값으로 확인할 것 셋 — base_control.yaml
 """)
+    cfg = _load_base_control()
+    cur_align = float(cfg.get("startup_steer_align_sec", 5.0) or 5.0)
+    cur_dwell = float(cfg.get("mode_switch_dwell_sec", 4.0) or 4.0)
+    cur_rate = float(cfg.get("max_steer_rate_deg_s", 20.0) or 20.0)
+    cur_stop = cfg.get("steer_rate_stopped_deg_s")
     startup_need = 60.0 / s_min
     dwell_need = 77.0 / s_min
     crab_need = 120.0 / s_min
     def verdict(need, cur):
         return "OK  충분" if cur >= need else f"부족! {need:.1f} s 이상으로 올릴 것"
-    print(f"  startup_steer_align_sec  현재 5.0 s : 전 행정 60° 에 {startup_need:5.1f} s 필요"
-          f"  -> {verdict(startup_need, 5.0)}")
-    print(f"  mode_switch_dwell_sec    현재 4.0 s : normal<->spin 77° 에 {dwell_need:5.1f} s 필요"
-          f"  -> {verdict(dwell_need, 4.0)}")
+    print(f"  startup_steer_align_sec  현재 {cur_align:.1f} s : 전 행정 60° 에 {startup_need:5.1f} s 필요"
+          f"  -> {verdict(startup_need, cur_align)}")
+    print(f"  mode_switch_dwell_sec    현재 {cur_dwell:.1f} s : normal<->spin 77° 에 {dwell_need:5.1f} s 필요"
+          f"  -> {verdict(dwell_need, cur_dwell)}")
     print(f"  (crab 을 쓸 경우)                    : normal<->crab 120° 에 {crab_need:5.1f} s 필요")
+    if cur_stop is None:
+        print(f"\n  steer_rate_stopped_deg_s 미설정 -> **{s_min:.1f}** 로 기록하세요."
+              "\n      nav2_kinematic_check.py 가 이 값으로 위 두 dwell 을 검사합니다.")
+    elif abs(float(cur_stop) - s_min) > 0.5:
+        print(f"\n  steer_rate_stopped_deg_s 현재 {float(cur_stop):.1f} -> 이번 실측은 "
+              f"**{s_min:.1f}** 입니다. 더 작은 쪽으로 갱신하세요.")
+    else:
+        print(f"\n  steer_rate_stopped_deg_s 현재 {float(cur_stop):.1f} — 이번 실측과 일치.")
     print(f"""
-  max_steer_rate_deg_s  현재 20.0 (가정값)
+  max_steer_rate_deg_s  현재 {cur_rate:.1f} (주행 중 값, 여전히 가정값)
       주행 중 슬루율은 정지보다 **빠릅니다**. S_정지 {s_min:.1f} 만 넘으면
-      20 은 안전합니다. 성능을 되찾으려면 max_linear_x 와 함께
+      {cur_rate:.0f} 은 안전합니다. 성능을 되찾으려면 max_linear_x 와 함께
       비(100 deg/m)를 유지한 채 올리세요 — docs/control_pipeline.md §6.3.
 
   ★ 조향이 **아예 안 돌거나 스톨**했다면 그게 가장 중요한 발견입니다.

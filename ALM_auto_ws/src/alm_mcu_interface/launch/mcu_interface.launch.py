@@ -19,14 +19,14 @@ def generate_launch_description():
 
     return LaunchDescription(
         [
-            DeclareLaunchArgument("params_file", default_value=default_cfg),
+            DeclareLaunchArgument("mcu_params_file", default_value=default_cfg),
             DeclareLaunchArgument("port", default_value="/dev/ttyTHS1"),
             Node(
                 executable=executable_path("mcu_bridge.py"),
                 name="mcu_bridge",
                 output="screen",
                 parameters=[
-                    LaunchConfiguration("params_file"),
+                    LaunchConfiguration("mcu_params_file"),
                     {"port": LaunchConfiguration("port")},
                 ],
             ),

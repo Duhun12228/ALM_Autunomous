@@ -375,14 +375,35 @@ def main():
                   hint="조향 슬루 제한. 없거나 0 이면 출발 선회에서 조향 명령이 "
                        "1500 deg/s 로 튄다(|wz|<=|vx|/R_min 클램프가 걸리는 순간 "
                        "R=R_min = 정의상 최대 조향각이 되기 때문).")
+    # vx=0 구간(기동 정렬 · 모드 전환 dwell)은 **정지 슬루율 S_정지**로 나눠야 한다.
+    # 정지 조향은 접지면 전체를 비트는 것이라 주행 중보다 느리다 — rate 로 나누면
+    # 필요시간을 과소평가한다. steer_bench.py 실측치가 base_control.yaml 에 있다.
+    stop_raw = bc.get("steer_rate_stopped_deg_s")
+    stop_measured = stop_raw is not None and float(stop_raw) > 0
+    stop_rate = float(stop_raw) if stop_measured else (float(rate or 0.0) or 0.0)
+    if stop_measured:
+        note("steer_rate_stopped_deg_s (실측)", f"{stop_rate:.1f} deg/s",
+             "정지 상태 조향 슬루율. 아래 두 dwell 은 vx=0 구간이라 이 값으로 나눈다.")
+    else:
+        note("steer_rate_stopped_deg_s", "미설정",
+             f"정지 조향 슬루율 S_정지 가 없어 주행 중 값({rate} deg/s)으로 대체한다. "
+             "정지 조향이 더 느리므로 아래 dwell 판정이 낙관적이다 — "
+             "ros2 run alm_bringup steer_bench.py 로 실측할 것.")
+
     if rate is not None and float(rate) > 0:
         full = math.degrees(wis.max_steer_rad)
         t_full = full / float(rate)
         note("0° -> 최대조향 전환시간", f"{t_full:.2f} s "
              f"(vx={max_lx} 에서 주행 {max_lx * t_full:.2f} m)",
              "코너 진입 거리다. 너무 길면 코너에서 안쪽으로 파고든다.")
+        if stop_measured and float(rate) > stop_rate:
+            note("주행 중 슬루 명령 vs S_정지",
+                 f"{float(rate):.1f} > {stop_rate:.1f} deg/s",
+                 "굴러갈 때는 정지보다 빠르므로 보통 문제가 아니다. 다만 출발 직후 "
+                 "(vx≈steer_limit_min_vx)에는 명령이 실제를 잠깐 앞선다 — 주행 중 "
+                 "슬루율은 steering_observer 로 따로 확인할 것.")
         align = bc.get("startup_steer_align_sec")
-        auto_align = 2.0 * full / float(rate)
+        auto_align = 2.0 * full / stop_rate
         if align is not None and float(align) == 0.0:
             note("기동 조향 정렬 (자동)", f"{auto_align:.2f} s",
                  "전원 투입 시 조향각을 모르므로 최악 가동범위를 개루프로 기다린다.")
@@ -391,9 +412,15 @@ def main():
                               "비활성이면 조향각을 모르는 채로 출발한다."))
             print(f"  [{RED}불일치{RESET}] {'startup_steer_align_sec':44s} "
                   f"     ={float(align):>10.2f}  요구>=0")
+        elif float(align or 0) < auto_align:
+            print(f"  [{YELLOW}주의{RESET}] {'기동 정렬이 전 가동범위를 덮는가':44s} "
+                  f"     ={float(align or 0):>10.2f} s  필요~{auto_align:.2f} s")
+            note("", "",
+                 f"전 행정 {2*full:.0f}° 를 S_정지 {stop_rate:.1f} deg/s 로 펴려면 "
+                 f"{auto_align:.2f} s 다. 짧으면 조향이 덜 펴진 채 출발한다.")
         else:
-            note("기동 조향 정렬 (수동)", f"{float(align or 0):.2f} s",
-                 f"자동 계산값은 {auto_align:.2f} s 다.")
+            print(f"  [{GREEN}OK  {RESET}] {'기동 정렬이 전 가동범위를 덮는가':44s} "
+                  f"{float(align or 0):>10.2f} s >= {auto_align:.2f} s")
     else:
         _problems.append(("max_steer_rate_deg_s", str(rate), "> 0",
                           "0/미선언이면 조향 슬루 제한이 없다."))
@@ -401,12 +428,12 @@ def main():
     # STM32 는 모드마다 조향 자세가 고정이다: normal ±max_steer, spin CONS(9),
     # crab CONS(8). 액추에이터는 '지금 각도'에서 새 자세까지 슬루로 간다.
     dwell = bc.get("mode_switch_dwell_sec")
-    if dwell is not None and rate and float(rate) > 0:
+    if dwell is not None and stop_rate > 0:
         d = float(dwell)
         ms = float(bc.get("max_steer_deg", 30.0))
         spin_a, crab_a = 47.0, 90.0          # STM32 CONS(9), CONS(8)
         worst, worst_spin = ms + crab_a, ms + spin_a
-        need, need_spin = worst / float(rate), worst_spin / float(rate)
+        need, need_spin = worst / stop_rate, worst_spin / stop_rate
         note("mode_switch_dwell_sec", f"{d:.2f} s",
              f"normal(±{ms:.0f}°)/spin({spin_a:.0f}°)/crab({crab_a:.0f}°) 전환 시 "
              "조향축 스윕 시간.")
@@ -415,9 +442,9 @@ def main():
                   f"     ={d:>10.2f} s  필요~{need_spin:.2f} s")
             note("", "",
                  f"최악은 반대쪽 풀락({ms:.0f}°)에서 제로턴 자세({spin_a:.0f}°)까지 "
-                 f"{worst_spin:.0f}° 를 {rate} deg/s 로 도는 것 = {need_spin:.2f} s. "
-                 "dwell 이 짧으면 조향축이 아직 도는 중에 바퀴가 굴러 의도와 다른 "
-                 "궤적이 난다. ALIGN(7절)이 켜져 있으면 이 전환이 더 잦아진다.")
+                 f"{worst_spin:.0f}° 를 S_정지 {stop_rate:.1f} deg/s 로 도는 것 "
+                 f"= {need_spin:.2f} s. dwell 이 짧으면 조향축이 아직 도는 중에 바퀴가 "
+                 "굴러 의도와 다른 궤적이 난다. ALIGN(7절)이 켜져 있으면 이 전환이 더 잦다.")
         else:
             print(f"  [{GREEN}OK  {RESET}] {'dwell 이 normal->spin 최악 스윕을 덮는가':44s} "
                   f"{d:>10.2f} s >= {need_spin:.2f} s")
