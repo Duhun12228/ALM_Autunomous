@@ -436,6 +436,9 @@ export class Ingest {
 
   onEffectiveMode(msg) {
     setText('#effectiveMode', msg.data ?? '—');
+    // 자율주행 패널의 '모드' 칸도 이 값을 쓴다. DOM 에서 다시 읽지 않고
+    // state 에 둔다 — 화면 요소를 상태 저장소로 쓰면 렌더 순서에 걸린다.
+    this.alm.state.driveMode = { effective: msg.data ?? '' };
   }
 
   // ── 위치 ───────────────────────────────────────────────────────────

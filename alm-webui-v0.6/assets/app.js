@@ -1480,85 +1480,364 @@
     autoLocalization();
   }
 
+  // ── 자율주행 ────────────────────────────────────────────────────────
+  // 화면 상태의 진실은 **서버에 있다.** 아래 state.nav 는 /api/navigation 의
+  // 캐시일 뿐이고, 버튼을 누른 직후를 빼면 값을 여기서 만들지 않는다.
+  //
+  // 목업은 setInterval 로 progress 를 0.8%씩 올렸다. 로봇이 서 있어도 화면은
+  // 100% 를 향해 꾸준히 올라갔고, 도착하지 않았는데 '미션 완료' 토스트가 떴다.
+  // 그 종류의 거짓말을 없애는 것이 이 절의 요지다 — 진척은 Nav2 피드백에서만
+  // 온다. 피드백이 없는 값은 지어내지 않고 '—' 로 둔다.
+  //
+  // 두 층을 구분해야 한다:
+  //   스택(navigation.launch.py)  기동에 수십 초. map_server + 측위 + Nav2
+  //   목표(NavigateToPose 등)      전송에 수십 ms. 이미 뜬 Nav2 에 보낸다
+  // '주행 시작' 버튼 하나가 상태에 따라 둘 중 하나를 한다 (navStartPlan 참조).
+
+  const NAV_STATE_LABEL = {
+    idle: 'IDLE', pending: 'RUNNING', active: 'RUNNING', paused: 'PAUSED',
+    succeeded: 'COMPLETED', failed: 'FAILED', canceled: 'IDLE',
+  };
+
+  /** /api/navigation 응답을 화면 상태로 옮긴다. 값을 만들어내지 않는다. */
+  function applyNavStatus(payload) {
+    const mission = payload?.mission || {};
+    const nav = state.nav;
+    const previous = nav.serverState;
+
+    // 명령 응답({mission} 만 들어 있음)으로 부를 때는 스택 판정을 건드리지
+    // 않는다. 목표를 보냈다는 사실이 '누가 스택을 띄웠는가'를 바꾸지는 않으므로,
+    // 여기서 지어내면 다음 폴링(1.5초)까지 external 표시가 틀린 채로 남는다.
+    if (payload && ('process' in payload || 'nodes' in payload)) {
+      const nodes = payload.nodes || [];
+      nav.stackRunning = Boolean(payload.process?.running) || nodes.length > 0;
+      nav.stackExternal = !payload.process?.running && nodes.length > 0;
+    }
+    nav.ready = Boolean(mission.action_ready && mission.tf_ready);
+    nav.actionReady = Boolean(mission.action_ready);
+    nav.tfReady = Boolean(mission.tf_ready);
+    nav.serverState = mission.state || 'idle';
+    nav.state = NAV_STATE_LABEL[nav.serverState] || 'IDLE';
+    nav.kind = mission.kind || '';
+    nav.current = Number(mission.index) || 0;
+    nav.total = Number(mission.total) || 0;
+    nav.message = mission.message || '';
+    nav.distance = mission.distance_remaining_m;
+    nav.eta = mission.eta_sec;
+    nav.recoveries = Number(mission.recoveries) || 0;
+    nav.estimate = mission.distance_estimate_m;
+
+    // 진척률. **관측된 것에서만** 만든다.
+    //   단일 목표  : 첫 피드백의 남은거리를 분모로 삼는다 (d0 는 서버가 모른다)
+    //   웨이포인트 : 도달한 목표 수 / 전체
+    if (nav.serverState === 'idle') {
+      nav.progress = 0; nav.distance0 = null;
+    } else if (nav.kind === 'pose') {
+      if (typeof nav.distance === 'number') {
+        if (nav.distance0 == null || nav.distance > nav.distance0) nav.distance0 = nav.distance;
+        nav.progress = nav.distance0 > 0
+          ? clamp((1 - nav.distance / nav.distance0) * 100, 0, 100) : 0;
+      }
+    } else if (nav.total > 0) {
+      nav.progress = clamp((nav.current / nav.total) * 100, 0, 100);
+    }
+    if (nav.serverState === 'succeeded') nav.progress = 100;
+
+    // 시스템 상태는 주행 중일 때만 NAVIGATING 이다. 매핑/측위가 쓰는 것과
+    // 같은 칸이므로 여기서 함부로 IDLE 로 되돌리지 않는다.
+    if (nav.state === 'RUNNING') state.systemState = 'NAVIGATING';
+    else if (state.systemState === 'NAVIGATING') state.systemState = 'IDLE';
+
+    // 미션이 끝난 순간에만 알린다. 폴링마다 토스트를 띄우면 안 된다.
+    if (previous && previous !== nav.serverState) {
+      if (nav.serverState === 'succeeded') {
+        addAlarm('info', '미션 완료', nav.message || '모든 목표에 도달했습니다.');
+        toast('주행 미션이 완료되었습니다', nav.message, 'success');
+      } else if (nav.serverState === 'failed') {
+        addAlarm('warning', '자율주행 실패', nav.message);
+        toast('자율주행이 실패했습니다', nav.message, 'error');
+      }
+    }
+    renderNavigation(); renderGlobal();
+  }
+
+  /** 폴링. 화면이 열려 있는 동안만 돈다 — 서버 부하보다 '화면이 늦는' 쪽이 나쁘다. */
+  function startNavPoll() {
+    if (state.nav.pollTimer) return;
+    const tick = async () => {
+      const api = cmd();
+      if (!api || !api.hasToken()) return;
+      try {
+        applyNavStatus(await api.navigationStatus());
+      } catch (error) {
+        // 폴링 실패는 조용히 넘긴다. 백엔드 생존 표시는 HUD 가 따로 한다.
+      }
+    };
+    tick();
+    state.nav.pollTimer = setInterval(tick, 1500);
+  }
+
   function renderNavigation() {
     const nav = state.nav;
     const chip = $('#navStateChip');
     chip.className = 'state-chip';
     chip.textContent = nav.state;
-    chip.classList.add(nav.state === 'RUNNING' ? 'running' : nav.state === 'PAUSED' ? 'warning' : nav.state === 'COMPLETED' ? 'success' : 'idle');
+    chip.classList.add(nav.state === 'RUNNING' ? 'running'
+      : nav.state === 'PAUSED' || nav.state === 'FAILED' ? 'warning'
+        : nav.state === 'COMPLETED' ? 'success' : 'idle');
+    chip.title = nav.message || '';
+
     $('#missionPercent').textContent = `${Math.round(nav.progress)}%`;
     $('#missionProgressRing').style.setProperty('--progress', `${nav.progress * 3.6}deg`);
-    $('#currentGoalText').textContent = state.waypoints.length && nav.state !== 'IDLE' ? `${Math.min(nav.current + 1, state.waypoints.length)} / ${state.waypoints.length}` : '—';
-    $('#remainingDistance').textContent = nav.state === 'IDLE' ? '—' : `${Math.max(0, nav.distance).toFixed(1)} m`;
-    $('#etaText').textContent = nav.state === 'IDLE' ? '—' : `${Math.max(0, Math.round(nav.eta))} s`;
-    const actual = nav.mode === 'auto' ? (nav.progress % 30 > 24 ? 'spin' : 'normal') : nav.mode;
+    $('#currentGoalText').textContent = nav.total && nav.state !== 'IDLE'
+      ? `${Math.min(nav.current + 1, nav.total)} / ${nav.total}` : '—';
+
+    // 남은 거리와 ETA 는 NavigateToPose 피드백에만 있다. FollowWaypoints 는
+    // current_waypoint 하나만 주므로, 웨이포인트 미션에서는 알 수 없다.
+    // 직선 합(estimate)을 여기 쓰면 안 된다 — Hybrid-A* 실경로는 항상 그보다
+    // 길어서 '남은 거리'로 읽히는 순간 거짓이 된다. 참고값으로 title 에만 둔다.
+    const distanceNode = $('#remainingDistance');
+    distanceNode.textContent = typeof nav.distance === 'number'
+      ? `${nav.distance.toFixed(1)} m` : '—';
+    distanceNode.title = typeof nav.distance === 'number' ? ''
+      : (nav.estimate != null
+        ? `웨이포인트 미션은 Nav2 가 남은 거리를 주지 않습니다 (직선 합 ${nav.estimate} m)`
+        : '');
+    $('#etaText').textContent = typeof nav.eta === 'number' ? `${Math.round(nav.eta)} s` : '—';
+
+    const actual = state.driveMode?.effective || '—';
     $('#navDriveMode').textContent = `${nav.mode} / ${actual}`;
-    $('#startNavigation').disabled = nav.state === 'RUNNING' || nav.state === 'PAUSED';
-    $('#pauseNavigation').disabled = !['RUNNING', 'PAUSED'].includes(nav.state);
+
+    const plan = navStartPlan();
+    const startButton = $('#startNavigation');
+    startButton.textContent = plan.label;
+    startButton.disabled = !plan.enabled;
+    startButton.title = plan.reason;
+
+    const busy = ['RUNNING', 'PAUSED'].includes(nav.state);
+    $('#pauseNavigation').disabled = !busy;
     $('#pauseNavigation').textContent = nav.state === 'PAUSED' ? '재개' : '일시정지';
-    $('#cancelNavigation').disabled = !['RUNNING', 'PAUSED'].includes(nav.state);
+    $('#cancelNavigation').disabled = !busy && !nav.stackRunning;
+    $('#cancelNavigation').title = busy
+      ? '진행 중인 목표를 취소합니다'
+      : nav.stackRunning ? '자율주행 스택(Nav2 + 측위)을 내립니다' : '';
   }
 
-  function startNavigation() {
-    if (!canOperate()) return;
-    if (state.systemState !== 'IDLE') {
-      toast('자율주행을 시작할 수 없습니다', `현재 상태: ${state.systemState}`, 'warning'); return;
+  /**
+   * '주행 시작' 이 지금 무엇을 해야 하는지. 라벨·활성화·사유를 함께 돌려준다.
+   *
+   * 한 버튼이 두 가지 일을 하는 것은 조작 순서가 **하나뿐이기 때문**이다:
+   * 스택을 띄우고 → 정합을 기다리고 → 목표를 보낸다. 버튼을 둘로 나누면
+   * 조작자가 순서를 고를 수 있는 것처럼 보이는데, 실제로는 못 고른다.
+   */
+  function navStartPlan() {
+    const nav = state.nav;
+    if (!state.hasControl) return { action: null, label: '주행 시작', enabled: false, reason: '제어권이 없습니다' };
+    if (['RUNNING', 'PAUSED'].includes(nav.state)) {
+      return { action: null, label: '주행 중', enabled: false, reason: '이미 주행 중입니다' };
     }
-    if (state.localization.state !== 'CONVERGED') {
-      toast('초기위치가 필요합니다', '측위를 먼저 완료하세요.', 'warning'); return;
+    if (!nav.stackRunning) {
+      if (state.systemState === 'MAPPING') {
+        return { action: null, label: '자율주행 기동', enabled: false,
+          reason: '매핑 중에는 기동할 수 없습니다' };
+      }
+      if (state.localization.running) {
+        return { action: null, label: '자율주행 기동', enabled: false,
+          reason: '측위가 따로 떠 있습니다 — 자율주행 스택이 측위를 포함하므로 먼저 측위를 중단하세요' };
+      }
+      return { action: 'stack', label: '자율주행 기동', enabled: true,
+        reason: 'Nav2 + 측위 스택을 띄웁니다' };
+    }
+    if (nav.stackExternal && !nav.actionReady) {
+      return { action: null, label: '정합 대기 중…', enabled: false,
+        reason: '웹 밖에서 기동한 스택입니다' };
+    }
+    if (!nav.actionReady) {
+      return { action: null, label: '기동 중…', enabled: false,
+        reason: 'Nav2 액션 서버가 아직 광고되지 않았습니다' };
+    }
+    if (!nav.tfReady) {
+      return { action: null, label: '정합 대기 중…', enabled: false,
+        reason: '초기위치가 아직 안 잡혔습니다 (map→odom TF 없음). 로봇을 정지시켜 두세요' };
     }
     if (!state.waypoints.length) {
-      toast('웨이포인트가 없습니다', '맵에서 하나 이상의 목표를 추가하세요.', 'warning'); return;
+      return { action: null, label: '주행 시작', enabled: false,
+        reason: '맵을 클릭해 목표를 하나 이상 추가하세요' };
     }
-    state.systemState = 'NAVIGATING';
-    state.nav.state = 'RUNNING'; state.nav.progress = 0; state.nav.current = 0;
-    state.nav.distance = state.waypoints.length * 7.5; state.nav.eta = state.nav.distance / 0.35;
-    addAlarm('info', '자율주행 시작', `${state.waypoints.length}개 웨이포인트`);
-    addLog('INFO', 'nav2', `FollowWaypoints accepted. poses=${state.waypoints.length}`);
-    state.nav.timer = setInterval(() => {
-      if (state.nav.state !== 'RUNNING') return;
-      state.nav.progress = clamp(state.nav.progress + 0.8 + Math.random() * 1.1, 0, 100);
-      state.nav.distance = Math.max(0, state.nav.distance * (1 - state.nav.progress / 7500));
-      state.nav.eta = state.nav.distance / 0.35;
-      state.nav.current = Math.min(state.waypoints.length - 1, Math.floor((state.nav.progress / 100) * state.waypoints.length));
-      if (Math.random() < 0.02) addAlarm('warning', '경로 재계획', '장애물로 인해 글로벌 경로가 갱신되었습니다.');
-      if (state.nav.progress >= 100) completeNavigation();
+    return { action: 'goal', label: '주행 시작', enabled: true, reason: '' };
+  }
+
+  /**
+   * 화면의 웨이포인트를 서버로 보낼 목록으로 편다.
+   *
+   * 반복/순환은 Nav2 기능이 아니다. FollowWaypoints 는 목록을 한 번 훑고 끝나므로,
+   * 반복은 목록을 그만큼 늘려서 보내는 것으로 구현한다. 서버가 대신 반복 호출을
+   * 하게 만들지 않은 이유는, 그러면 '지금 몇 바퀴째인가' 라는 상태가 서버와
+   * 화면 양쪽에 생기기 때문이다 — 목록 하나면 index 하나로 전부 표현된다.
+   */
+  function navMissionPoints() {
+    const laps = clamp(Number($('#repeatCount').value) || 1, 1, 99);
+    const loop = $('#loopMission').checked;
+    const base = state.waypoints.map((point) => ({
+      x: point.x, y: point.y, yaw_deg: Number(point.yaw) || 0, label: point.label,
+    }));
+    const points = [];
+    for (let lap = 0; lap < laps; lap += 1) {
+      points.push(...base);
+      // 순환은 '마지막 목표 뒤에 첫 목표를 다시' 다. 마지막 바퀴에도 붙여야
+      // 출발점으로 돌아와서 끝난다 (그게 순환 주행의 뜻이다).
+      if (loop) points.push({ ...base[0] });
+    }
+    return points;
+  }
+
+  async function startNavigation() {
+    const api = requireCmd();
+    if (!api) return;
+    const plan = navStartPlan();
+    if (!plan.action) {
+      if (plan.reason) toast('자율주행을 시작할 수 없습니다', plan.reason, 'warning');
+      return;
+    }
+    const button = $('#startNavigation');
+
+    if (plan.action === 'stack') {
+      setButtonBusy(button, true, '기동 중…');
+      try {
+        const result = await api.startNavigationStack({});
+        state.nav.stackRunning = true;
+        addLog('INFO', 'alm_web_backend',
+          `자율주행 기동: 맵 ${result.map} (feature ${result.summary?.db_features ?? '?'}개, `
+          + `${result.accum_frames}프레임 누적)`);
+        for (const note of result.notes || []) addAlarm('warning', '자율주행 주의', note);
+        toast('자율주행 스택을 기동했습니다', result.message, 'success');
+        startNavLogPoll();
+      } catch (error) {
+        addLog('WARN', 'alm_web_backend', `자율주행 기동 거부: ${error.message}`);
+        toast('자율주행을 기동할 수 없습니다', error.message,
+          error.status === 409 ? 'warning' : 'error');
+      } finally {
+        setButtonBusy(button, false);
+        renderNavigation();
+      }
+      return;
+    }
+
+    const points = navMissionPoints();
+    setButtonBusy(button, true, '전송 중…');
+    try {
+      const result = await api.sendGoal(points);
+      state.nav.distance0 = null;
+      applyNavStatus({ mission: result.mission });
+      addAlarm('info', '자율주행 시작', `${points.length}개 목표`);
+      addLog('INFO', 'alm_web_backend', `목표 전송: ${points.length}개 `
+        + `(직선 ${result.mission?.distance_estimate_m ?? '?'} m)`);
+      toast('자율주행을 시작했습니다', result.message, 'success');
+    } catch (error) {
+      addLog('WARN', 'alm_web_backend', `목표 거부: ${error.message}`);
+      toast('목표를 보낼 수 없습니다', error.message,
+        error.status === 409 ? 'warning' : 'error');
+    } finally {
+      setButtonBusy(button, false);
       renderNavigation();
-    }, 350);
-    renderNavigation(); renderGlobal();
-    toast('자율주행을 시작했습니다', '감독 하트비트가 5 Hz로 유지됩니다.', 'success');
-  }
-
-  function pauseNavigation() {
-    if (state.nav.state === 'RUNNING') {
-      state.nav.state = 'PAUSED';
-      addLog('INFO', 'alm_web_backend', 'Mission paused. Nav2 goal canceled; remaining waypoints retained.');
-      toast('주행을 일시정지했습니다', '남은 웨이포인트를 유지합니다.', 'warning');
-    } else if (state.nav.state === 'PAUSED') {
-      state.nav.state = 'RUNNING';
-      addLog('INFO', 'alm_web_backend', 'Mission resumed from remaining waypoint list.');
-      toast('주행을 재개했습니다', '남은 경로로 새 목표를 전송했습니다.', 'success');
     }
-    renderNavigation();
   }
 
-  function cancelNavigation(showToast = true) {
-    clearInterval(state.nav.timer); state.nav.timer = null;
-    if (['RUNNING', 'PAUSED'].includes(state.nav.state)) addLog('WARN', 'nav2', 'Goal canceled and stop command asserted.');
-    state.nav.state = 'IDLE'; state.nav.progress = 0; state.nav.current = 0; state.nav.distance = 0; state.nav.eta = 0;
-    if (state.systemState === 'NAVIGATING') state.systemState = 'IDLE';
-    renderNavigation(); renderGlobal();
-    if (showToast) toast('자율주행을 중단했습니다', '목표 취소 후 정지 명령을 전송했습니다.', 'warning');
+  async function pauseNavigation() {
+    const api = requireCmd();
+    if (!api) return;
+    if (!canOperate()) return;
+    const button = $('#pauseNavigation');
+    const resuming = state.nav.state === 'PAUSED';
+    setButtonBusy(button, true, resuming ? '재개 중…' : '정지 중…');
+    try {
+      const result = resuming ? await api.resumeNavigation() : await api.pauseNavigation();
+      applyNavStatus({ mission: result.mission });
+      addLog('INFO', 'alm_web_backend', result.message);
+      toast(resuming ? '주행을 재개했습니다' : '주행을 일시정지했습니다',
+        result.message, resuming ? 'success' : 'warning');
+    } catch (error) {
+      toast(resuming ? '재개 실패' : '일시정지 실패', error.message,
+        error.status === 409 ? 'warning' : 'error');
+    } finally {
+      setButtonBusy(button, false);
+      renderNavigation();
+    }
   }
 
-  function completeNavigation() {
-    clearInterval(state.nav.timer); state.nav.timer = null;
-    state.nav.state = 'COMPLETED'; state.nav.progress = 100; state.nav.distance = 0; state.nav.eta = 0;
-    state.systemState = 'IDLE';
-    addAlarm('info', '미션 완료', '모든 웨이포인트에 도달했습니다.');
-    addLog('INFO', 'nav2', 'FollowWaypoints completed successfully.');
-    renderNavigation(); renderGlobal();
-    toast('주행 미션이 완료되었습니다', `${state.waypoints.length}개 목표 도달`, 'success');
+  /**
+   * 미션이 돌고 있으면 목표를 취소하고, 아니면 스택을 내린다.
+   *
+   * ⚠ 이 버튼은 **비상정지가 아니다.** 취소 요청이 Nav2 를 거쳐 컨트롤러까지
+   *   가는 데 시간이 걸리고, 그 사이 로봇은 마지막 명령으로 움직인다.
+   *   지금 당장 세워야 하면 E-STOP 이다.
+   */
+  async function cancelNavigation() {
+    const api = requireCmd();
+    if (!api) return;
+    if (!canOperate()) return;
+    const busy = ['RUNNING', 'PAUSED'].includes(state.nav.state);
+    const button = $('#cancelNavigation');
+
+    if (!busy) {
+      if (!state.nav.stackRunning) return;
+      if (state.nav.stackExternal) {
+        toast('웹 밖에서 기동한 스택입니다', '띄운 터미널에서 Ctrl-C 하세요.', 'warning');
+        return;
+      }
+      if (!confirm('자율주행 스택(Nav2 + 측위)을 내립니다. 계속할까요?')) return;
+      setButtonBusy(button, true, '종료 중…');
+      try {
+        await api.stopNavigationStack();
+        state.nav.stackRunning = false;
+        stopNavLogPoll();
+        addLog('INFO', 'alm_web_backend', 'navigation.launch.py 를 종료했습니다.');
+        toast('자율주행 스택을 내렸습니다', '', 'warning');
+      } catch (error) {
+        toast('종료 실패', error.message, 'error');
+      } finally {
+        setButtonBusy(button, false);
+        renderNavigation();
+      }
+      return;
+    }
+
+    setButtonBusy(button, true, '중단 중…');
+    try {
+      const result = await api.cancelNavigation();
+      applyNavStatus({ mission: result.mission });
+      addLog('WARN', 'alm_web_backend', '자율주행 미션을 중단했습니다.');
+      toast('자율주행을 중단했습니다',
+        '목표를 취소했습니다. 즉시 정지가 필요하면 E-STOP 을 쓰세요.', 'warning');
+    } catch (error) {
+      toast('중단 실패', error.message, 'error');
+    } finally {
+      setButtonBusy(button, false);
+      renderNavigation();
+    }
+  }
+
+  /** 자율주행 슬롯 로그 tail. 측위와 같은 이유다 — /rosout 에 안 나오는 실패가 있다. */
+  function startNavLogPoll() {
+    if (state.navLogTimer) return;
+    state.navLogOffset = 0;
+    state.navLogTimer = setInterval(async () => {
+      const api = cmd();
+      if (!api || !api.hasToken()) return;
+      try {
+        const snapshot = await api.navigationLog(state.navLogOffset || 0);
+        state.navLogOffset = snapshot.offset ?? state.navLogOffset;
+        for (const line of snapshot.lines || []) addLog('INFO', 'navigation', line);
+        if (!snapshot.running) stopNavLogPoll();
+      } catch (error) {
+        stopNavLogPoll();
+      }
+    }, 1500);
+  }
+
+  function stopNavLogPoll() {
+    clearInterval(state.navLogTimer);
+    state.navLogTimer = null;
   }
 
   function addAlarm(type, title, detail) {
@@ -1960,7 +2239,7 @@
     });
     $('#startNavigation').addEventListener('click', startNavigation);
     $('#pauseNavigation').addEventListener('click', pauseNavigation);
-    $('#cancelNavigation').addEventListener('click', () => cancelNavigation(true));
+    $('#cancelNavigation').addEventListener('click', cancelNavigation);
     $('#clearAlarms').addEventListener('click', () => { state.alarms = []; renderAlarms(); });
     $('#saveWaypointSet').addEventListener('click', () => state.waypoints.length ? toast('웨이포인트 세트를 저장했습니다', `${state.activeMap} · ${state.waypoints.length} points`, 'success') : toast('저장할 웨이포인트가 없습니다', '', 'warning'));
     $('#loadWaypointSet').addEventListener('click', () => {
@@ -2072,6 +2351,8 @@
     // 측위: 슬롯 상태 변화 / /rosout 진행 로그 / /icp_result 수렴
     onLocalizationRunningChange, addLocalizationLog, onLocalizationConverged,
     renderLocalizationLogs,
+    // 자율주행: /api/navigation 폴링 시작(main.js 가 토큰 확인 후 부른다)
+    startNavPoll, applyNavStatus,
     addLog, addAlarm, toast, openSettings,
     // command_manager 의 실제 속도 한계를 받아 하드코딩을 덮는다
     applyLimits,

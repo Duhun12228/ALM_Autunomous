@@ -221,6 +221,33 @@ export class Commands {
       undefined, { silent: true });
   }
 
+  // ── 자율주행 ────────────────────────────────────────────────────────
+  // 스택 기동/종료와 목표 전송은 **다른 층이다.** start 는 Nav2 프로세스를
+  // 띄우는 것이고(수십 초), goal 은 이미 떠 있는 Nav2 에 목표를 주는 것이다
+  // (수십 ms). 화면에서 '주행 시작' 버튼 하나로 보이더라도 섞으면 안 된다 —
+  // 목표를 보낼 때마다 스택을 다시 띄우면 초기 정합을 매번 다시 한다.
+  startNavigationStack(options = {}) {
+    return this.request('POST', '/api/navigation/start', options);
+  }
+  stopNavigationStack() { return this.request('POST', '/api/navigation/stop', {}); }
+  navigationStatus() {
+    return this.request('GET', '/api/navigation', undefined, { silent: true });
+  }
+  navigationLog(since = 0) {
+    return this.request('GET', `/api/navigation/log?since=${since}`,
+      undefined, { silent: true });
+  }
+
+  /** points: [{x, y, yaw_deg}]. 하나면 단일 목표, 여럿이면 웨이포인트 미션. */
+  sendGoal(points) {
+    return this.request('POST', '/api/navigation/goal', { points });
+  }
+  // 일시정지는 Nav2 목표를 **취소**하고 남은 목록을 서버가 기억하는 것이다.
+  // 재개하면 남은 목록으로 새 목표를 보낸다 — 세운 자리에서 이어붙이지 않는다.
+  pauseNavigation() { return this.request('POST', '/api/navigation/pause', {}); }
+  resumeNavigation() { return this.request('POST', '/api/navigation/resume', {}); }
+  cancelNavigation() { return this.request('POST', '/api/navigation/cancel', {}); }
+
   createMap(name, label, notes) {
     return this.request('POST', '/api/maps', { name, label, notes });
   }

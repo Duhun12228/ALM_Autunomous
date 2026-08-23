@@ -19,6 +19,7 @@ install(
     scripts/fake_mcu.py
     scripts/voice_announcer.py
     scripts/steer_bench.py
+    scripts/fake_nav2.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

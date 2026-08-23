@@ -29,15 +29,29 @@ from .logging_util import log
 LAUNCH_ALLOWLIST = {
     "slam": ("alm_navigation", "slam.launch.py"),
     "localization": ("alm_navigation", "localization.launch.py"),
-    # Phase 4-2 에서 추가 예정:
-    #   "navigation":   ("alm_navigation", "navigation.launch.py"),
+    # ⚠ alm_navigation/navigation.launch.py 는 **localization.launch.py 를
+    #   포함한다** (map_server + 측위 + Nav2 코어). 측위만 따로 띄워 두고 그
+    #   위에 Nav2 를 얹는 구성이 아니다 — 아래 EXCLUSIVE_SLOTS 참고.
+    "navigation": ("alm_navigation", "navigation.launch.py"),
 }
 
 # 동시에 떠 있으면 안 되는 조합. 둘 다 fast_lio 를 띄우므로 /Odometry 와
 # odom->base_link TF 를 두 노드가 동시에 낸다 — TF 트리에 부모가 둘인
 # 상태가 되어 조회하는 쪽마다 다른 답을 받는다. 로그는 양쪽 다 깨끗해서
 # 화면만 보고는 알 수 없다.
-EXCLUSIVE_SLOTS = (("slam", "localization"),)
+#
+# navigation 이 localization 과도 배타인 것은 같은 이유다. navigation.launch.py
+# 안에 localization.launch.py 가 들어 있어서, 측위를 띄워 둔 채 자율주행을
+# 시작하면 FAST-LIO 가 두 개가 된다.
+#
+# ##운용메모## 그래서 '측위로 수렴을 확인한 뒤 그 위에 Nav2 만 얹기' 가 안 된다.
+#   자율주행을 시작하면 초기 정합을 처음부터 다시 한다. 정합이 비싼 이 브랜치
+#   에서는 실제로 불편한 지점이고, 고치려면 Nav2 코어만 띄우는 launch 를 따로
+#   만들어야 한다. 지금 그것을 만들지 않은 이유는 배타 규칙이 하나 늘어날 때마다
+#   '무엇과 무엇이 같이 뜨면 안 되는가' 가 사람 머릿속으로 옮겨가기 때문이다.
+EXCLUSIVE_SLOTS = (("slam", "localization"),
+                   ("slam", "navigation"),
+                   ("localization", "navigation"))
 
 # 이름이 비슷해서 헷갈리는데 절대 띄우면 안 되는 것들. 실수로 allowlist 에
 # 추가하려 할 때 걸리도록 명시해 둔다.

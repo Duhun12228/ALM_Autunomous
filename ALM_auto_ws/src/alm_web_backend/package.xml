@@ -21,6 +21,11 @@
   <!-- /icp_result (PoseWithCovarianceStamped) 구독 — 측위 수렴 감지 -->
   <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>alm_msgs</exec_depend>
+  <!-- Nav2 목표 전송 (NavigateToPose / FollowWaypoints 액션) -->
+  <exec_depend>nav2_msgs</exec_depend>
+  <exec_depend>action_msgs</exec_depend>
+  <!-- map->odom 조회 = '초기 정합이 붙었는가'. 목표 전송 전 점검에 쓴다 -->
+  <exec_depend>tf2_ros</exec_depend>
   <!-- maps/ 레이아웃 해석(map_layout.py)과 pcd2pgm.py 를 빌려 쓴다 -->
   <exec_depend>alm_navigation</exec_depend>
   <!-- FPFH 측위 DB 빌더(fpfh_map_builder) 를 subprocess 로 실행한다 -->

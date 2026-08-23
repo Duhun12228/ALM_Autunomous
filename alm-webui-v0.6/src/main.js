@@ -196,6 +196,10 @@ function start() {
   pollBackend();
   setInterval(pollBackend, 3000);
 
+  // 자율주행은 health(3초)보다 촘촘해야 한다 — 남은 거리와 목표 번호가
+  // 이 주기로 갱신되고, 미션이 끝난 순간을 늦게 알면 다음 조작이 늦어진다.
+  alm.startNavPoll?.();
+
   // command_manager 의 실제 속도 한계로 UI 하드코딩을 덮는다 (§12-7)
   commands.limits()
     .then((result) => alm.applyLimits(result.limits))

@@ -12,11 +12,11 @@ import os
 import time
 
 from .http_server import ApiError, StreamResponse
-from . import localization, maps_write
+from . import localization, maps_write, navigation
 from .jobs import JobError
 from .logging_util import log
 from .processes import ProcessError
-from .ros_iface import RosTimeout
+from .ros_iface import NavRejected, RosTimeout
 
 # 사용자가 보낼 수 있는 수치의 상한/하한. 스크립트에 이상한 값이 들어가
 # 몇 시간 도는 작업이 되는 것을 막는다.
@@ -55,6 +55,9 @@ class Api:
         # 측위 수렴도 마찬가지다. 기동 요청은 3초면 끝나고, 정합은 그 뒤에
         # 수십 초에 걸쳐 일어난다.
         self.ros.on_localized = self._localized
+        # 주행 종료는 이 중에서도 가장 늦게 온다 — 목표를 받는 요청은 수십 ms,
+        # 도착은 몇 분 뒤다.
+        self.ros.on_nav_finished = self._nav_finished
 
     # ── 음성 문구 ───────────────────────────────────────────────────────
     # 약어는 띄어쓴다 — 붙여 쓰면 합성기가 뭉갠다 ("SLAM" → "슬램" 이 아니라 잡음).
@@ -70,6 +73,16 @@ class Api:
     DIED_VOICE = {
         "slam": "S L A M process exited",
         "localization": "Localization process exited",
+        "navigation": "Navigation process exited",
+    }
+
+    # 미션이 끝났을 때의 문구와 로그 등급. 성공과 실패를 귀로 구분해야 한다 —
+    # 실차에서 화면을 못 볼 때 이게 유일한 신호다.
+    NAV_END_VOICE = {
+        "succeeded": ("Goal reached", "info"),
+        "failed": ("Navigation failed", "warn"),
+        "canceled": ("Navigation canceled", "info"),
+        "paused": ("Navigation paused", "info"),
     }
 
     # 반납과 만료를 굳이 다른 문구로 나눈다. 반납은 조작자가 끝낸 것이고,
@@ -104,6 +117,16 @@ class Api:
                   f"yaw={result['yaw_deg']}deg")
         # 실차에서 이게 가장 기다리는 소리다 — 초기위치가 잡혀야 주행을 시작한다.
         self.ros.say("Localization converged", key="localization")
+
+    def _nav_finished(self, state, message, snapshot):
+        """미션이 끝났다 (도달·중단·실패). rclpy 실행기 스레드다."""
+        phrase, level = self.NAV_END_VOICE.get(state, ("Navigation ended", "info"))
+        done = snapshot.get("index", 0)
+        total = snapshot.get("total") or len(snapshot.get("points", []))
+        self._log(level, f"자율주행 {state}: {message} ({done}/{total} 목표)")
+        # 실패는 우선순위를 올린다. 로봇이 서 있는데 왜 서 있는지 모르는 시간이
+        # 가장 위험하다 — 조작자가 다가가서 들여다보는 동안 다시 움직일 수도 있다.
+        self.ros.say(phrase, priority=2 if state == "failed" else 1, key="navigation")
 
     def check_processes(self):
         """프로세스가 **혼자 죽은 것**을 잡아 알린다. 주기 타이머가 부른다.
@@ -159,15 +182,15 @@ class Api:
         add("POST", "/api/localization/start", self.localization_start, needs_lock=True)
         add("POST", "/api/localization/stop", self.localization_stop, needs_lock=True)
 
-        add("GET", "/api/jobs", self.job_list)
-        add("GET", "/api/jobs/{id}", self.job_get)
-        add("GET", "/api/jobs/{id}/stream", self.job_stream)
-        add("POST", "/api/jobs/{id}/cancel", self.job_cancel, needs_lock=True)
-        add("POST", "/api/jobs/pcd2pgm", self.job_pcd2pgm, needs_lock=True)
-        add("POST", "/api/jobs/fpfh", self.job_fpfh, needs_lock=True)
+        add("GET", "/api/navigation", self.navigation_status)
+        add("GET", "/api/navigation/log", self.navigation_log)
+        add("POST", "/api/navigation/start", self.navigation_start, needs_lock=True)
+        add("POST", "/api/navigation/stop", self.navigation_stop, needs_lock=True)
+        add("POST", "/api/navigation/goal", self.navigation_goal, needs_lock=True)
+        add("POST", "/api/navigation/pause", self.navigation_pause, needs_lock=True)
+        add("POST", "/api/navigation/resume", self.navigation_resume, needs_lock=True)
+        add("POST", "/api/navigation/cancel", self.navigation_cancel, needs_lock=True)
 
-        add("POST", "/api/maps", self.map_create, needs_lock=True)
-        add("PUT", "/api/maps/active", self.map_set_active, needs_lock=True)
 
     # ── 상태 ────────────────────────────────────────────────────────────
     def health(self, _request):
@@ -182,6 +205,13 @@ class Api:
             # 슬롯 표에는 없지만 그래프에는 있는 측위 노드. CLI 로 먼저 띄운
             # 경우가 이것이고, 화면이 '측위 안 돌고 있음'이라고 말하면 안 된다.
             "localization_nodes": self.ros.running_nodes(self.LOCALIZATION_NODES),
+            # 자율주행도 같은 이유로 그래프를 본다. 다만 여기서는 '떠 있는가'
+            # 보다 '목표를 받을 수 있는가' 가 실질적인 질문이라 액션 준비 상태와
+            # map->odom TF 를 함께 내려준다 — 화면이 시작 버튼을 살릴지 정하는
+            # 근거가 이 둘이다.
+            "navigation_nodes": self.ros.running_nodes(self.NAVIGATION_NODES),
+            "navigation_ready": self.ros.nav_action_ready(),
+            "localized": self.ros.nav_tf_ready(),
             "mapping_target": maps_write.read_mapping_target(self.fastlio_config),
             # 화면의 점군이 실측인지 재생본인지. 토픽 이름으로는 구분이 안 된다.
             "lidar_source": self.ros.lidar_source(),
@@ -448,6 +478,212 @@ class Api:
         self.ros.clear_icp_result()
         self.ros.say("Localization stopped", key="localization")
         return {"process": info}
+
+    # ── 자율주행 ────────────────────────────────────────────────────────
+    # navigation.launch.py 가 띄우는 것 중 **이 스택에만 있는** 노드.
+    # 측위 노드(teaser/fastlio)는 여기 넣지 않는다 — 넣으면 측위만 띄운
+    # 상태를 '자율주행 중' 으로 오독한다.
+    NAVIGATION_NODES = ("bt_navigator", "controller_server", "planner_server",
+                        "smoother_server", "behavior_server", "waypoint_follower")
+
+    def navigation_status(self, _request):
+        slot = self.processes.slot("navigation")
+        return {
+            "process": slot.info(),
+            "nodes": self.ros.running_nodes(self.NAVIGATION_NODES),
+            "mission": self.ros.nav_status(),
+            "active_map": self.map_layout.active_map_name(self.maps_root),
+        }
+
+    def navigation_log(self, request):
+        try:
+            return self.processes.read_log("navigation",
+                                           since=request.int_query("since", 0))
+        except ProcessError as error:
+            raise ApiError(404, str(error)) from error
+
+    def navigation_start(self, request):
+        """자율주행 스택(map_server + 측위 + Nav2)을 띄운다.
+
+        측위 기동과 사전 점검이 같은 이유로 같은 모양이다 — 이 launch 는
+        localization.launch.py 를 **포함하므로**, 맵 자산이 안 맞으면 Nav2 까지
+        올라간 뒤에야 정합이 조용히 안 붙는다.
+        """
+        name = (request.str_field("map", default="")
+                or self.map_layout.active_map_name(self.maps_root))
+        if not name:
+            raise ApiError(409, "활성 맵이 없습니다. 맵을 먼저 만들고 선택하세요.")
+        paths = self._map_paths(name)
+
+        if not os.path.isfile(paths.grid_yaml):
+            raise ApiError(409,
+                           f"'{name}' 에 2D 격자(grid.yaml)가 없습니다 — Nav2 의 "
+                           f"global costmap 이 이걸 씁니다. '2D 맵 생성' 을 "
+                           f"먼저 실행하세요.")
+        try:
+            summary = localization.check_assets(paths)
+            lidar_note = localization.check_lidar(self.ros.lidar_source())
+        except localization.PreflightError as error:
+            raise ApiError(409, str(error)) from error
+
+        conflict = self.processes.conflicting("navigation")
+        if conflict:
+            raise ApiError(409, f"'{conflict}' 가 실행 중입니다. 먼저 종료하세요 — "
+                                f"자율주행 스택은 측위를 안에 포함하므로 "
+                                f"FAST-LIO 가 두 개 뜹니다.")
+        already = self.ros.running_nodes(self.LOCALIZATION_NODES
+                                         + self.NAVIGATION_NODES)
+        if already:
+            raise ApiError(409,
+                           f"측위/자율주행 노드가 이미 떠 있습니다 "
+                           f"({', '.join(already)}). 웹 밖에서 기동한 것이라면 "
+                           f"그 터미널에서 먼저 종료하세요.")
+
+        accum = max(1, min(60, request.int_field("accum_frames", 10)))
+        launch_args = [
+            f"map:={paths.grid_yaml}",
+            f"map_pcd:={paths.cloud}",
+            f"fpfh_db_prefix:={paths.fpfh_prefix}",
+            f"accum_frames:={accum}",
+        ]
+        # 측위와 같은 이유로 DB 의 전처리 파라미터를 그대로 물려준다
+        # (localization_start 주석 참고).
+        launch_args += [f"{key}:={value}"
+                        for key, value in sorted(summary["params"].items())]
+
+        self.ros.clear_icp_result()
+        self.ros.say("Starting navigation", key="navigation")
+        try:
+            info = self.processes.start("navigation", launch_args)
+        except ProcessError as error:
+            self.ros.say("Navigation failed to start", key="navigation")
+            raise ApiError(409, str(error)) from error
+
+        self._log("info", f"자율주행 기동: 맵 '{name}' (격자 {os.path.basename(paths.grid_yaml)}, "
+                          f"feature {summary['db_features']}개, {accum}프레임 누적)")
+        notes = [note for note in (summary["warning"], lidar_note) if note]
+        return {"map": name, "process": info, "summary": summary,
+                "accum_frames": accum, "notes": notes,
+                "message": "로봇을 정지 상태로 두세요 — 초기 정합이 끝나야 "
+                           "목표를 보낼 수 있습니다."}
+
+    def navigation_stop(self, _request):
+        # 미션이 돌고 있으면 먼저 세운다. 프로세스만 내리면 목표를 받은 채로
+        # 죽는 것이라, 마지막 /cmd_vel 이 그대로 남는 상황을 만들 수 있다.
+        # (command_manager 의 cmd_timeout 0.5 s 가 결국 세우긴 하지만, 세우는
+        #  주체가 '타임아웃' 인 것과 '취소' 인 것은 다르다.)
+        if self.ros.nav_busy():
+            try:
+                self.ros.nav_cancel(keep=False)
+            except NavRejected as error:
+                self._log("warn", f"종료 전 미션 취소 실패: {error}")
+
+        try:
+            info = self.processes.stop("navigation")
+        except ProcessError as error:
+            raise ApiError(409, str(error)) from error
+
+        if info.get("already_stopped"):
+            leftover = self.ros.running_nodes(self.NAVIGATION_NODES)
+            if leftover:
+                raise ApiError(409,
+                               f"웹이 띄운 자율주행이 없습니다. 지금 도는 것은 웹 "
+                               f"밖에서 기동한 것입니다 ({', '.join(leftover)}) — "
+                               f"그 터미널에서 Ctrl-C 하세요.")
+            return {"process": info, "message": "실행 중인 자율주행이 없습니다."}
+
+        # force — Nav2 를 방금 죽였으므로 결과 future 는 안 온다 (nav_clear 주석)
+        self.ros.nav_clear(force=True)
+        self.ros.clear_icp_result()
+        self.ros.say("Navigation stopped", key="navigation")
+        return {"process": info}
+
+    def _nav_preflight(self):
+        try:
+            navigation.check_stack(
+                action_ready=self.ros.nav_action_ready(),
+                tf_ready=self.ros.nav_tf_ready(),
+                slot_running=self.processes.slot("navigation").is_running(),
+                external_nodes=self.ros.running_nodes(self.LOCALIZATION_NODES))
+        except navigation.PreflightError as error:
+            raise ApiError(409, str(error)) from error
+
+    def navigation_goal(self, request):
+        """목표를 보낸다. points 하나면 단일 목표, 여럿이면 웨이포인트 미션."""
+        self._nav_preflight()
+        try:
+            points = navigation.parse_points(request.body.get("points"))
+        except navigation.PreflightError as error:
+            raise ApiError(400, str(error)) from error
+
+        if self.ros.nav_busy():
+            raise ApiError(409, "이미 주행 중입니다. 중단하거나 일시정지한 뒤 "
+                                "새 목표를 보내세요.")
+
+        try:
+            status = self.ros.nav_send(points)
+        except NavRejected as error:
+            self._log("warn", f"목표 거부: {error}")
+            raise ApiError(409, str(error)) from error
+
+        summary = navigation.describe(points)
+        self._log("info", f"자율주행 목표 전송: {summary} "
+                          f"(직선 {status['distance_estimate_m']} m)")
+        self.ros.say("Goal accepted", key="navigation")
+        return {"mission": status, "message": f"목표를 전송했습니다 — {summary}"}
+
+    def navigation_pause(self, _request):
+        """현재 목표를 취소하되 남은 웨이포인트는 남긴다.
+
+        Nav2 에는 일시정지가 없다. 그래서 '취소하고 남은 목록을 기억' 이
+        일시정지의 실제 구현이고, resume 은 남은 목록으로 **새 목표를 보내는**
+        것이다. 재개하면 경로를 처음부터 다시 계획한다 — 세운 자리에서
+        이어붙이는 것이 아니다.
+        """
+        try:
+            status = self.ros.nav_cancel(keep=True)
+        except NavRejected as error:
+            raise ApiError(409, str(error)) from error
+        remaining = len(status["remaining"])
+        self._log("info", f"자율주행 일시정지 — 남은 목표 {remaining}개")
+        return {"mission": status,
+                "message": f"주행을 세웠습니다. 남은 목표 {remaining}개를 유지합니다."}
+
+    def navigation_resume(self, _request):
+        self._nav_preflight()
+        status = self.ros.nav_status()
+        if status["state"] != "paused":
+            raise ApiError(409, "일시정지 상태가 아닙니다.")
+        remaining = status["remaining"]
+        if not remaining:
+            raise ApiError(409, "남은 목표가 없습니다.")
+
+        try:
+            status = self.ros.nav_send(remaining, start_index=status["index"],
+                                       resume=True)
+        except NavRejected as error:
+            raise ApiError(409, str(error)) from error
+        self._log("info", f"자율주행 재개 — 남은 목표 {len(remaining)}개")
+        self.ros.say("Resuming navigation", key="navigation")
+        return {"mission": status,
+                "message": f"남은 목표 {len(remaining)}개로 새 경로를 계획합니다."}
+
+    def navigation_cancel(self, _request):
+        """미션을 폐기한다. 일시정지와 달리 남은 목표를 버린다."""
+        if not self.ros.nav_busy():
+            # 이미 끝났거나 세워진 미션을 지우는 것도 '중단' 이다. 화면의
+            # 중단 버튼이 상태에 따라 다른 오류를 뱉으면 조작자만 헷갈린다.
+            status = self.ros.nav_clear()
+            return {"mission": status, "message": "진행 중인 미션이 없습니다."}
+        try:
+            status = self.ros.nav_cancel(keep=False)
+        except NavRejected as error:
+            raise ApiError(409, str(error)) from error
+        # 여기서 nav_clear() 로 지우지 않는다. 결과 콜백이 아직 안 왔을 수 있고
+        # (nav_cancel 은 2초까지만 기다린다), 무엇보다 'canceled' 라는 사실이
+        # 화면에 한 번은 보여야 한다. 다음 목표를 보내면 그때 덮인다.
+        self._log("warn", "자율주행 미션 중단")
+        return {"mission": status, "message": "미션을 중단했습니다."}
 
     # ── 작업 (subprocess) ───────────────────────────────────────────────
     def job_pcd2pgm(self, request):
