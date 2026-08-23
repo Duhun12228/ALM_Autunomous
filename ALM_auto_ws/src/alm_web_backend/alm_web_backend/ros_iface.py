@@ -306,7 +306,10 @@ class RosInterface(Node):
     # ── command_manager 속도 한계 ───────────────────────────────────────
     LIMIT_KEYS = ("max_linear_x", "min_linear_x", "max_linear_y", "max_angular_z",
                   "cmd_timeout_sec", "estop_latch",
-                  "auto_crab_enabled")
+                  # 조향 슬루 제한은 화면의 '안전 인터록' 패널이 읽는다.
+                  # 예전에는 그 자리에 '주행 감독 timeout 1.0초' 라는, 어디에도
+                  # 없는 항목이 적혀 있었다.
+                  "max_steer_rate_deg_s", "auto_crab_enabled")
 
     def limits(self, max_age=30.0):
         """command_manager 의 실제 파라미터를 읽는다.

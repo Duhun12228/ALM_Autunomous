@@ -226,13 +226,36 @@
     return true;
   }
 
+  /**
+   * 지금 이 탭으로 갈 수 없는 이유. 갈 수 있으면 빈 문자열.
+   *
+   * 판정을 함수로 뽑은 이유는 **버튼 비활성과 같은 근거를 써야 하기 때문**이다.
+   * 탭은 막았는데 사이드바 버튼은 멀쩡하면 조작자는 무엇이 참인지 알 수 없다.
+   */
+  function tabLockReason(tab) {
+    if (state.systemState === 'MAPPING' && (tab === 'navigation' || tab === 'manual')) {
+      return tab === 'navigation'
+        ? 'SLAM 매핑 중에는 자율주행을 쓸 수 없습니다 — FAST-LIO 가 두 개 뜹니다.'
+        : '매핑 중 차량 이동은 외부 조이스틱으로만 수행합니다.';
+    }
+    // 주행 중 수동주행 탭은 막는다. 여기서 동작권을 가져가면 Nav2 가 목표를
+    // 쥔 채로 twist 만 끊기는 상태가 되고, 화면 어디에도 그게 안 보인다.
+    if (tab === 'manual' && state.nav?.state === 'RUNNING') {
+      return '자율주행 중입니다 — 수동으로 바꾸려면 먼저 주행을 중단하세요.';
+    }
+    return '';
+  }
+
   function switchTab(tab) {
     if (!TAB_META[tab]) return;
-    if (tab === 'navigation' && state.systemState === 'MAPPING') {
-      toast('탭이 잠겨 있습니다', 'SLAM 매핑 중에는 자율주행을 시작할 수 없습니다.', 'warning');
-    }
-    if (tab === 'manual' && state.systemState === 'MAPPING') {
-      toast('웹 수동주행 잠금', '매핑 중 차량 이동은 외부 조이스틱으로만 수행합니다.', 'warning');
+    // ⚠ 예전에는 토스트만 띄우고 **그대로 전환했다.** '잠겨 있습니다' 라고
+    //   말해놓고 안 잠근 것이라, 조작자는 잠긴 줄 알면서 그 탭에서 버튼을
+    //   누를 수 있었다. 명령 경로가 실경로가 된 뒤로는 그게 그냥 위험하다.
+    //   막을 거면 막고, 못 막을 거면 말을 하지 말아야 한다.
+    const blocked = tabLockReason(tab);
+    if (blocked) {
+      toast('탭이 잠겨 있습니다', blocked, 'warning');
+      return;
     }
     state.tab = tab;
     $$('.tab-panel').forEach((panel) => panel.classList.toggle('active', panel.id === `tab-${tab}`));
@@ -261,7 +284,7 @@
     $('#safetyTitle').textContent = state.estop ? 'E-STOP 활성화' : '안전 계통 정상';
     $('#safetySub').textContent = state.estop
       ? '속도 명령 차단 · Nav2 목표 취소 · MCU 정지 지령 유지'
-      : 'E-STOP 해제 · 감독 하트비트 정상 · 활성 fault 없음';
+      : 'E-STOP 해제 · 명령 타임아웃 감시 중 · 활성 fault 없음';
     $('#monEstop').textContent = state.estop ? '활성' : '해제';
     $('#monEstop').className = state.estop ? 'text-danger' : 'text-ok';
 
@@ -2056,7 +2079,35 @@
     if (typeof next?.cmd_timeout_sec === 'number') {
       $('#limitCmdTimeout').textContent = `${next.cmd_timeout_sec.toFixed(2)} s`;
     }
+    if (typeof next?.max_steer_rate_deg_s === 'number') {
+      const node = $('#monSteerRate');
+      if (node) node.textContent = `${next.max_steer_rate_deg_s.toFixed(0)} °/s`;
+    }
+    // crab 가용 여부는 command_manager 의 auto_crab_enabled 가 정한다.
+    // 예전에는 화면에 '비활성' 이 고정 문구로 박혀 있어서, 로봇 쪽에서 켜도
+    // 화면은 계속 못 쓴다고 말했다.
+    if (typeof next?.auto_crab_enabled === 'boolean') {
+      applyCrabAvailability(next.auto_crab_enabled);
+    }
     renderManual();
+  }
+
+  /** crab(게걸음) 버튼을 파라미터에 맞춰 열고 닫는다. */
+  function applyCrabAvailability(enabled) {
+    state.crabEnabled = enabled;
+    $$('[data-mode="crab"], [data-command="crab_left"], [data-command="crab_right"]')
+      .forEach((node) => {
+        node.disabled = !enabled;
+        node.title = enabled ? ''
+          : 'command_manager 의 auto_crab_enabled 가 false 입니다 '
+            + '(측위 안정성을 위해 기본 비활성)';
+      });
+    const note = $('#crabNote');
+    if (note) {
+      note.textContent = enabled
+        ? '크랩 사용 가능'
+        : '크랩 비활성 — auto_crab_enabled=false';
+    }
   }
 
   /**
@@ -2457,7 +2508,7 @@
       state.logs = [
         { time: nowTime(), level: 'INFO', node: 'alm_web_backend', text: 'Backend ready. Restored 4 managed processes.' },
         { time: nowTime(), level: 'INFO', node: 'foxglove_bridge', text: 'WebSocket connected with topic allowlist.' },
-        { time: nowTime(), level: 'INFO', node: 'safety_supervisor', text: 'Safety heartbeat armed at 5 Hz.' },
+        { time: nowTime(), level: 'INFO', node: 'command_manager', text: '안전 게이팅 활성 (cmd_timeout 0.5 s · E-STOP 래치).' },
         { time: nowTime(), level: 'WARN', node: 'lidar_health', text: 'Device status packet parser unavailable; basic health metrics only.' },
       ];
       for (let i = 0; i < 50; i += 1) state.chart.push({ cpu: 28 + Math.random() * 9, gpu: 21 + Math.random() * 10, ram: 48 + Math.random() * 5 });

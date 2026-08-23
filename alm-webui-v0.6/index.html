@@ -215,7 +215,7 @@
     <span class="safety-symbol">✓</span>
     <div>
       <strong id="safetyTitle">안전 계통 정상</strong>
-      <small id="safetySub">E-STOP 해제 · 감독 하트비트 정상 · 활성 fault 없음</small>
+      <small id="safetySub">E-STOP 해제 · 명령 타임아웃 감시 중 · 활성 fault 없음</small>
     </div>
   </div>
   <div class="safety-actions">
@@ -699,18 +699,17 @@
       <div class="col-head"><span class="lbl">안전 인터록</span><span class="tag ok">ARMED</span></div>
       <div class="interlocks">
         <div class="lock"><i class="status-dot ok"></i><div class="lk"><strong>E-STOP 래치</strong><small>마지막 작동 없음</small></div><em id="monEstop" class="text-ok">해제</em></div>
-        <div class="lock"><i class="status-dot ok"></i><div class="lk"><strong>제어 하트비트</strong><small>freshness 24 ms</small></div><em>5 Hz</em></div>
         <div class="lock"><i class="status-dot ok"></i><div class="lk"><strong>명령 타임아웃</strong><small>0.5초 초과 시 정지</small></div><em>활성</em></div>
         <div class="lock"><i class="status-dot ok"></i><div class="lk"><strong>MCU fault stop</strong><small>활성 fault 없음</small></div><em>활성</em></div>
         <div class="lock"><i class="status-dot ok"></i><div class="lk"><strong>Odom stale stop</strong><small>/Odometry 10 Hz</small></div><em>활성</em></div>
-        <div class="lock"><i class="status-dot ok"></i><div class="lk"><strong>주행 감독</strong><small>timeout 1.0초</small></div><em>활성</em></div>
+        <div class="lock"><i class="status-dot ok"></i><div class="lk"><strong>조향 슬루 제한</strong><small>명령 변화율 상한</small></div><em id="monSteerRate">—</em></div>
       </div>
     </section>
 
     <section>
       <div class="col-head"><span class="lbl">실행 프로세스</span><button class="text-button" id="refreshProcesses">새로고침</button></div>
       <div class="proc"><i class="status-dot ok"></i><div class="pk"><strong>alm_web_backend</strong><small>pid 2841 · 02:14:33</small></div><em>running</em></div>
-      <div class="proc"><i class="status-dot ok"></i><div class="pk"><strong>alm_safety_supervisor</strong><small>pid 2844 · 02:14:31</small></div><em>running</em></div>
+      <div class="proc"><i class="status-dot ok"></i><div class="pk"><strong>command_manager</strong><small>pid 2844 · 02:14:31</small></div><em>running</em></div>
       <div class="proc"><i class="status-dot ok"></i><div class="pk"><strong>foxglove_bridge</strong><small>pid 2860 · 02:14:26</small></div><em>running</em></div>
       <div class="proc"><i class="status-dot ok"></i><div class="pk"><strong>livox_udp_pointcloud2</strong><small>pid 2912 · 02:13:58</small></div><em>running</em></div>
     </section>
