@@ -69,12 +69,33 @@
     locLogOffset: 0,
     locLogTimer: null,
     waypoints: [],
+    // 목표 헤딩 드래그 중의 임시 상태 {from, to}. 안 끌고 있으면 null.
+    goalDrag: null,
     addWaypoint: false,
     manualPose: false,
     mapScale: 1,
-    nav: { state: 'IDLE', progress: 0, current: 0, distance: 0, eta: 0, timer: null, mode: 'auto' },
+    // nav 는 /api/navigation 의 캐시다 (자율주행 절 도입부 참조).
+    //   serverState  서버가 준 원본 상태 (idle/pending/active/paused/...)
+    //   state        화면 라벨 (IDLE/RUNNING/PAUSED/COMPLETED/FAILED)
+    //   distance0    단일 목표의 진척률 분모. 첫 피드백의 남은거리로 잡는다
+    //   mode         조작자가 고른 요청 모드. 실제 모드는 state.driveMode
+    nav: {
+      state: 'IDLE', serverState: '', kind: '', progress: 0,
+      current: 0, total: 0, distance: null, distance0: null, eta: null,
+      estimate: null, recoveries: 0, message: '',
+      stackRunning: false, stackExternal: false,
+      ready: false, actionReady: false, tfReady: false,
+      pollTimer: null, mode: 'auto',
+    },
     alarms: [],
-    manual: { enabled: false, mode: 'normal', multiplier: 0.5, command: null, timer: null, cmd: { x: 0, y: 0, z: 0 } },
+    // 수동주행은 rpm/조향각 직접 조작이다 (twist 아님 — 해당 절 도입부 참조).
+    //   rpm/steer   지금 보내고 있는 명령
+    //   actualRpm   /mcu/command 가 실제로 낸 값 (null = 아직 모름)
+    //   heldKeys    키보드 데드맨. 마지막 키를 떼야 멈춘다
+    manual: {
+      enabled: false, mode: 'normal', multiplier: 0.5, command: null,
+      rpm: 0, steer: 0, actualRpm: null, streamTimer: null, heldKeys: new Set(),
+    },
     metrics: { cpu: 34, ram: 52, gpu: 28, temp: 45.2, battery: 85, power: 8.7 },
     chart: [],
   };
@@ -973,17 +994,47 @@
     return { x: (x - 450) * 0.02, y: (310 - y) * 0.02 };
   }
 
+  /** 지도 좌표(m) → SVG 좌표. pixelToMap 의 역변환. */
+  function mapToSvg(x, y) {
+    const t = window.ALM_MAP_TRANSFORM;
+    if (t) return { x: t.offsetX + x * t.scale, y: t.offsetY - y * t.scale };
+    return { x: 450 + x / 0.02, y: 310 - y / 0.02 };
+  }
+
+  // 이보다 짧게 끌면 '방향 지정 없음'으로 본다 [SVG 단위].
+  // 손이 떨려서 2~3 단위 움직이는 것을 헤딩으로 읽으면, 클릭할 때마다
+  // 무작위 방향이 박힌다 — yaw_goal_tolerance 가 11.5° 라 그건 그대로 제약이 된다.
+  const GOAL_DRAG_MIN = 8;
+
   function renderWaypoints() {
     $('#waypointCount').textContent = state.waypoints.length;
     $('#waypointEmpty').classList.toggle('hidden', state.waypoints.length > 0);
     $('#waypointList').innerHTML = state.waypoints.map((point, index) => `
-      <div class="waypoint-item" draggable="true" data-id="${esc(point.id)}"><span class="waypoint-number">${index + 1}</span><div><strong>${esc(point.label)}</strong><small>x ${point.x.toFixed(2)} · y ${point.y.toFixed(2)} · yaw ${esc(point.yaw)}°</small></div><button data-remove-waypoint="${esc(point.id)}">×</button></div>`).join('');
+      <div class="waypoint-item" draggable="true" data-id="${esc(point.id)}"><span class="waypoint-number">${index + 1}</span><div><strong>${esc(point.label)}</strong><small>x ${point.x.toFixed(2)} · y ${point.y.toFixed(2)} · yaw ${(Number(point.yaw) || 0).toFixed(0)}°</small></div><button data-remove-waypoint="${esc(point.id)}">×</button></div>`).join('');
     $$('[data-remove-waypoint]').forEach((button) => button.addEventListener('click', () => {
       state.waypoints = state.waypoints.filter((point) => String(point.id) !== button.dataset.removeWaypoint);
       renderWaypoints();
     }));
-    $('#waypointLayer').innerHTML = state.waypoints.map((point, index) => `
-      <g transform="translate(${Number(point.px) || 0} ${Number(point.py) || 0})"><circle r="17" fill="#2f6fff" stroke="#fff" stroke-width="5"/><text y="4" text-anchor="middle" fill="#fff" font-size="11" font-weight="800">${index + 1}</text><path d="M0-27L5-19H-5Z" fill="#2f6fff"/></g>`).join('');
+
+    // 위치는 **매번 지도 좌표에서 다시 계산한다.** 예전에는 클릭 순간의 SVG
+    // 좌표(px/py)를 박아 뒀는데, 맵을 바꾸면 축척이 달라져 핀이 엉뚱한 곳에
+    // 남았다. 진실은 미터 좌표이고 화면 좌표는 그때그때 파생값이다.
+    //
+    // 핀 자체는 로봇 마커와 달리 **축척을 따라가지 않는다.** 핀은 물리적
+    // 물체가 아니라 조작용 표식이라, 넓은 맵에서 몇 픽셀로 줄어들면 누를 수가
+    // 없다. 지도 앱의 핀이 확대해도 같은 크기인 것과 같은 이유다.
+    $('#waypointLayer').innerHTML = state.waypoints.map((point, index) => {
+      const at = mapToSvg(point.x, point.y);
+      // SVG rotate 는 시계방향, ROS yaw 는 반시계방향
+      const spin = (-(Number(point.yaw) || 0)).toFixed(1);
+      return `<g transform="translate(${at.x.toFixed(1)} ${at.y.toFixed(1)})">`
+        + `<g transform="rotate(${spin})">`
+        + `<path d="M16 0H30" stroke="#2f6fff" stroke-width="4" stroke-linecap="round"/>`
+        + `<path d="M28-7L41 0L28 7Z" fill="#2f6fff"/></g>`
+        + `<circle r="17" fill="#2f6fff" stroke="#fff" stroke-width="5"/>`
+        + `<text y="4" text-anchor="middle" fill="#fff" font-size="11" font-weight="800">${index + 1}</text>`
+        + `</g>`;
+    }).join('');
   }
 
   function toggleWaypointMode() {
@@ -991,24 +1042,107 @@
     state.addWaypoint = !state.addWaypoint;
     state.manualPose = false;
     $('#addWaypointMode').classList.toggle('active', state.addWaypoint);
-    $('#mapModeHint').textContent = state.addWaypoint ? '맵을 클릭해 웨이포인트를 추가하세요.' : '맵을 탐색하거나 웨이포인트를 추가하세요.';
+    $('#mapModeHint').textContent = state.addWaypoint
+      ? '맵을 클릭해 웨이포인트를 추가하세요. 누른 채 끌면 그 방향이 목표 헤딩이 됩니다.'
+      : '맵을 탐색하거나 웨이포인트를 추가하세요.';
+  }
+
+  /* ── 목표 헤딩 드래그 ─────────────────────────────────────────────────
+   *
+   * RViz 의 2D Goal Pose 와 같은 조작이다: 누른 자리가 위치, 끈 방향이 헤딩.
+   *
+   * 헤딩을 굳이 지정하게 하는 이유는 Nav2 가 그것을 **강제하기 때문**이다.
+   * nav2.yaml 의 yaw_goal_tolerance 는 0.20 rad(11.5°)이고, 경로의 마지막
+   * pose 가 목표 yaw 를 담은 채 MPPI 의 PathAlignCritic(가중치 최대)로 들어간다.
+   * 즉 헤딩을 안 주면 '아무 방향이나'가 아니라 **0° 를 요구한 것**이 된다.
+   * 그러니 조작자가 그 값을 볼 수 있어야 하고, 지정할 수 있어야 한다.
+   *
+   * ⚠ 자세 지정 목표는 이 플랫폼의 알려진 약점이다(docs/control_pipeline.md
+   *   §12.5.2). R_min 1.643 m 원호로만 탐색하므로 '가까운 거리에서 큰 자세변화'
+   *   에는 해가 없어 계획이 실패한다. 헤딩을 로봇의 접근 방향과 크게 어긋나게
+   *   찍으면 그 실패를 만들 수 있다 — 아래 커밋 시점에 각도를 안내한다.
+   */
+  function goalDragPoint(event) {
+    const point = svgPoint(event);
+    return { svg: point, map: pixelToMap(point.x, point.y) };
+  }
+
+  function beginGoalDrag(event) {
+    if (!state.addWaypoint) return;
+    if (!canOperate()) return;
+    const at = goalDragPoint(event);
+    state.goalDrag = { from: at, to: at };
+    // 포인터를 캡처해 두면 지도 밖으로 끌고 나가도 이벤트가 계속 온다.
+    try { event.currentTarget.setPointerCapture(event.pointerId); } catch (error) { /* 구형 브라우저 */ }
+    event.preventDefault();
+  }
+
+  function updateGoalDrag(event) {
+    if (!state.goalDrag) return;
+    state.goalDrag.to = goalDragPoint(event);
+    drawGoalPreview(state.goalDrag);
+  }
+
+  function drawGoalPreview(drag) {
+    const layer = $('#goalPreviewLayer');
+    if (!layer) return;
+    const from = drag.from.svg;
+    const to = drag.to.svg;
+    const length = Math.hypot(to.x - from.x, to.y - from.y);
+    if (length < GOAL_DRAG_MIN) {
+      layer.innerHTML = `<circle cx="${from.x.toFixed(1)}" cy="${from.y.toFixed(1)}" `
+        + `r="6" fill="#4ADE9B"/>`;
+      return;
+    }
+    // 미리보기 각도는 SVG 좌표계에서 그대로 잰다(그리기용). 실제로 저장하는
+    // yaw 는 아래에서 **지도 좌표로** 다시 계산한다 — y 축 방향이 반대라
+    // 화면 각도를 그대로 쓰면 위아래가 뒤집힌다.
+    const degrees = Math.atan2(to.y - from.y, to.x - from.x) * 180 / Math.PI;
+    const shaft = Math.max(0, length - 13);
+    layer.innerHTML = `<g transform="translate(${from.x.toFixed(1)} ${from.y.toFixed(1)}) `
+      + `rotate(${degrees.toFixed(1)})">`
+      + `<path d="M0 0H${shaft.toFixed(1)}" stroke="#4ADE9B" stroke-width="4" stroke-linecap="round"/>`
+      + `<path d="M${(length - 15).toFixed(1)}-8L${length.toFixed(1)} 0L${(length - 15).toFixed(1)} 8Z" fill="#4ADE9B"/>`
+      + `</g>`
+      + `<circle cx="${from.x.toFixed(1)}" cy="${from.y.toFixed(1)}" r="6" fill="#4ADE9B"/>`;
+  }
+
+  function endGoalDrag(event) {
+    const drag = state.goalDrag;
+    if (!drag) return;
+    state.goalDrag = null;
+    $('#goalPreviewLayer').innerHTML = '';
+    try { event.currentTarget.releasePointerCapture(event.pointerId); } catch (error) { /* 무시 */ }
+
+    const to = goalDragPoint(event);
+    const from = drag.from;
+    const pulled = Math.hypot(to.svg.x - from.svg.x, to.svg.y - from.svg.y);
+    // yaw 는 **지도 좌표로** 잰다. 화면은 y 가 아래로 증가하므로 여기서 재야
+    // ROS 규약(반시계 양수)과 맞는다.
+    const dragged = pulled >= GOAL_DRAG_MIN;
+    const yaw = dragged
+      ? Math.atan2(to.map.y - from.map.y, to.map.x - from.map.x) * 180 / Math.PI
+      : 0;
+
+    state.waypoints.push({
+      id: `${Date.now()}-${Math.random()}`,
+      label: `Waypoint ${state.waypoints.length + 1}`,
+      x: from.map.x, y: from.map.y, yaw: Number(yaw.toFixed(1)),
+      tolerance: Number($('#defaultTolerance').value),
+    });
+    renderWaypoints();
+    renderNavigation();          // 목표가 생기면 '주행 시작' 이 열린다
+    toast('웨이포인트를 추가했습니다',
+      `x ${from.map.x.toFixed(2)} · y ${from.map.y.toFixed(2)} · yaw ${yaw.toFixed(0)}°`
+      + (dragged ? '' : ' (끌면 헤딩을 지정할 수 있습니다)'),
+      'success');
   }
 
   function mapClick(event) {
+    // 웨이포인트 추가는 포인터 드래그 흐름이 담당한다 (beginGoalDrag).
+    // 여기서 또 처리하면 pointerup 뒤에 오는 click 이 같은 점을 한 번 더 넣는다.
+    if (state.addWaypoint) return;
     const point = svgPoint(event);
-    if (state.addWaypoint) {
-      const map = pixelToMap(point.x, point.y);
-      state.waypoints.push({
-        id: `${Date.now()}-${Math.random()}`,
-        label: `Waypoint ${state.waypoints.length + 1}`,
-        x: map.x, y: map.y, yaw: 0,
-        px: point.x, py: point.y,
-        tolerance: Number($('#defaultTolerance').value),
-      });
-      renderWaypoints();
-      toast('웨이포인트를 추가했습니다', `x ${map.x.toFixed(2)} · y ${map.y.toFixed(2)}`, 'success');
-      return;
-    }
     if (state.manualPose) {
       // 라이브에서는 여기 올 수 없다 (manualInitialPose 가 막는다). 목업 모드
       // 데모용 경로로만 남긴다 — 라이브 상태를 가짜 pose 로 덮으면 안 된다.
@@ -2183,7 +2317,17 @@
     $$('.viewport-toolbar .tool').forEach((button) => button.addEventListener('click', () => button.classList.toggle('active')));
 
     $('#addWaypointMode').addEventListener('click', toggleWaypointMode);
+    // 웨이포인트는 '누른 자리 = 위치, 끈 방향 = 헤딩' 으로 만든다 (RViz 2D Goal Pose).
+    // click 은 manualPose 목업 경로만 남는다 — mapClick 이 addWaypoint 를 건너뛴다.
     $('#navigationMap').addEventListener('click', mapClick);
+    $('#navigationMap').addEventListener('pointerdown', beginGoalDrag);
+    $('#navigationMap').addEventListener('pointermove', updateGoalDrag);
+    $('#navigationMap').addEventListener('pointerup', endGoalDrag);
+    // 포인터가 취소되면(다른 창으로 전환, 제스처 가로채기) 미리보기가 남지 않게 한다
+    $('#navigationMap').addEventListener('pointercancel', () => {
+      state.goalDrag = null;
+      $('#goalPreviewLayer').innerHTML = '';
+    });
     $('#navigationMap').addEventListener('mousemove', (event) => {
       const point = svgPoint(event); const map = pixelToMap(point.x, point.y);
       $('#mapCoordinates').textContent = `x ${map.x.toFixed(2)} · y ${map.y.toFixed(2)}`;
@@ -2344,6 +2488,10 @@
     esc,
     renderGlobal, renderMetrics, renderManual, renderLocalization,
     renderNavigation, renderAlarms, renderLogs, drawSystemChart,
+    // 축척이 바뀌면 핀 위치를 다시 계산해야 한다 (핀은 미터로 저장돼 있다)
+    renderWaypoints,
+    // 수동주행 '실제 rpm' 은 /mcu/command 에서 온다 (ingest 가 넣고 다시 그린다)
+    updateManualTelemetry,
     // /alm/map_inventory 가 이미 만들어진 자산의 단계를 done 으로 접을 때 쓴다
     renderMappingSteps, renderMapOptions,
     // 서버가 본 slam 프로세스 상태 변화 (다른 경로로 시작·종료된 매핑)

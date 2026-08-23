@@ -16,6 +16,12 @@ const VIEW_H = 620;
 // nav_msgs/OccupancyGrid 의 data 는 -1(미관측) 또는 0~100(점유 확률)
 const UNKNOWN = -1;
 
+// 로봇 마커 배율 [SVG단위/m]. robotScale() 주석 참조.
+//   기본값 : /map 이 오기 전에 쓰는 자리표시값 (index.html 의 scale 과 같은 값)
+//   하한   : 차체 1.37 m 가 최소 14 SVG단위로 보이도록 (1.37 x 10 ≈ 14)
+const DEFAULT_ROBOT_PX_PER_M = 50;
+const MIN_ROBOT_PX_PER_M = 10;
+
 export class Map2D {
   constructor() {
     this.svg = document.querySelector('#navigationMap');
@@ -100,6 +106,22 @@ export class Map2D {
     };
   }
 
+  /**
+   * 로봇 마커의 화면 배율 [SVG단위/m].
+   *
+   * 마커는 index.html 에 **미터로** 그려져 있으므로(footprint 실측값), 여기서
+   * px/m 를 그대로 곱하면 화면상 크기가 실제 차체와 일치한다. 예전에는 마커가
+   * 픽셀로 그려져 있어서, 맵이 바뀌어 축척이 달라지면 차가 실제보다 2배 넘게
+   * 커 보였다 — 좁은 통로를 지날 수 있는지 눈으로 가늠할 수 없었다.
+   *
+   * 하한을 두는 이유: 아주 넓은 맵에서는 px/m 가 작아져 차가 몇 픽셀로 뭉개진다.
+   * 그때는 크기의 정확성보다 '어디 있는지 보이는 것'이 우선이다.
+   */
+  robotScale() {
+    if (!this.transform) return DEFAULT_ROBOT_PX_PER_M;
+    return Math.max(MIN_ROBOT_PX_PER_M, this.transform.scale);
+  }
+
   /** /Odometry 또는 TF 로 얻은 자세를 로봇 마커에 반영. */
   setRobotPose(pose) {
     if (!pose || !this.robotLayer) return;
@@ -107,8 +129,10 @@ export class Map2D {
     if (!point) return;
     // SVG rotate 는 시계방향, ROS yaw 는 반시계방향
     const degrees = -pose.yaw * 180 / Math.PI;
-    this.robotLayer.setAttribute(
-      'transform', `translate(${point.x.toFixed(2)} ${point.y.toFixed(2)}) rotate(${degrees.toFixed(1)})`);
+    const scale = this.robotScale();
+    this.robotLayer.setAttribute('transform',
+      `translate(${point.x.toFixed(2)} ${point.y.toFixed(2)}) `
+      + `rotate(${degrees.toFixed(1)}) scale(${scale.toFixed(3)})`);
   }
 
   onOdometry(msg) {

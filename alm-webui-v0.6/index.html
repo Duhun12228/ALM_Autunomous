@@ -371,10 +371,17 @@
           <g id="scanLayer" class="map-layer"></g>
           <g id="candidateLayer" class="map-layer hidden-layer"></g>
           <g id="waypointLayer" class="map-layer"></g>
-          <g id="robotLayer" class="map-layer" transform="translate(370 300) rotate(12)" filter="url(#robotShadow)">
-            <path d="M-24-15H18L30 0L18 15H-24Z" fill="#D8C4A0"/>
-            <rect x="-13" y="-9" width="21" height="18" rx="3" fill="#0A0C0F"/>
-            <path d="M15-5L24 0L15 5Z" fill="#6FA8FF"/>
+          <!-- 목표 헤딩 드래그 미리보기 (끌고 있는 동안만 채워진다) -->
+          <g id="goalPreviewLayer" class="map-layer"></g>
+          <!-- 로봇 마커는 **미터 단위로** 그린다. footprint 는 nav2.yaml 과 같은
+               값이다: x[-0.65, 0.72] y[±0.53] = 1.37 x 1.06 m.
+               화면 크기는 map2d.js 가 transform 의 scale(px/m)로 정한다 —
+               예전에는 픽셀로 그려 놓아서 맵이 바뀌면 차가 2배씩 커 보였다.
+               아래 scale(50)은 /map 이 오기 전의 자리표시값이다. -->
+          <g id="robotLayer" class="map-layer" transform="translate(370 300) rotate(12) scale(50)" filter="url(#robotShadow)">
+            <path d="M-0.65 -0.53H0.40L0.72 0L0.40 0.53H-0.65Z" fill="#D8C4A0"/>
+            <rect x="-0.36" y="-0.30" width="0.62" height="0.60" rx="0.08" fill="#0A0C0F"/>
+            <path d="M0.30 -0.15L0.58 0L0.30 0.15Z" fill="#6FA8FF"/>
           </g>
         </svg>
 
