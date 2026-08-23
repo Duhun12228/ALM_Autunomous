@@ -8,6 +8,7 @@ E-STOP 이 needs_lock=False 인 것은 의도적이다. 제어권을 남이 쥐�
 로봇을 못 세우면 그게 사고다.
 """
 
+import math
 import os
 import time
 
@@ -191,6 +192,21 @@ class Api:
         add("POST", "/api/navigation/resume", self.navigation_resume, needs_lock=True)
         add("POST", "/api/navigation/cancel", self.navigation_cancel, needs_lock=True)
 
+        add("GET", "/api/manual", self.manual_status)
+        add("POST", "/api/manual/acquire", self.manual_acquire, needs_lock=True)
+        add("POST", "/api/manual/release", self.manual_release, needs_lock=True)
+        add("POST", "/api/manual/command", self.manual_command, needs_lock=True)
+        add("POST", "/api/manual/stop", self.manual_stop, needs_lock=True)
+
+        add("GET", "/api/jobs", self.job_list)
+        add("GET", "/api/jobs/{id}", self.job_get)
+        add("GET", "/api/jobs/{id}/stream", self.job_stream)
+        add("POST", "/api/jobs/{id}/cancel", self.job_cancel, needs_lock=True)
+        add("POST", "/api/jobs/pcd2pgm", self.job_pcd2pgm, needs_lock=True)
+        add("POST", "/api/jobs/fpfh", self.job_fpfh, needs_lock=True)
+
+        add("POST", "/api/maps", self.map_create, needs_lock=True)
+        add("PUT", "/api/maps/active", self.map_set_active, needs_lock=True)
 
     # ── 상태 ────────────────────────────────────────────────────────────
     def health(self, _request):
@@ -684,6 +700,77 @@ class Api:
         # 화면에 한 번은 보여야 한다. 다음 목표를 보내면 그때 덮인다.
         self._log("warn", "자율주행 미션 중단")
         return {"mission": status, "message": "미션을 중단했습니다."}
+
+    # ── 수동주행 (직접 rpm/조향각) ──────────────────────────────────────
+    #
+    # 이 경로는 twist 를 쓰지 않는다. 이유와 안전 설계는 alm_msgs/DirectDrive.msg
+    # 와 command_manager._tick_direct 의 docstring 에 있다. 요약하면:
+    # 변환 상수가 미확정이라 twist 로는 무엇이 나가는지 모르고, 그 상수를
+    # **측정하려면** 이 경로가 필요하다.
+    #
+    # 여기(backend)는 얇게 유지한다. 속도/각도 한계, 슬루, E-STOP, 타임아웃은
+    # 전부 command_manager 가 본다 — 두 곳에서 자르면 어느 쪽이 잘랐는지
+    # 화면에서 알 수 없게 된다. 여기서 하는 것은 **형식 검증**뿐이다.
+    MANUAL_MODES = (0, 1, 3, 4)
+
+    def manual_status(self, _request):
+        status = self.ros.manual_status()
+        try:
+            limits = self.ros.limits()
+        except RosTimeout:
+            limits = {}
+        return {**status, "limits": limits}
+
+    def manual_acquire(self, _request):
+        """동작권을 web 으로 가져온다. 이때부터 직접명령이 통과한다."""
+        try:
+            result = self.ros.set_owner("web")
+        except RosTimeout as error:
+            raise ApiError(503, str(error)) from error
+        if not result["success"]:
+            raise ApiError(409, result["message"])
+        self._log("warn", "웹 수동주행 동작권 획득 — 직접 rpm/조향각 명령이 활성화됩니다")
+        self.ros.say("Manual control active", priority=2, key="manual")
+        return {**result, **self.ros.manual_status()}
+
+    def manual_release(self, _request):
+        # 스트림을 먼저 끊고 동작권을 넘긴다. 순서가 반대면 자율로 넘어간
+        # 직후에 남은 직접명령이 한 틱 더 나갈 수 있다.
+        self.ros.manual_release()
+        try:
+            result = self.ros.set_owner("auto")
+        except RosTimeout as error:
+            raise ApiError(503, str(error)) from error
+        self._log("info", "웹 수동주행 동작권 반납 -> auto")
+        self.ros.say("Manual control released", key="manual")
+        return {**result, **self.ros.manual_status()}
+
+    def manual_command(self, request):
+        """rpm + 조향각 + 모드. 브라우저가 이걸 주기적으로 보내는 것이 데드맨이다."""
+        owner = self.ros.owner()
+        if not owner.startswith("web"):
+            raise ApiError(409,
+                           f"동작권이 web 이 아닙니다 (현재 '{owner or '알 수 없음'}'). "
+                           f"'수동 조작 시작' 을 먼저 누르세요.")
+        mode_id = request.int_field("mode_id", 1)
+        if mode_id not in self.MANUAL_MODES:
+            raise ApiError(400, f"mode_id 는 {self.MANUAL_MODES} 중 하나여야 합니다.")
+        speed_rpm = request.float_field("speed_rpm", 0.0)
+        steer_deg = request.float_field("steer_deg", 0.0)
+        for name, value in (("speed_rpm", speed_rpm), ("steer_deg", steer_deg)):
+            if not math.isfinite(value):
+                raise ApiError(400, f"'{name}' 이 유한한 값이 아닙니다.")
+        # 여기서 한계로 자르지 않는다 — command_manager 가 자른다(위 주석).
+        # 다만 터무니없는 값은 형식 오류로 본다.
+        if abs(speed_rpm) > 100000 or abs(steer_deg) > 360:
+            raise ApiError(400, "값의 자릿수가 비정상입니다 — 입력을 확인하세요.")
+        return self.ros.manual_command(speed_rpm, steer_deg, mode_id)
+
+    def manual_stop(self, _request):
+        """구동만 세운다. 동작권은 유지 — 다시 밀면 바로 간다."""
+        status = self.ros.manual_stop()
+        self._log("info", "웹 수동주행 정지 (동작권 유지)")
+        return status
 
     # ── 작업 (subprocess) ───────────────────────────────────────────────
     def job_pcd2pgm(self, request):

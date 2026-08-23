@@ -14,6 +14,7 @@ find_package(std_msgs REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/McuCommand.msg"
+  "msg/DirectDrive.msg"
   "msg/McuState.msg"
   "msg/JetsonStats.msg"
   "msg/MapAsset.msg"

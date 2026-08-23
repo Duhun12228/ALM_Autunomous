@@ -564,11 +564,19 @@
         <button class="drive-button reverse" data-command="reverse">↓<small>후진</small></button>
       </div>
 
+      <!-- 수동주행은 twist(m/s, rad/s)가 아니라 **rpm 과 각도를 직접** 낸다.
+           twist -> rpm 변환이 base_control.yaml 의 ##CONFIRM## 상수에 걸려 있어서,
+           m/s 로 명령하면 실제로 몇 m/s 가 나가는지 아무도 모른다.
+           그 상수를 측정하는 것이 이 화면의 용도이기도 하다. -->
       <div class="twist-readout">
-        <div><span>선속도 X</span><strong class="mono" id="cmdX">0.00</strong><small>m/s</small><i><b id="cmdXBar"></b></i></div>
-        <div><span>선속도 Y</span><strong class="mono" id="cmdY">0.00</strong><small>m/s</small><i><b id="cmdYBar"></b></i></div>
-        <div><span>각속도 Z</span><strong class="mono" id="cmdZ">0.00</strong><small>rad/s</small><i><b id="cmdZBar"></b></i></div>
+        <div><span>구동 명령</span><strong class="mono" id="cmdRpm">0</strong><small>rpm</small><i><b id="cmdRpmBar"></b></i></div>
+        <div><span>조향 명령</span><strong class="mono" id="cmdSteer">0.0</strong><small>°</small><i><b id="cmdSteerBar"></b></i></div>
+        <!-- 요청과 실제가 갈릴 수 있다: 모드 전환 dwell 동안 command_manager 가
+             구동을 0 으로 잡고 조향축이 자리 잡기를 기다린다. 그 사실이 화면에
+             안 보이면 조작자는 '밀었는데 안 간다'로만 겪는다. -->
+        <div><span>MCU 실제</span><strong class="mono" id="actualRpm">0</strong><small>rpm</small><i><b id="actualRpmBar"></b></i></div>
       </div>
+      <div class="notice-box warning hidden" id="manualDwellNotice"></div>
     </div>
 
     <div class="manual-lock-overlay" id="manualLockOverlay">

@@ -224,36 +224,47 @@ function start() {
  * 아직 mock 인 조작 계열에 배지를 붙인다.
  *
  * 매핑 5개와 E-STOP 은 이제 실제로 로봇에 나간다(Phase 3). 측위(자동 탐색·
- * 재측위)도 Phase 4-1 에서 붙었다. 여기 남은 것들은 여전히 화면 안에서만 도는
- * 것들이다 — 실데이터 패널과 섞여 있으면 조작자가 "눌렀으니 로봇이 반응했겠지"로
- * 오해하므로 배지를 유지한다.
+ * 재측위)는 Phase 4-1, 자율주행(주행 시작·일시정지·중단)은 Phase 4-2 에서
+ * 붙었다. 여기 남은 것들은 여전히 화면 안에서만 도는 것들이다 — 실데이터
+ * 패널과 섞여 있으면 조작자가 "눌렀으니 로봇이 반응했겠지"로 오해하므로
+ * 배지를 유지한다.
  *
  * ⚠ #manualInitialPose 는 '아직 안 붙였다'가 아니라 **붙일 대상이 없다.**
  *   이 브랜치의 teaser_fpfh_localizer 는 /initialpose 를 구독하지 않는다
  *   (구독하는 것은 쓰지 않는 icp_node 다). 전역 정합이라 초기 추정 자체가
  *   필요 없는 방식이므로, 배지를 유지하고 누르면 그렇게 말한다.
  *
- * ⚠ 수동주행(enterManual/exitManual)은 단순히 '아직 안 붙였다'가 아니다.
- *   base_control.yaml 의 4WIS 변환 상수 8개가 ##CONFIRM## 미확정이라, 지금
- *   twist 를 보내면 그대로 엉뚱한 rpm/조향각이 된다. 실차 확정 전에는 붙이면
- *   안 되는 순서다 (JETSON_INTEGRATION_PLAN.md §9 Phase 5).
+ * ⚠ 웨이포인트 세트 저장/불러오기는 **위험한 종류의 목업**이다. 불러오기가
+ *   맵과 무관한 고정 좌표 3개를 state.waypoints 에 넣는데, Phase 4-2 로 목표
+ *   전송이 실경로가 되면서 그게 그대로 로봇에 나갈 수 있게 됐다. 목업일 때는
+ *   무해했던 코드가 옆에서 경로가 열리자 함정이 된 것이다 — 배지가 아니라
+ *   비활성이 맞다. 서버에 세트 저장을 붙일 때 함께 푼다.
+ *
+ * ⚠ 수동주행은 Phase 5 에서 붙었다(2026-08-24). 단 **twist 가 아니라 rpm/조향각을
+ *   직접** 낸다 — 변환 상수 8개가 ##CONFIRM## 미확정이라 twist 로는 무엇이
+ *   나가는지 모르고, 그 상수를 측정하려면 이 경로가 필요했기 때문이다.
+ *   안전 게이팅(E-STOP·타임아웃·조향 슬루·모드 dwell)은 그대로 통과한다.
  */
 function markMockControls() {
   const mockSelectors = [
     ['#manualInitialPose', 'manual-pose'],
-    ['#startNavigation', 4], ['#pauseNavigation', 4], ['#cancelNavigation', 4],
-    ['#enterManual', 5], ['#exitManual', 5],
+    ['#saveWaypointSet', 'waypoint-set'], ['#loadWaypointSet', 'waypoint-set'],
   ];
   const TITLES = {
     'manual-pose': '연결 대상이 없습니다 — FPFH+TEASER++ 는 초기 추정 없이 전역에서 찾습니다',
-    4: '아직 목업입니다 — 자율주행 연동은 다음 단계입니다',
-    5: '아직 목업입니다 — 수동주행은 4WIS 변환 상수를 실차로 확정한 뒤에 붙입니다',
+    'waypoint-set': '아직 목업입니다 — 저장은 토스트만 띄우고, 불러오기는 맵과 무관한 '
+      + '고정 좌표를 넣습니다. 목표 전송이 실경로가 된 지금은 그대로 로봇에 나가므로 막아둡니다',
   };
+  // .is-mock 은 배지일 뿐 클릭을 막지 않는다. 눌러도 토스트만 뜨는 것들은
+  // 그걸로 충분하지만, 웨이포인트 세트는 **실제 명령 경로에 데이터를 넣으므로**
+  // 잠가야 한다 (위 주석 참조).
+  const BLOCKED = new Set(['waypoint-set']);
   for (const [selector, phase] of mockSelectors) {
     const node = document.querySelector(selector);
     if (!node) continue;
     node.classList.add('is-mock');
     node.title = TITLES[phase];
+    if (BLOCKED.has(phase)) node.disabled = true;
   }
 }
 

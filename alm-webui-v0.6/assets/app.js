@@ -2044,21 +2044,48 @@
       <div class="modal-body"><p class="modal-copy">차량 주변을 확인하고 외부 조이스틱이 중립인지 확인하세요. 버튼을 누르고 있는 동안에만 속도 명령이 전송됩니다.</p>
       <div class="safety-check-list"><div><i class="status-dot ok"></i><span>제어권</span><strong>보유</strong></div><div><i class="status-dot ok"></i><span>E-STOP</span><strong>해제</strong></div><div><i class="status-dot ok"></i><span>MCU fault</span><strong>없음</strong></div></div></div>
       <div class="modal-actions"><button class="secondary-button" data-close-modal>취소</button><button class="primary-button" id="confirmManual">모터 활성화</button></div>`);
-    $('#confirmManual').addEventListener('click', () => {
-      state.manual.enabled = true; state.systemState = 'MANUAL_CONTROL'; closeModal();
-      addLog('INFO', 'command_gateway', 'Manual control session armed. cmd_timeout=0.5s.');
-      renderManual(); renderGlobal();
-      toast('수동주행이 활성화되었습니다', '데드맨 버튼을 누르는 동안만 이동합니다.', 'success');
+    $('#confirmManual').addEventListener('click', async () => {
+      const api = requireCmd();
+      if (!api) return;
+      const button = $('#confirmManual');
+      setButtonBusy(button, true, '인계 중…');
+      try {
+        // cmd_arbiter 의 동작권을 web 으로 가져온다. 이때부터 직접 rpm/조향각
+        // 명령이 통과하고, /cmd_vel_mux 로는 0 twist 만 나간다.
+        const result = await api.acquireManual();
+        state.manual.enabled = true;
+        state.systemState = 'MANUAL_CONTROL';
+        closeModal();
+        addLog('WARN', 'cmd_arbiter', `동작권 -> ${result.active_owner} (직접 rpm/조향각)`);
+        renderManual(); renderGlobal();
+        toast('수동주행이 활성화되었습니다',
+          '버튼을 누르거나 W/A/S/D 를 누르고 있는 동안만 이동합니다. 스페이스 = E-STOP.',
+          'success');
+      } catch (error) {
+        toast('수동주행을 시작할 수 없습니다', error.message,
+          error.status === 409 ? 'warning' : 'error');
+      } finally {
+        setButtonBusy(button, false);
+      }
     });
   }
 
-  function exitManual() {
+  async function exitManual() {
     stopManualCommand();
+    state.manual.heldKeys.clear();
+    const api = cmd();
+    // 화면 상태는 **먼저** 내린다. 반납 요청이 실패해도 화면이 '조작 가능'으로
+    // 남아 있으면 안 된다 — 그 상태에서 누르면 409 만 받고 이유는 모른다.
     state.manual.enabled = false;
     if (state.systemState === 'MANUAL_CONTROL') state.systemState = 'IDLE';
-    addLog('INFO', 'command_gateway', 'Manual control session disarmed.');
     renderManual(); renderGlobal();
-    toast('수동주행을 종료했습니다', '모터 명령 출력을 비활성화했습니다.');
+    try {
+      const result = await api?.releaseManual();
+      addLog('INFO', 'cmd_arbiter', `동작권 반납 -> ${result?.active_owner ?? 'auto'}`);
+      toast('수동주행을 종료했습니다', '동작권을 자율로 반납했습니다.');
+    } catch (error) {
+      toast('동작권 반납 실패', `${error.message} — 로봇 쪽에서 확인하세요.`, 'error');
+    }
   }
 
   /**
@@ -2138,62 +2165,146 @@
     }
   }
 
-  function commandFor(name) {
-    const factor = state.manual.multiplier;
-    const mode = state.manual.mode;
-    if (name === 'stop') return { x: 0, y: 0, z: 0 };
-    const wz = limits.max_angular_z;
-    if (mode === 'spin') return { x: 0, y: 0, z: name === 'left' ? wz * factor : name === 'right' ? -wz * factor : 0 };
-    if (mode === 'normal' || mode === 'auto') {
-      if (name === 'forward') return { x: limits.max_linear_x * factor, y: 0, z: 0 };
-      if (name === 'reverse') return { x: limits.min_linear_x * factor, y: 0, z: 0 };
-      if (name === 'left') return { x: 0, y: 0, z: wz * factor };
-      if (name === 'right') return { x: 0, y: 0, z: -wz * factor };
+  /* ── 수동주행: rpm / 조향각 직접 조작 ────────────────────────────────
+   *
+   * 이 탭은 twist 를 쓰지 않는다. m/s 로 명령하면 실제로 몇 m/s 가 나가는지
+   * 아무도 모르기 때문이다 — 변환이 base_control.yaml 의 ##CONFIRM## 상수
+   * (wheel_radius_m, gear_ratio, ...)에 통째로 걸려 있고 그게 미확정이다.
+   * rpm 과 각도는 STM32 가 받는 단위 그대로라 변환이 없다.
+   *
+   * 데드맨은 **누르고 있는 동안만** 명령을 보내는 것이다. 두 겹으로 걸린다:
+   *   브라우저 -> 백엔드   갱신이 0.4 s 끊기면 백엔드가 스트림을 놓는다
+   *   백엔드   -> arbiter  토픽이 0.5 s 끊기면 cmd_arbiter 가 HELD 로 세운다
+   * 그래서 탭을 닫든 브라우저가 죽든 로봇은 선다.
+   */
+  const MANUAL_MODE_ID = { normal: 1, spin: 4, crab: 3 };
+  const MANUAL_STREAM_MS = 100;          // 10 Hz. 백엔드 유지시간(0.4 s)의 1/4
+
+  /** 지금 눌린 방향키가 뜻하는 (rpm, 조향각). */
+  function manualTargets(command) {
+    const manual = state.manual;
+    const factor = manual.multiplier;
+    const maxRpm = limits.max_rpm ?? 3000;
+    const maxSteer = limits.max_steer_deg ?? 30;
+    if (!command || command === 'stop') return { rpm: 0, steer: manual.steer };
+
+    // 제자리 회전/크랩은 STM32 가 고정 자세를 쓰므로 조향각을 우리가 안 정한다.
+    // 회전 방향은 rpm 의 부호로 표현된다 (uart_protocol.md v2).
+    if (manual.mode === 'spin') {
+      const rpm = maxRpm * factor * (command === 'left' ? 1 : command === 'right' ? -1 : 0);
+      return { rpm, steer: 0 };
     }
-    return { x: 0, y: 0, z: 0 };
+    if (manual.mode === 'crab') {
+      const rpm = maxRpm * factor * (command === 'forward' ? 1 : command === 'reverse' ? -1 : 0);
+      return { rpm, steer: 0 };
+    }
+    // normal: 전/후진은 rpm, 좌/우는 조향각. 둘은 **독립**이다 —
+    // twist 처럼 하나가 다른 하나를 정하지 않으므로 동시에 잡을 수 있다.
+    if (command === 'forward') return { rpm: maxRpm * factor, steer: manual.steer };
+    if (command === 'reverse') return { rpm: -maxRpm * factor, steer: manual.steer };
+    if (command === 'left') return { rpm: manual.rpm, steer: -maxSteer * factor };
+    if (command === 'right') return { rpm: manual.rpm, steer: maxSteer * factor };
+    return { rpm: 0, steer: manual.steer };
   }
 
   function startManualCommand(command) {
     if (!state.manual.enabled || state.estop || !state.hasControl) return;
-    stopManualCommand(false);
+    const api = cmd();
+    if (!api) return;
     state.manual.command = command;
-    state.manual.cmd = commandFor(command);
-    updateManualTelemetry();
-    state.manual.timer = setInterval(() => {
-      state.manual.cmd = commandFor(command);
+    const target = manualTargets(command);
+    state.manual.rpm = target.rpm;
+    state.manual.steer = target.steer;
+    if (command === 'stop') {
+      stopManualCommand();
+      api.manualStop().catch(() => {});
+      return;
+    }
+    if (state.manual.streamTimer) return;      // 이미 스트리밍 중 (다른 키 추가)
+    const send = async () => {
+      const now = manualTargets(state.manual.command);
+      state.manual.rpm = now.rpm;
+      state.manual.steer = now.steer;
       updateManualTelemetry();
-    }, 50);
+      try {
+        await api.manualCommand(now.rpm, now.steer,
+          MANUAL_MODE_ID[state.manual.mode] ?? 1);
+      } catch (error) {
+        // 스트리밍 중 실패는 조용히 멈춘다 — 토스트를 10 Hz 로 띄울 수는 없다.
+        stopManualCommand();
+        toast('수동 명령이 끊겼습니다', error.message, 'error');
+      }
+    };
+    send();
+    state.manual.streamTimer = setInterval(send, MANUAL_STREAM_MS);
+    updateManualTelemetry();
   }
 
   function stopManualCommand(render = true) {
-    clearInterval(state.manual.timer); state.manual.timer = null;
-    state.manual.command = null; state.manual.cmd = { x: 0, y: 0, z: 0 };
+    clearInterval(state.manual.streamTimer);
+    state.manual.streamTimer = null;
+    state.manual.command = null;
+    state.manual.rpm = 0;
+    // 조향각은 남긴다 — 손을 뗐다고 바퀴가 스스로 정면으로 돌아가면
+    // 그건 세우는 게 아니라 조타다 (cmd_arbiter._tick_web 과 같은 규약).
     if (render) updateManualTelemetry();
   }
 
+  /** 키보드 데드맨. pointer 전용이면 마우스가 죽었을 때 명령이 안 끊긴다. */
+  const MANUAL_KEYS = { w: 'forward', s: 'reverse', a: 'left', d: 'right' };
+  function onManualKeyDown(event) {
+    if (state.tab !== 'manual' || !state.manual.enabled) return;
+    if (event.repeat) return;
+    const key = String(event.key || '').toLowerCase();
+    if (key === ' ') { event.preventDefault(); estopFromKeyboard(); return; }
+    const command = MANUAL_KEYS[key];
+    if (!command) return;
+    event.preventDefault();
+    state.manual.heldKeys.add(key);
+    startManualCommand(command);
+  }
+
+  function onManualKeyUp(event) {
+    const key = String(event.key || '').toLowerCase();
+    if (!MANUAL_KEYS[key]) return;
+    state.manual.heldKeys.delete(key);
+    if (!state.manual.heldKeys.size) stopManualCommand();
+    else startManualCommand(MANUAL_KEYS[[...state.manual.heldKeys][0]]);
+  }
+
+  function estopFromKeyboard() {
+    stopManualCommand();
+    $('#estopButton')?.click();
+  }
+
+
   function updateManualTelemetry() {
-    const cmd = state.manual.cmd;
-    $('#cmdX').textContent = cmd.x.toFixed(2); $('#cmdY').textContent = cmd.y.toFixed(2); $('#cmdZ').textContent = cmd.z.toFixed(2);
-    $('#cmdXBar').style.width = `${Math.abs(cmd.x) / 0.45 * 100}%`;
-    $('#cmdYBar').style.width = `${Math.abs(cmd.y) / 0.3 * 100}%`;
-    $('#cmdZBar').style.width = `${Math.abs(cmd.z) / 0.8 * 100}%`;
-    const measuredX = cmd.x * (cmd.x ? 0.94 + Math.random() * 0.04 : 0);
-    const measuredZ = cmd.z * (cmd.z ? 0.92 + Math.random() * 0.06 : 0);
-    $('#measuredX').textContent = measuredX.toFixed(2); $('#measuredZ').textContent = measuredZ.toFixed(2);
-    $('#measuredXBar').style.width = `${Math.abs(measuredX) / 0.45 * 100}%`;
-    $('#measuredZBar').style.width = `${Math.abs(measuredZ) / 0.8 * 100}%`;
-    const wheel = measuredX || Math.abs(measuredZ) * 0.31;
-    ['speedFL','speedFR','speedRL','speedRR'].forEach((id, index) => {
-      const offset = wheel ? (index % 2 ? -0.006 : 0.006) : 0;
-      $(`#${id}`).textContent = (wheel + offset).toFixed(2);
-    });
-    const angle = cmd.z ? (cmd.z > 0 ? -32 : 32) : 0;
-    ['wheelFL','wheelFR','wheelRL','wheelRR'].forEach((id, index) => {
-      const sign = index < 2 ? 1 : -1;
-      $(`#${id}`).style.transform = `rotate(${angle * sign}deg)`;
-    });
-    $('#frontSteer').textContent = `${angle.toFixed(0)}°`;
-    $('#rearSteer').textContent = `${(-angle).toFixed(0)}°`;
+    const manual = state.manual;
+    const maxRpm = limits.max_rpm ?? 3000;
+    const maxSteer = limits.max_steer_deg ?? 30;
+    $('#cmdRpm').textContent = manual.rpm.toFixed(0);
+    $('#cmdSteer').textContent = manual.steer.toFixed(1);
+    $('#cmdRpmBar').style.width = `${clamp(Math.abs(manual.rpm) / maxRpm * 100, 0, 100)}%`;
+    $('#cmdSteerBar').style.width = `${clamp(Math.abs(manual.steer) / maxSteer * 100, 0, 100)}%`;
+    // 실제값은 /mcu/command 를 그대로 읽는다 (ingest 가 넣어준다).
+    // 지어내지 않는 것이 요점이다 — 예전에는 여기서 명령값에 Math.random() 을
+    // 곱해 "측정값" 을 만들었고, 로봇이 꺼져 있어도 바퀴 속도가 표시됐다.
+    const actual = manual.actualRpm;
+    $('#actualRpm').textContent = actual == null ? '—' : actual.toFixed(0);
+    $('#actualRpmBar').style.width =
+      `${actual == null ? 0 : clamp(Math.abs(actual) / maxRpm * 100, 0, 100)}%`;
+
+    // 요청은 있는데 실제가 0 이면 십중팔구 모드 전환 dwell 이다.
+    // 그 사실을 말해주지 않으면 조작자는 "밀었는데 안 간다" 로만 겪는다.
+    const stalled = Math.abs(manual.rpm) > 1 && actual != null && Math.abs(actual) < 1;
+    const notice = $('#manualDwellNotice');
+    if (notice) {
+      notice.classList.toggle('hidden', !stalled);
+      notice.textContent = stalled
+        ? '조향축이 자리 잡는 중입니다 — 모드 전환 dwell 동안 구동이 0 으로 유지됩니다. '
+        + '바퀴가 굴러가면서 조향축이 스윕하면 의도와 다른 방향으로 갑니다.'
+        : '';
+    }
   }
 
   function renderMetrics() {
@@ -2448,6 +2559,14 @@
       state.nav.mode = button.dataset.mode; $$('#navDriveModes button').forEach((item) => item.classList.toggle('active', item === button)); renderNavigation();
     }));
 
+    // 키보드 데드맨 (#14). pointer 전용이면 마우스가 죽었을 때 안 끊긴다.
+    window.addEventListener('keydown', onManualKeyDown);
+    window.addEventListener('keyup', onManualKeyUp);
+    // 창이 포커스를 잃으면 keyup 이 안 온다 — 키가 눌린 채로 남는다.
+    window.addEventListener('blur', () => {
+      state.manual.heldKeys.clear();
+      stopManualCommand();
+    });
     $('#enterManual').addEventListener('click', enterManual);
     $('#exitManual').addEventListener('click', exitManual);
     $$('#manualModeSelector button').forEach((button) => button.addEventListener('click', () => {
@@ -2464,7 +2583,6 @@
       button.addEventListener('pointercancel', () => stopManualCommand());
       button.addEventListener('pointerleave', (event) => { if (event.buttons) stopManualCommand(); });
     });
-    window.addEventListener('blur', () => stopManualCommand());
     document.addEventListener('visibilitychange', () => { if (document.hidden) stopManualCommand(); });
 
     $('#exportSnapshot').addEventListener('click', exportSnapshot);

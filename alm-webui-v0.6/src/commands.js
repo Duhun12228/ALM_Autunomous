@@ -248,6 +248,23 @@ export class Commands {
   resumeNavigation() { return this.request('POST', '/api/navigation/resume', {}); }
   cancelNavigation() { return this.request('POST', '/api/navigation/cancel', {}); }
 
+  // ── 수동주행 (직접 rpm/조향각) ──────────────────────────────────────
+  // twist 를 쓰지 않는다 — 변환 상수(##CONFIRM##)가 미확정이라 m/s 로는 무엇이
+  // 나가는지 모르고, 그 상수를 측정하려면 이 경로가 필요하다.
+  //
+  // command() 를 **주기적으로** 부르는 것이 데드맨이다. 멈추면 백엔드가
+  // 0.4 s 뒤 스트림을 끊고, cmd_arbiter 가 다시 0.5 s 뒤 HELD 로 세운다.
+  manualStatus() {
+    return this.request('GET', '/api/manual', undefined, { silent: true });
+  }
+  acquireManual() { return this.request('POST', '/api/manual/acquire', {}); }
+  releaseManual() { return this.request('POST', '/api/manual/release', {}); }
+  manualCommand(speed_rpm, steer_deg, mode_id) {
+    return this.request('POST', '/api/manual/command',
+      { speed_rpm, steer_deg, mode_id }, { silent: true });
+  }
+  manualStop() { return this.request('POST', '/api/manual/stop', {}); }
+
   createMap(name, label, notes) {
     return this.request('POST', '/api/maps', { name, label, notes });
   }

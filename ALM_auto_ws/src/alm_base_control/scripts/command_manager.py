@@ -43,7 +43,7 @@ from std_msgs.msg import Bool, String
 from nav_msgs.msg import Path
 from tf2_ros import Buffer, TransformListener
 
-from alm_msgs.msg import McuCommand, McuState
+from alm_msgs.msg import DirectDrive, McuCommand, McuState
 from alm_msgs.srv import ReleaseEstop
 
 import fourwis_encode
@@ -82,6 +82,18 @@ class CommandManager(Node):
                 ("estop_topic", "/emergency_stop"),
                 ("command_topic", "/mcu/command"),
                 ("mcu_state_topic", "/mcu/state"),
+                # 직접 구동 명령 (cmd_arbiter 가 web 소유일 때만 낸다).
+                # 이게 신선하면 twist 경로 전체를 건너뛴다 — 아래 _tick_direct.
+                ("direct_topic", "/direct_drive_mux"),
+                ("direct_timeout_sec", 0.5),
+                # 직접 rpm 의 가속 한계 [rpm/s]. twist 의 max_accel_x 에 해당한다.
+                # 0 이면 제한 없음(권장하지 않음 — 스텝 입력이 그대로 나간다).
+                ("direct_rpm_accel", 400.0),
+                # 감속은 가속보다 빨라야 한다. twist 경로가 soft_stop_decel(1.5)을
+                # max_accel_x(1.0)보다 크게 잡은 것과 같은 이유다 — 세우는 쪽이
+                # 늦으면 안 된다. 하트비트가 끊겨 cmd_arbiter 가 rpm 0 을 보낼 때
+                # 실제로 걸리는 값이 이것이다.
+                ("direct_rpm_decel", 600.0),
                 ("odom_topic", "/odometry/filtered"),
                 ("publish_rate_hz", 50.0),
                 ("default_drive_mode", "auto"),
@@ -273,6 +285,9 @@ class CommandManager(Node):
         _stop_rate = float(g("steer_rate_stopped_deg_s").value)
         self.steer_rate_stopped = _stop_rate if _stop_rate > 0.0 else self.steer_rate
         self.mode_dwell = max(0.0, float(g("mode_switch_dwell_sec").value))
+        self.direct_timeout = float(g("direct_timeout_sec").value)
+        self.direct_rpm_accel = max(0.0, float(g("direct_rpm_accel").value))
+        self.direct_rpm_decel = max(0.0, float(g("direct_rpm_decel").value))
         _align = float(g("startup_steer_align_sec").value)
         if _align > 0.0:
             self.startup_align = _align
@@ -296,6 +311,11 @@ class CommandManager(Node):
         # 상태
         self.cmd = Twist()
         self.last_cmd_sec = 0.0
+        # 직접 구동 (웹 수동주행). twist 와 **배타적**이다 — 아래 _tick 참조.
+        self.direct = DirectDrive()
+        self.last_direct_sec = 0.0
+        self.out_rpm = 0.0
+        self.last_direct_mode = None
         self.estop = False
         self.estop_latch = bool(g("estop_latch").value)
         self.estop_release_needs_clear = bool(g("estop_release_requires_clear_mcu").value)
@@ -313,7 +333,8 @@ class CommandManager(Node):
         # 조향 슬루 제한 상태. '지금까지 내보낸 조향 명령'이 곧 액추에이터의
         # 추정 위치다(슬루 제한을 액추에이터 실제 슬루율보다 낮게 잡는 한).
         # STM32 업링크가 없어 실측 조향각이 없으므로, 이 값이 유일한 조향 상태다.
-        self.out_steer_deg = 0.0
+        self.out_steer_deg = 0.0   # 마지막으로 명령한 조향각. twist/직접 경로가 공유한다
+                                   # (경로가 바뀌어도 슬루가 이어져야 하므로)
         # /mcu/state 수신 감시 (업링크 미구현 경고용)
         self.last_state_sec = 0.0
         self.have_state = False
@@ -370,6 +391,10 @@ class CommandManager(Node):
         self.create_subscription(Bool, g("estop_topic").value, self._on_estop, 10)
         self.create_subscription(McuState, g("mcu_state_topic").value, self._on_mcu_state, 10)
         self.create_subscription(Odometry, g("odom_topic").value, self._on_odom, 10)
+        # 직접 구동. cmd_arbiter 가 web 소유일 때만 발행하므로, 이게 신선하다는
+        # 것 자체가 '지금 웹이 수동으로 몰고 있다' 는 뜻이다.
+        self.create_subscription(
+            DirectDrive, g("direct_topic").value, self._on_direct, 10)
         if self.align_on:
             self.create_subscription(Path, g("align_plan_topic").value, self._on_plan, 10)
         # 래치 해제는 서비스로만. 토픽에 false 를 흘려서 푸는 경로는 없다.
@@ -475,6 +500,10 @@ class CommandManager(Node):
     def _on_cmd(self, msg):
         self.cmd = msg
         self.last_cmd_sec = self._now()
+
+    def _on_direct(self, msg):
+        self.direct = msg
+        self.last_direct_sec = self._now()
 
     def _on_mode(self, msg):
         self.desired_mode = msg.data
@@ -796,11 +825,144 @@ class CommandManager(Node):
                 f"({self.steer_rate:.0f} deg/s)", throttle_duration_sec=5.0)
         return limited, fourwis_encode.wz_from_steer(limited, vx, self.wis)
 
+    def _tick_direct(self, now, dt):
+        """웹 수동주행 — rpm 과 조향각을 그대로 받아 /mcu/command 로 낸다.
+
+        twist 경로와 무엇이 같고 무엇이 다른가:
+
+          그대로 적용 (물리·안전이라 단위와 무관하다)
+            · E-STOP 래치 / MCU fault  -> 즉시 정지 + 모터 비활성
+            · 명령 타임아웃            -> cmd_arbiter 가 이미 rpm 0 으로 만들어 보낸다.
+                                          여기서는 그 값이 그대로 램프를 타고 0 이 된다
+            · 기동 조향 정렬 dwell     -> 전원 투입 직후 조향각을 모르는 건 여기도 같다
+            · 모드 전환 dwell          -> 조향축이 새 자세로 스윕할 시간
+            · 조향 슬루 제한           -> 액추에이터가 따라올 수 있는 변화율
+            · rpm 가감속 제한          -> twist 의 max_accel_x 에 해당
+
+          적용하지 않음 (직접 명령에서는 뜻이 없다)
+            · twist -> rpm 변환        -> 애초에 이 경로의 존재 이유가 그것을 건너뛰는 것
+            · R_min 조향각 한계        -> |wz| <= |vx|/R_min 은 twist 를 접는 규칙이다.
+                                          조향각을 직접 주는데 각도를 각도로 접을 이유가 없다.
+                                          기구 한계는 아래 max_steer_deg 클램프가 본다
+            · auto 모드 선택 / ALIGN   -> 사람이 모드를 고르는 경로다
+            · 오도메트리 워치독        -> 자율주행이 아니다. 사람이 보고 있다
+
+        ⚠ 이 경로는 **속도를 모른다.** rpm 이 몇 m/s 인지는 wheel_radius_m ·
+          gear_ratio 가 확정돼야 알 수 있고, 그게 아직 ##CONFIRM## 이다.
+          그래서 max_linear_x 같은 속도 제한이 여기서는 걸리지 않는다 —
+          걸 수가 없다. 대신 rpm 자체를 max_rpm 으로 자른다.
+          **잭업 상태에서 먼저 확인할 것.**
+        """
+        direct = self.direct
+        mode_id = int(direct.mode_id)
+        if mode_id not in (fourwis_encode.MODE_STOP, fourwis_encode.MODE_NORMAL,
+                           fourwis_encode.MODE_CRAB, fourwis_encode.MODE_ZERO_TURN):
+            self.get_logger().warn(
+                f"알 수 없는 mode_id {mode_id} -> 정지로 처리", throttle_duration_sec=2.0)
+            mode_id = fourwis_encode.MODE_STOP
+
+        # ---- 하드 클램프 (기구 한계) ----
+        # crab(90°)/zero-turn(47°) 은 STM32 가 고정 자세를 쓰므로 우리가 보내는
+        # 각도 크기는 의미가 없다. 0 으로 보내 '이 값은 안 쓰인다'를 명시한다.
+        max_steer = math.degrees(self.wis.max_steer_rad)
+        if mode_id == fourwis_encode.MODE_NORMAL:
+            steer_target = clamp(float(direct.steer_deg), -max_steer, max_steer)
+        else:
+            steer_target = 0.0
+        rpm_target = clamp(float(direct.speed_rpm), -self.wis.max_rpm, self.wis.max_rpm)
+
+        # ---- 모드 전환 dwell ----
+        if mode_id != self.last_direct_mode:
+            if self.last_direct_mode is not None and self.mode_dwell > 0.0:
+                self.get_logger().info(
+                    f"직접 모드 전환 {self.last_direct_mode} -> {mode_id}: "
+                    f"{self.mode_dwell:.2f} s 속도 0 유지 (조향축 재조준)")
+            self.last_direct_mode = mode_id
+            self.last_eff_switch_sec = now
+        in_startup = (self.startup_align > 0.0
+                      and (now - self.start_sec) < self.startup_align)
+        in_mode_dwell = (self.mode_dwell > 0.0
+                         and (now - self.last_eff_switch_sec) < self.mode_dwell)
+        if in_startup:
+            steer_target = 0.0
+            rpm_target = 0.0
+            self.get_logger().info(
+                f"기동 조향 정렬 중 ({self.startup_align - (now - self.start_sec):.1f} s 남음)",
+                throttle_duration_sec=1.0)
+        elif in_mode_dwell:
+            # 조향은 새 자세로 계속 명령하고 구동만 세운다 — dwell 의 목적이
+            # '도는 동안 굴러가지 않게' 이지 '조향을 멈추게' 가 아니다.
+            rpm_target = 0.0
+
+        # ---- 정지 조건 ----
+        mcu_stop = self.stop_on_mcu_fault and self.mcu_fault
+        emergency_stop = bool(self.estop or mcu_stop)
+        motors_on = self.enabled and not emergency_stop
+        if emergency_stop:
+            rpm_target = 0.0
+            mode_id = fourwis_encode.MODE_STOP
+            self.out_rpm = 0.0            # 램프 없이 즉시 (twist 경로와 같은 규약)
+        else:
+            # 0 쪽으로 가는 중이면 감속률을 쓴다. 조작자가 스로틀을 놓았거나
+            # 하트비트가 끊긴 경우가 전부 여기 걸린다.
+            slowing = abs(rpm_target) < abs(self.out_rpm)
+            self.out_rpm = self._rate_limit(
+                rpm_target, self.out_rpm,
+                self.direct_rpm_decel if slowing else self.direct_rpm_accel, dt)
+
+        # ---- 조향 슬루 ----
+        # 굴러갈 때와 정지 상태의 슬루율이 물리적으로 다르다(정지가 느리다).
+        # rpm 이 0 인지로 판정한다 — 직접 경로에는 vx 가 없다.
+        rate = (self.steer_rate if abs(self.out_rpm) > 1e-3
+                else self.steer_rate_stopped)
+        steer_deg = fourwis_encode.slew_limit(
+            steer_target, self.out_steer_deg, rate, dt)
+        if abs(steer_deg - steer_target) > 1e-6:
+            self.get_logger().info(
+                f"조향 슬루 제한: {steer_target:+.1f}° 요청 -> {steer_deg:+.1f}° 출력 "
+                f"({rate:.0f} deg/s)", throttle_duration_sec=5.0)
+        self.out_steer_deg = steer_deg
+
+        # twist 경로로 돌아갔을 때 가속 램프가 이어지도록 상태를 비워 둔다.
+        # (직접 주행 중에 out_vx 가 예전 값으로 남아 있으면, 자율로 넘긴 순간
+        #  그 속도에서 시작하는 것처럼 램프가 계산된다)
+        self.out_vx = self.out_vy = self.out_wz = 0.0
+
+        # ---- 발행 ----
+        self.sequence = (self.sequence + 1) & 0xFFFFFFFF
+        out = McuCommand()
+        out.stamp = self.get_clock().now().to_msg()
+        out.sequence = self.sequence
+        # cmd_vel 은 **비운다.** rpm -> m/s 환산이 ##CONFIRM## 상수에 걸려 있어서,
+        # 여기서 숫자를 채우면 '측정하려는 값을 미확정 상수로 되돌려 계산한' 것이
+        # 화면에 실측처럼 표시된다. 모르는 것은 비워 두는 편이 정직하다.
+        out.drive_mode = "direct"
+        out.steer_deg = steer_deg
+        out.speed_rpm = self.out_rpm if motors_on else 0.0
+        out.mode_id = mode_id if motors_on else fourwis_encode.MODE_STOP
+        out.enable_motors = motors_on
+        out.emergency_stop = emergency_stop
+        self.pub.publish(out)
+
+        eff = String()
+        eff.data = "direct"
+        self.eff_pub.publish(eff)
+
     def _tick(self):
         now = self._now()
         dt = clamp(now - self.last_tick_sec, 1e-3, 0.1)
         self.last_tick_sec = now
         self._check_uplink(now)
+
+        # ---- 직접 구동이 살아 있으면 twist 경로 전체를 건너뛴다 ----
+        # 둘을 섞지 않는 이유: twist 경로는 '요청한 속도'를 기구 상수로 rpm 으로
+        # 바꾸고, 직접 경로는 rpm 을 그대로 쓴다. 한 틱 안에서 둘을 합치면
+        # 같은 액추에이터에 서로 다른 단위의 명령이 겹친다.
+        # cmd_arbiter 가 web 을 소유한 동안에만 이 토픽이 오므로, 신선도만으로
+        # 배타가 성립한다 (동작권 판정을 여기서 다시 하지 않는다 — 단일 출처).
+        if (now - self.last_direct_sec) <= self.direct_timeout:
+            self._tick_direct(now, dt)
+            return
 
         cmd_recent = (now - self.last_cmd_sec) <= self.cmd_timeout
         vx = self.cmd.linear.x if cmd_recent else 0.0

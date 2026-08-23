@@ -36,11 +36,11 @@ from rclpy.qos import QoSDurabilityPolicy, QoSHistoryPolicy, QoSProfile, QoSReli
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
 from nav2_msgs.action import FollowWaypoints, NavigateToPose
 from rcl_interfaces.srv import GetParameters
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
 
-from alm_msgs.msg import Speech
-from alm_msgs.srv import ReleaseEstop
+from alm_msgs.msg import DirectDrive, Speech
+from alm_msgs.srv import ReleaseEstop, SetControlOwner
 
 from . import navigation
 
@@ -136,6 +136,27 @@ class RosInterface(Node):
         self._nav = dict(_NAV_IDLE)
         self._nav_goal_handle = None
         self.on_nav_finished = None
+        # ---- 수동주행 (직접 rpm/조향각) ----
+        # 브라우저는 HTTP 로 띄엄띄엄 보내지만 ROS 쪽은 **연속 스트림**이어야
+        # 한다(끊기면 cmd_arbiter 가 HELD 로 세운다). 그래서 마지막 명령을 여기
+        # 들고 20 Hz 로 재발행하고, 브라우저가 갱신을 멈추면 만료시킨다.
+        # 데드맨이 두 겹이 되는 셈이다:
+        #   브라우저 → 백엔드   HTTP 갱신이 끊기면 여기서 만료
+        #   백엔드   → arbiter  토픽이 끊기면 arbiter 가 HELD
+        self._manual_lock = threading.Lock()
+        self._manual = {"speed_rpm": 0.0, "steer_deg": 0.0, "mode_id": 1}
+        self._manual_until = 0.0
+        self._manual_pub = self.create_publisher(
+            DirectDrive, self.DIRECT_TOPIC, 10)
+        self._owner_cli = self.create_client(
+            SetControlOwner, "/cmd_arbiter/set_owner", callback_group=self._group)
+        self._owner = ""
+        self.create_subscription(
+            String, "/cmd_arbiter/owner", self._on_owner,
+            QoSProfile(depth=1, durability=QoSDurabilityPolicy.TRANSIENT_LOCAL),
+            callback_group=self._group)
+        self.create_timer(1.0 / self.MANUAL_PUBLISH_HZ, self._manual_tick,
+                          callback_group=self._group)
 
         self._nav_clients = {
             "pose": ActionClient(self, NavigateToPose, self.NAV_ACTION_POSE,
@@ -309,7 +330,11 @@ class RosInterface(Node):
                   # 조향 슬루 제한은 화면의 '안전 인터록' 패널이 읽는다.
                   # 예전에는 그 자리에 '주행 감독 timeout 1.0초' 라는, 어디에도
                   # 없는 항목이 적혀 있었다.
-                  "max_steer_rate_deg_s", "auto_crab_enabled")
+                  "max_steer_rate_deg_s",
+                  # 수동주행 슬라이더의 범위. 화면이 지어내면 안 되는 값이다 —
+                  # 로봇이 자를 값과 화면이 보여주는 범위가 다르면, 끝까지 밀었는데
+                  # 아무 일도 안 일어나는 구간이 생긴다.
+                  "max_rpm", "max_steer_deg", "auto_crab_enabled")
 
     def limits(self, max_age=30.0):
         """command_manager 의 실제 파라미터를 읽는다.
@@ -343,6 +368,80 @@ class RosInterface(Node):
         self._limits_cache_at = now
         return out
 
+
+    # ── 수동주행 (직접 rpm/조향각) ──────────────────────────────────────
+    DIRECT_TOPIC = "/direct_drive_web"
+    MANUAL_PUBLISH_HZ = 20.0
+    # 브라우저 갱신이 이 시간 넘게 없으면 만료시킨다. cmd_arbiter 의
+    # web_timeout(0.5 s)보다 **짧게** 잡는다 — 백엔드가 먼저 놓아야
+    # '누가 세웠는지' 가 한 곳으로 정해진다.
+    MANUAL_HOLD_SEC = 0.4
+
+    def _on_owner(self, msg):
+        self._owner = msg.data
+
+    def owner(self):
+        return self._owner
+
+    def _manual_tick(self):
+        """20 Hz 로 마지막 명령을 재발행한다. 만료됐으면 아무것도 안 보낸다.
+
+        만료 시 rpm 0 을 보내지 않고 **발행을 멈추는** 이유: 그 판단은
+        cmd_arbiter 의 몫이고, 거기서 조향각 유지까지 함께 처리한다.
+        여기서도 세우려 들면 '누가 세웠는가' 가 두 곳이 된다.
+        """
+        with self._manual_lock:
+            if time.monotonic() > self._manual_until:
+                return
+            command = dict(self._manual)
+        msg = DirectDrive()
+        msg.stamp = self.get_clock().now().to_msg()
+        msg.speed_rpm = float(command["speed_rpm"])
+        msg.steer_deg = float(command["steer_deg"])
+        msg.mode_id = int(command["mode_id"])
+        self._manual_pub.publish(msg)
+
+    def manual_command(self, speed_rpm, steer_deg, mode_id):
+        """마지막 명령을 갱신하고 유지시간을 연장한다."""
+        with self._manual_lock:
+            self._manual = {"speed_rpm": float(speed_rpm),
+                            "steer_deg": float(steer_deg),
+                            "mode_id": int(mode_id)}
+            self._manual_until = time.monotonic() + self.MANUAL_HOLD_SEC
+        return self.manual_status()
+
+    def manual_stop(self):
+        """rpm 만 0 으로. 조향각은 남긴다 (cmd_arbiter 와 같은 이유)."""
+        with self._manual_lock:
+            self._manual["speed_rpm"] = 0.0
+            self._manual_until = time.monotonic() + self.MANUAL_HOLD_SEC
+        return self.manual_status()
+
+    def manual_release(self):
+        """스트림을 즉시 끊는다. 동작권 반납과 함께 쓴다."""
+        with self._manual_lock:
+            self._manual = {"speed_rpm": 0.0, "steer_deg": 0.0, "mode_id": 1}
+            self._manual_until = 0.0
+
+    def manual_status(self):
+        with self._manual_lock:
+            command = dict(self._manual)
+            remaining = max(0.0, self._manual_until - time.monotonic())
+        return {"command": command,
+                "streaming": remaining > 0.0,
+                "hold_remaining_sec": round(remaining, 2),
+                "owner": self._owner,
+                "publish_hz": self.MANUAL_PUBLISH_HZ,
+                "hold_sec": self.MANUAL_HOLD_SEC}
+
+    def set_owner(self, owner):
+        request = SetControlOwner.Request()
+        request.owner = str(owner)
+        response = self._call(self._owner_cli, request, timeout=5.0,
+                              what="cmd_arbiter/set_owner")
+        return {"success": bool(response.success),
+                "message": response.message,
+                "active_owner": response.active_owner}
 
     # ── 자율주행 (Nav2 액션) ────────────────────────────────────────────
     NAV_ACTION_POSE = "/navigate_to_pose"

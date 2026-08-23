@@ -389,9 +389,21 @@ export class Ingest {
    * /mcu/state 의 estop 은 MCU 자신의 상태(물리 버튼)라 서로 다르다.
    * 둘 중 하나라도 서 있으면 차량은 멈춘 것이므로 화면에서는 합쳐서 보여준다.
    */
+  /**
+   * /mcu/command — 로봇에 **실제로 나간** 명령.
+   *
+   * 두 가지를 본다.
+   *   emergency_stop  명령 정지 여부 (MCU 자체 정지와 구분해 표시한다)
+   *   speed_rpm       수동주행 탭의 '실제' 칸. 요청과 갈릴 수 있다 —
+   *                   모드 전환 dwell 동안 command_manager 가 구동을 0 으로
+   *                   잡기 때문이다. 그 차이를 안 보여주면 조작자는
+   *                   '밀었는데 안 간다' 로만 겪는다.
+   */
   onMcuCommand(msg) {
     this.commandedEstop = Boolean(msg.emergency_stop);
     this._syncEstop();
+    this.alm.state.manual.actualRpm = Number(msg.speed_rpm) || 0;
+    if (this.alm.state.tab === 'manual') this.alm.updateManualTelemetry?.();
   }
 
   _syncEstop() {

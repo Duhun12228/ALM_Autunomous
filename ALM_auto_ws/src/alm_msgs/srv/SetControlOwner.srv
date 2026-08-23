@@ -1,7 +1,12 @@
 # cmd_arbiter 동작권(ownership) 전환 요청.
-# 자율주행(auto)과 수동 텔레옵(teleop) 사이에서 누가 /cmd_vel 을 소유할지 정한다.
-string owner          # "auto" | "teleop"
+# 누가 로봇을 움직일지 정한다. 셋은 **입력 종류가 다르다**:
+#   auto   Nav2 의 /cmd_vel (twist)
+#   teleop 키보드 텔레옵의 /cmd_vel_teleop (twist)
+#   web    웹의 /direct_drive_web (rpm + 조향각 직접). twist 를 거치지 않는다
+# 그래서 web 은 teleop 과 토픽을 공유하지 않는다 — 둘이 같은 칸을 쓰면
+# 누가 마지막에 썼는지로 거동이 갈리고, 그건 동작권이라는 개념 자체를 무너뜨린다.
+string owner          # "auto" | "teleop" | "web"
 ---
 bool success          # 요청이 받아들여졌는지
 string message        # 실패 사유 등 사람이 읽는 설명
-string active_owner   # 반영된 현재 소유자 ("auto" | "teleop")
+string active_owner   # 반영된 현재 소유자
