@@ -509,8 +509,8 @@ alm_web_backend/
 | **1. 읽기 전용 연동** | foxglove_bridge 도입. 모니터링 탭 + `/mcu/state` + `/cmd_arbiter/owner` + `/drive_mode/effective` + `/rosout` 표시. 조작은 여전히 mock | 모니터링 탭 수치가 실측값과 일치, HUD 동작권 배지가 실제 owner를 따라감 |
 | **2. 시각화 연동** | 포인트클라우드/지도/로봇 위치/코스트맵을 실데이터로 표시 (뷰어 모드) | 실제 SLAM 세션에서 화면이 RViz와 동일한 위치·형태로 갱신됨 |
 | **3. 저위험 명령 연동** ✅ **완료 (2026-08-10)** | `alm_web_backend` 신설. E-STOP 래치, 웹 세션 제어권, 맵 저장(`/map_save`), `pcd2pgm`·`fpfh_map_builder` subprocess, 맵 폴더 생성·활성 전환, SLAM launch 기동·종료 | 버튼 클릭만으로 실제 grid.pgm / fpfh_map* 이 생성됨을 확인. `cloud.pcd` 생성(=`/map_save`)만 실센서 필요 |
-| **4. 측위/자율주행 명령 연동** | `teaser_fpfh_localizer` 기동/재기동, `/initialpose` 발행, `FollowWaypoints` 액션 | 실제 로봇이 웹 UI로 지정한 웨이포인트를 따라 이동 |
-| **5. 수동주행(데드맨) 연동** | `set_owner` + `/cmd_vel_teleop` 발행. **가장 안전 critical — 반드시 마지막.** 선행 조건: `base_control.yaml`의 `##CONFIRM##` 확정, 데드맨 키보드 지원, `teleop(held)` UI | §7 전항목 통과 + 잭업 검증 + 통제 환경 저속 검증 후에만 배포 |
+| **4. 측위/자율주행 명령 연동** ✅ **구현 완료 (2026-08-24) · 실차 미검증** | 4-1 `teaser_fpfh_localizer` 기동/중단·진행 로그(2026-08-10). 4-2 `navigation` 슬롯 + `NavigateToPose`/`FollowWaypoints` 액션 + `/api/navigation/*` 8개(2026-08-24). `/initialpose` 는 **넣지 않았다** — 이 브랜치의 로컬라이저는 구독하지 않는다(전역 정합이라 초기 추정이 불필요). | 대역 검증 통과(`fake_nav2.py` + `nav_api_test.py` 22항목 + `nav-ui-test.mjs` 20항목). **남은 완료 기준: 실제 로봇이 웹으로 지정한 웨이포인트를 따라 이동** |
+| **5. 수동주행(데드맨) 연동** ✅ **구현 완료 (2026-08-24) · 실차 미검증** | **twist 가 아니라 rpm/조향각 직접**(`alm_msgs/DirectDrive`). `cmd_arbiter` 에 `web` 동작권 추가, `command_manager._tick_direct` 가 안전 게이트를 그대로 적용. `/api/manual/*` + 키보드 데드맨. | 대역 검증 통과(`direct_drive_test.py` 16항목). **남은 완료 기준: §7 전항목 + 잭업 검증 + 통제 환경 저속 검증** |
 
 각 Phase 종료 시 §7 안전 체크리스트를 재확인합니다.
 
@@ -552,20 +552,25 @@ alm_web_backend/
 
 | # | UI가 전제하는 것 | 실물 | 해소 방향 |
 |---|---|---|---|
-| 1 | `command_gateway` 단일 노드 | `cmd_arbiter` + `command_manager` + `mcu_bridge` | UI 로그 문구·프로세스 목록을 실물 이름으로 교체 |
-| 2 | `safety_supervisor`가 안전을 판단 | `command_manager` 안에 게이팅이 들어 있음 | 별도 노드 만들지 말 것. 집계 발행만 검토 |
+| 1 | `command_gateway` 단일 노드 | `cmd_arbiter` + `command_manager` + `mcu_bridge` | ✅ **해소 (2026-08-24)** — 로그 문구와 프로세스 목록을 실물 이름으로 교체 |
+| 2 | `safety_supervisor`가 안전을 판단 | `command_manager` 안에 게이팅이 들어 있음 | ✅ **해소 (2026-08-24)** — 별도 노드를 만들지 않고 이름만 실물로 교체. 인터록 패널의 가공 항목('주행 감독 timeout 1.0초')도 실재하는 조향 슬루 제한으로 대체 |
 | 3 | ~~E-STOP이 래치 (문구 입력으로 해제)~~ | ~~`command_manager`는 토픽 값 추종~~ | ✅ **해소 (2026-08-10)** — `estop_latch: true`. 토픽 `false` 는 무시, 해제는 `/emergency_stop/release` 서비스로만. MCU fault 유지 중이면 거부 |
 | 4 | ~~제어권 = 단일 개념~~ | 웹 세션 제어권 / 동작권 2축 | ✅ **해소 (2026-08-10)** — 웹 세션 락은 `alm_web_backend`(리스 15초), 동작권은 `cmd_arbiter` 로 분리 |
-| 5 | 동작권 상태 2가지 (보유/관전) | `auto` / `teleop` / **`teleop(held)`** | `held` 표시 UI 신규 추가 |
-| 6 | 바퀴 4개 조향각 개별 표시 | `steer_angle[2]` (앞축/뒤축) | UI를 축 단위로 수정 |
+| 5 | 동작권 상태 2가지 (보유/관전) | `auto` / `teleop` / **`teleop(held)`** | ✅ **해소 (2026-08-10)** — HUD 배지가 `held` 를 '정지 유지'로 따로 표시 (`ingest.js`) |
+| 6 | 바퀴 4개 조향각 개별 표시 | `steer_angle[2]` (앞축/뒤축) | ✅ **해소 (2026-08-10)** — 앞축/뒤축 값으로 표시하고, 바퀴 4개 그림은 축 값을 공유해 회전 |
 | 7 | ~~속도 한계가 JS에 하드코딩~~ | `command_manager`의 파라미터와 **우연히 일치**했을 뿐 | ✅ **해소 (2026-08-10)** — `GET /api/limits` 가 `command_manager` 의 실제 파라미터를 읽어 내려주고, `commandFor()` 와 설정 드로어가 그 값을 쓴다 |
-| 8 | Crab 비활성 = 고정 문구 | `auto_crab_enabled: false` 파라미터 | 파라미터 조회로 동적 판정 |
-| 9 | "감독 하트비트 5 Hz" | 그런 개념 없음. cmd timeout 0.5s가 실질 감시 | UI 문구 수정 또는 하트비트 구현 |
-| 10 | `pcd2pgm`/`sc_build_db`가 서비스 | argparse CLI 스크립트 | backend subprocess 래핑 |
-| 11 | `/map_save`가 맵 이름별 경로에 저장 | config 고정 경로 | backend가 이동 또는 파라미터 변경 |
-| 12 | 측위가 단계별 진행률을 준다 | `teaser_fpfh_localizer`는 상태 미발행 + 성공 시 자체 종료 | 발행 추가 or UI 단순화. "재측위 = 재기동" 반영 |
-| 13 | 매핑 중 탭 잠금이 동작 | `switchTab()`이 토스트만 띄우고 전환됨 | 실제 차단으로 수정 |
-| 14 | 데드맨을 키보드로도 조작 가능 | pointer 전용, `pointerleave` 폴백도 무력 | Phase 5 전 필수 수정 |
+| 8 | Crab 비활성 = 고정 문구 | `auto_crab_enabled: false` 파라미터 | ✅ **해소 (2026-08-24)** — `/api/limits` 의 `auto_crab_enabled` 로 crab 컨트롤을 열고 닫는다 |
+| 9 | "감독 하트비트 5 Hz" | 그런 개념 없음. cmd timeout 0.5s가 실질 감시 | ✅ **해소 (2026-08-24)** — 문구를 `명령 타임아웃`(command_manager 감시)으로 교체. 하트비트는 구현하지 않았다 — 없는 개념을 화면에 맞추려고 노드를 만들 이유가 없다 |
+| 10 | `pcd2pgm`/`sc_build_db`가 서비스 | argparse CLI 스크립트 | ✅ **해소 (2026-08-10)** — `jobs.py` 가 subprocess 로 감싸고 로그를 스트리밍한다 |
+| 11 | `/map_save`가 맵 이름별 경로에 저장 | config 고정 경로 | ✅ **해소 (2026-08-10)** — `maps_write.py` 가 매핑 전에 FAST-LIO 설정의 저장 경로를 대상 맵으로 바꾼다 (심링크 realpath 처리 포함) |
+| 12 | 측위가 단계별 진행률을 준다 | `teaser_fpfh_localizer`는 상태 미발행 + 성공 시 자체 종료 | ✅ **해소 (2026-08-10)** — `/rosout` 단계 태그로 진행 표시, "재측위 = 재기동" 반영 |
+| 15 | 주행 진척률이 매끄럽게 올라간다 | Nav2 피드백은 단일 목표만 남은거리를 준다. `FollowWaypoints` 는 `current_waypoint` 뿐 | ✅ **해소 (2026-08-24)** — 진척률을 피드백에서만 만들고, 없는 값은 `—` 로 둔다. 목업의 `setInterval` 진척률 제거 |
+| 16 | '주행 시작' 이 한 가지 일을 한다 | 스택 기동(수십 초)과 목표 전송(수십 ms)은 다른 층 | ✅ **해소 (2026-08-24)** — 한 버튼이 상태에 따라 `자율주행 기동`/`정합 대기 중…`/`주행 시작` 으로 바뀐다. 조작 순서가 하나뿐이라 버튼을 나누지 않았다 |
+| 17 | 웨이포인트 세트를 저장·불러올 수 있다 | 저장은 토스트만, 불러오기는 맵과 무관한 고정 좌표 3개를 주입 | ⚠ **비활성 (2026-08-24)** — 목표 전송이 실경로가 되면서 그 좌표가 그대로 로봇에 나갈 수 있게 됐다. 배지만으로는 클릭을 못 막아 `disabled` 로 잠갔다. 서버에 세트 저장을 붙일 때 푼다 |
+| 18 | 지도의 로봇 마커가 차체 크기를 뜻한다 | 마커가 픽셀 고정이라 축척이 바뀌면 크기가 어긋난다 (실측맵에서 3 m 상당으로 표시) | ✅ **해소 (2026-08-24)** — 마커를 미터로 그리고 px/m 를 곱한다. 좁은 통로 통과 가능성을 눈으로 가늠할 수 있게 됐다 |
+| 19 | 목표에 헤딩을 줄 수 있다 | 맵 클릭이 항상 yaw=0. Nav2 는 `yaw_goal_tolerance` 11.5° 로 그 0° 를 강제한다 | ✅ **해소 (2026-08-24)** — 끌어서 헤딩 지정(2D Goal Pose 방식). 안 끌면 0° 이고, 그 사실을 토스트로 알린다 |
+| 13 | 매핑 중 탭 잠금이 동작 | `switchTab()`이 토스트만 띄우고 전환됨 | ✅ **해소 (2026-08-24)** — `tabLockReason()` 으로 판정해 실제로 막는다. 자율주행 중 수동주행 탭도 함께 잠근다 |
+| 14 | 데드맨을 키보드로도 조작 가능 | pointer 전용, `pointerleave` 폴백도 무력 | ✅ **해소 (2026-08-24)** — W/A/S/D 키다운/키업 + 창 포커스 상실 시 강제 해제. 스페이스는 E-STOP |
 
 ---
 

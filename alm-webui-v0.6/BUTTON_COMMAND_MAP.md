@@ -15,7 +15,7 @@ WebUI의 모든 조작 요소가 연동 후 **Jetson에서 실제로 무엇을 �
 | 맵 생성 · 활성 전환 | ✅ **실동작** | `maps/<이름>/manifest.yaml`, `active.yaml` |
 | 맵 자산 조회 | ✅ **실동작** | `/alm/map_inventory` (backend 불필요) |
 | 측위 (`#autoLocalization` 등) | ⏳ 목업 | Phase 4 |
-| 자율주행 (`#startNavigation` 등) | ⏳ 목업 | Phase 4 — Nav2 기동 검증 선행 |
+| 자율주행 (`#startNavigation` 등) | ✅ 연동 (2026-08-24) · 실차 미검증 | `POST /api/navigation/*` — 대역 검증만 통과 |
 | 수동주행 (`#enterManual` 등) | 🚫 **보류** | `base_control.yaml` 의 4WIS 상수 8개가 `##CONFIRM##` 미확정. 확정 전에는 twist 가 그대로 엉뚱한 rpm/조향각이 된다 |
 
 **API 표면**: `GET /api/health` · `/api/limits` · `/api/session*` · `POST /api/estop`(락 예외) · `/api/estop/release` · `/api/mapping/{start,stop,save}` · `/api/jobs/{pcd2pgm,fpfh}` · `GET /api/jobs/<id>[/stream]` · `POST /api/maps` · `PUT /api/maps/active`
@@ -124,9 +124,9 @@ WebUI의 모든 조작 요소가 연동 후 **Jetson에서 실제로 무엇을 �
 | **웨이포인트 추가** `#addWaypointMode` + 맵 클릭 | **L** | 클라이언트 좌표 누적. `pixelToMap()`을 맵 YAML의 `resolution`/`origin` 기준으로 일반화 필요 |
 | **세트 저장** `#saveWaypointSet` | **B** | `POST /api/waypoints/<맵>` — 파일 저장 |
 | **세트 불러오기** `#loadWaypointSet` | **B** | `GET /api/waypoints/<맵>` (지금은 고정 3개 하드코딩) |
-| **주행 시작** `#startNavigation` | **B** | Nav2 액션 goal 전송:<br>`ros2 action send_goal /follow_waypoints nav2_msgs/action/FollowWaypoints "{poses: [...]}"`<br>사전 기동: `ros2 launch alm_navigation navigation.launch.py map:=<맵>.yaml` |
-| **일시정지 / 재개** `#pauseNavigation` | **B** | Nav2에 pause가 없음 → **cancel goal** 후 남은 웨이포인트를 backend가 보관, 재개 시 새 goal 전송 |
-| **중단** `#cancelNavigation` | **B** | cancel goal. 이후 Nav2가 0 twist를 내거나, 끊기면 `command_manager`의 `cmd_timeout_sec` 0.5 s로 자동 정지 |
+| **주행 시작** `#startNavigation` | **B** | ✅ 상태에 따라 두 단계.<br>스택 미기동 → `POST /api/navigation/start` (= `alm_navigation/navigation.launch.py`, map/map_pcd/fpfh 인자는 활성 맵에서 서버가 채운다)<br>기동 + 정합 완료 → `POST /api/navigation/goal {points}` (목표 1개면 `NavigateToPose`, 여럿이면 `FollowWaypoints`)<br>전송 전 점검: Nav2 액션 광고 + `map→odom` TF |
+| **일시정지 / 재개** `#pauseNavigation` | **B** | ✅ `POST /api/navigation/pause` · `/resume`. Nav2에 pause가 없어 **cancel goal** 후 남은 목록을 backend가 보관하고, 재개는 남은 목록으로 **새 goal** 을 보낸다 — 세운 자리에서 이어붙이는 것이 아니라 경로를 다시 계획한다 |
+| **중단** `#cancelNavigation` | **B** | ✅ 미션 중이면 `POST /api/navigation/cancel`, 아니면 확인 후 `POST /api/navigation/stop`(스택 종료).<br>⚠ **비상정지가 아니다** — 취소가 컨트롤러까지 가는 동안 로봇은 마지막 명령으로 움직인다. 즉시 정지는 E-STOP |
 | **주행 모드** `#navDriveModes` (Normal/Spin/Crab/Auto) | **B** | `ros2 topic pub /drive_mode std_msgs/msg/String "{data: 'auto'}"` — **자율 소스 쪽 모드** |
 | 〃 Crab 버튼 | — | `disabled`. `command_manager`의 `auto_crab_enabled: false`와 대응 (지금은 HTML 하드코딩) |
 | 진행률 / 남은 거리 / ETA | **F** | `FollowWaypoints` 액션 피드백 (backend가 WS로 중계) |
