@@ -793,6 +793,18 @@ class Api:
             "--z-max", str(z_max),
             "--min-points", str(_clamp("min_points", request.int_field("min_points", 1))),
         ]
+        # 레이캐스팅 입력. scan_recorder 가 매핑 중에 남긴 것이며, 있으면 반드시
+        # 넘겨야 한다 — 빼면 '점이 찍힌 셀만 자유공간' 인 옛 투영 방식으로
+        # 조용히 떨어지고, 격자의 8할 이상이 미관측으로 남는다(실측 cschool
+        # 87.9%). 플래너가 allow_unknown:false 라 그런 맵에서는 대부분의 목표에서
+        # 계획이 실패한다. 로그도 깨끗해서 격자를 열어보기 전까지 모른다.
+        if os.path.isfile(paths.scans):
+            argv += ["--scans", paths.scans]
+        else:
+            self._log("warn",
+                      f"'{name}' 에 scans.npz 가 없어 투영 방식으로 2D 맵을 만듭니다 — "
+                      f"자유공간이 크게 과소평가됩니다. scan_recorder 를 켠 채"
+                      f"(slam.launch.py record:=true, 기본값) 다시 매핑하세요.")
         return self._start_job("pcd2pgm", argv, name)
 
     def job_fpfh(self, request):

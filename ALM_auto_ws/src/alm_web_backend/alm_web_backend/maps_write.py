@@ -192,6 +192,9 @@ def set_mapping_target(config_path, cloud_path):
 # 매핑을 새로 시작할 때 비우는 것들. manifest.yaml 은 맵의 정체성이라 남긴다.
 CLEARABLE = (
     "cloud.pcd",            # 3D 점군 (FAST-LIO /map_save)
+    "scans.npz",            # 스캔+센서위치 (scan_recorder) — cloud.pcd 와 한 쌍이다.
+                            # 남겨 두면 새 cloud.pcd 에 옛 스캔이 짝지어져
+                            # 레이캐스팅이 엉뚱한 자유공간을 그린다.
     "grid.pgm", "grid.yaml",  # 2D 격자 (pcd2pgm)
     "fpfh_map.meta",        # 측위 DB
     "fpfh_map_points.pcd", "fpfh_map_normals.pcd", "fpfh_map_fpfh.pcd",
