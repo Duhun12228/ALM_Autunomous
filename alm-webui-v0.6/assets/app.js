@@ -696,22 +696,36 @@
     }
     openModal(`
       <div class="modal-head"><div><p class="section-kicker">PCD TO PGM</p><h2>2D 맵 변환</h2></div><button class="close-button" data-close-modal>×</button></div>
-      <div class="modal-body"><p class="modal-copy">높이 밴드를 조정해 장애물 단면을 생성합니다. 작업 진행률은 임의 추정하지 않고 단계 상태로 표시합니다.</p>
-      <div class="modal-grid"><label class="modal-field"><span>Resolution</span><input id="pgmResolution" type="number" value="0.05" step="0.01"></label><label class="modal-field"><span>Min points</span><input id="pgmMinPoints" type="number" value="1"></label><label class="modal-field"><span>Z min</span><input id="pgmZMin" type="number" value="-0.3" step="0.1"></label><label class="modal-field"><span>Z max</span><input id="pgmZMax" type="number" value="1.5" step="0.1"></label></div>
-      <p class="helper">z 밴드는 라이다 마운트 높이에 따라 달라집니다. 실행 후 출력되는 z 분포를 보고 지면 위 0.2~1.5 m 로 맞추세요.</p>
+      <div class="modal-body"><p class="modal-copy">장애물로 볼 높이 구간을 <strong>지면 기준</strong>으로 지정합니다. 지면은 점군에서 자동으로 찾습니다. 작업 진행률은 임의 추정하지 않고 단계 상태로 표시합니다.</p>
+      <div class="modal-grid"><label class="modal-field"><span>Resolution</span><input id="pgmResolution" type="number" value="0.05" step="0.01"></label><label class="modal-field"><span>Min points</span><input id="pgmMinPoints" type="number" value="2"></label><label class="modal-field"><span>장애물 하한 (지면 위 m)</span><input id="pgmObsMinH" type="number" value="0.15" step="0.05"></label><label class="modal-field"><span>장애물 상한 (지면 위 m)</span><input id="pgmObsMaxH" type="number" value="1.80" step="0.1"></label></div>
+      <details class="modal-advanced"><summary>고급 — 절대 z 로 직접 지정</summary>
+      <p class="helper"><strong>권장하지 않습니다.</strong> 절대 z 는 라이다 마운트 높이에 그대로 의존합니다. 마운트가 가정보다 높으면 밴드 하한이 지면에서 멀어져, 그보다 낮은 턱·박스가 전부 자유공간으로 찍힙니다. 마운트 높이를 실측으로 확정한 뒤에만 쓰세요.</p>
+      <div class="modal-grid"><label class="modal-field"><span>Z min (비우면 자동)</span><input id="pgmZMin" type="number" step="0.1" placeholder="자동"></label><label class="modal-field"><span>Z max (비우면 자동)</span><input id="pgmZMax" type="number" step="0.1" placeholder="자동"></label></div></details>
+      <p class="helper">Min points 는 셀을 점유로 판정할 최소 점 수입니다. 1 로 두면 반사 노이즈 한 점이 영구 장애물이 됩니다 — 레이캐스팅은 광선이 지나가도 점유 셀을 지우지 않습니다.</p>
       <pre class="job-log" id="jobLog">대기 중</pre></div>
       <div class="modal-actions"><button class="secondary-button" data-close-modal>닫기</button><button class="primary-button" id="runPgmJob">변환 실행</button></div>`);
     $('#runPgmJob').addEventListener('click', (event) => runAssetJob({
       button: event.currentTarget,
       stepKey: 'pcd2pgm',
       label: 'pcd2pgm',
-      run: (api) => api.runPcd2Pgm({
-        map: state.activeMap,
-        resolution: Number($('#pgmResolution').value),
-        min_points: Number($('#pgmMinPoints').value),
-        z_min: Number($('#pgmZMin').value),
-        z_max: Number($('#pgmZMax').value),
-      }),
+      run: (api) => {
+        // ##중요## z_min/z_max 는 **비어 있으면 보내지 않는다.** 백엔드는 이
+        //   키가 있으면 pcd2pgm 을 절대 z(호환) 모드로 돌리고, 그러면 지면
+        //   자동추정이 죽는다. 예전에는 UI 가 -0.3/1.5 를 하드코딩해 항상
+        //   보냈기 때문에 지면 기준 밴드가 웹 경로에서 한 번도 쓰인 적이 없다.
+        const payload = {
+          map: state.activeMap,
+          resolution: Number($('#pgmResolution').value),
+          min_points: Number($('#pgmMinPoints').value),
+          obstacle_min_h: Number($('#pgmObsMinH').value),
+          obstacle_max_h: Number($('#pgmObsMaxH').value),
+        };
+        const zMin = $('#pgmZMin').value.trim();
+        const zMax = $('#pgmZMax').value.trim();
+        if (zMin !== '') payload.z_min = Number(zMin);
+        if (zMax !== '') payload.z_max = Number(zMax);
+        return api.runPcd2Pgm(payload);
+      },
       done: '2D 맵 변환이 완료되었습니다',
     }));
   }

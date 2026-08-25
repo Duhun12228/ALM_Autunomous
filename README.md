@@ -494,7 +494,8 @@ ros2 launch alm_bringup webui_dev.launch.py use_pcd_replay:=true
                                     metrics.json   숫자 (여러 판 비교용)
 ```
 
-RViz로는 안 보이는 것을 잡습니다: MPPI 요청 대비 **wz 클램프율**(좌우 진동의 지표),
+RViz로는 안 보이는 것을 잡습니다: MPPI 가 낸 (vx, wz) 중 **`|wz| > |vx|/R_min` 을
+어긴 비율**(좌우 진동의 지표),
 전역경로의 **미관측 영역 통과 비율**, spin 체류시간 대비 위치오차 감소, dwell 정지
 시간 비율, 경로 이탈. 1초마다 파일을 다시 쓰므로 `kill -9`로 죽어도 남습니다.
 

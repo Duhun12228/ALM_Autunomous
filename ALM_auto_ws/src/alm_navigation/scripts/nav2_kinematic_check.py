@@ -359,6 +359,33 @@ def main():
         check("velocity_smoother.max_velocity[vx]", mv[0], max_lx)
         check("velocity_smoother.min_velocity[vx]", mnv[0], min_lx)
         check("velocity_smoother.max_velocity[wz]", mv[2], spin_max_wz)
+    # ---- 각가속 3곳 일치 (2026-08-25 추가) ----
+    # ##함정## 속도(wz_max)는 네 곳을 맞춰 놓고 **각가속만 velocity_smoother 에
+    #   1.5 로 남아 있었다.** 더 빡빡한 0.8 이 뒤에서 이기므로 거동은 같았고,
+    #   그래서 아무도 못 봤다. 검사기가 각가속을 아예 안 보고 있었기 때문이다.
+    #   이런 건 '조용히 다른 값' 이라 다음 튜닝 때 잘못된 전제로 쓰인다.
+    accel_th = bc.get("max_accel_theta")
+    if accel_th is not None:
+        acc = vs.get("max_accel") or []
+        dec = vs.get("max_decel") or []
+        if len(acc) == 3:
+            check("velocity_smoother.max_accel[wz]", acc[2], float(accel_th),
+                  hint="base_control 의 max_accel_theta 와 같아야 한다. "
+                       "여기만 크면 더 빡빡한 쪽이 조용히 이겨, 설정값이 "
+                       "실제 거동을 설명하지 못하게 된다.")
+        if len(dec) == 3:
+            check("velocity_smoother.max_decel[wz]", abs(float(dec[2])), float(accel_th),
+                  hint="감속도 같은 값으로. 부호만 반대다.")
+        if bs:
+            check("behavior_server.rotational_acc_lim", bs.get("rotational_acc_lim"),
+                  float(accel_th),
+                  hint="BT 리커버리 Spin 의 각가속. 셋이 같아야 명령과 실제가 "
+                       "한 이야기를 한다.")
+        note("각가속 3곳", f"{accel_th} rad/s² "
+             f"(base_control · velocity_smoother · behavior_server)",
+             f"0 -> spin 상한({spin_max_wz})까지 "
+             f"{float(spin_max_wz) / max(float(accel_th), 1e-9):.2f} s.")
+
     if vs.get("scale_velocities") is not True:
         _problems.append(("velocity_smoother.scale_velocities", str(vs.get("scale_velocities")),
                           "True",
@@ -602,6 +629,29 @@ def main():
              f"dwell {dwell:.1f} s x 2 (진입+복귀) = {2*dwell:.1f} s",
              "ALIGN 1회의 고정비다. dwell 동안은 타임아웃 시계가 멈추므로 "
              "align_max_sec 를 잡아먹지는 않는다.")
+        # ---- 이탈 문턱 vs 목표 자세 허용치 (2026-08-25 추가) ----
+        # ##함정## ALIGN 이 손을 떼는 각도가 목표 체커 허용치보다 **크면**,
+        #   그 사이 구간을 담당하는 주체가 아무도 없다:
+        #     · MPPI 는 Ackermann 이라 제자리 회전을 못 낸다(|wz| <= |vx|/R_min)
+        #     · ALIGN 은 진입 문턱 아래에서 다시 안 걸린다
+        #   그러면 목표 근처에서 자세만 안 맞은 채로 시간을 태운다.
+        gc = _params(nav_doc, "controller_server").get("general_goal_checker") or {}
+        yaw_tol = gc.get("yaw_goal_tolerance")
+        if yaw_tol is not None:
+            yaw_tol_deg = math.degrees(float(yaw_tol))
+            if exit_ > yaw_tol_deg:
+                _problems.append((
+                    "align_exit_deg", f"{exit_}°",
+                    f"<= yaw_goal_tolerance({yaw_tol_deg:.1f}°)",
+                    "ALIGN 이 목표 체커 허용치 **밖에서** 손을 뗀다. 그 사이 "
+                    f"{exit_ - yaw_tol_deg:.1f}° 를 맞출 주체가 없다 — MPPI 는 "
+                    "Ackermann 이라 제자리 회전을 못 낸다."))
+            else:
+                note("이탈 문턱 vs 목표 자세 허용치",
+                     f"{exit_:.0f}° <= {yaw_tol_deg:.1f}°",
+                     "ALIGN 이 목표 체커 허용치 안쪽에서 넘긴다. 마지막 몇 도를 "
+                     "MPPI 에 떠넘기지 않는다.")
+
         note("진입 문턱 근거", f"{enter:.0f}° / {bc.get('align_enter_hold_sec')} s 지속",
              "alm_lab 실측 |경로 헤딩오차| p50 8.8° p90 39.8° p99 67.2°. "
              "30° 로 낮추면 정상 주행 틱의 35% 가 걸려 vx 가 무너진다.")

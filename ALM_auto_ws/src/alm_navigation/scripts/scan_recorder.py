@@ -44,6 +44,17 @@
 
 전 스캔을 원본 해상도로 모으면 수억 점이 된다. 두 손잡이로 줄인다.
 
+## 중간 저장은 **별도 스레드**에서 한다 (2026-08-25)
+
+예전에는 `_on_cloud` 콜백 안에서 `savez_compressed` 로 **누적 전체를 다시
+압축**했다. 매핑 후반 수십 MB 구간에서 이게 수 초씩 걸리고, 그동안 콜백이
+막혀 `/cloud_registered` 큐(depth 20)가 넘친다. **유실된 스캔은 레이캐스팅에
+구멍을 내고 그 자리는 미관측으로 남는다** — 로그에는 아무것도 안 남으므로
+격자를 열어보기 전까지 모른다. 매핑을 다시 하는 것 말고는 복구가 없다.
+
+지금은 스냅샷만 뜨고 스레드에 넘긴다. 중간 저장은 **무압축**(`savez`)이라
+CPU 도 거의 안 쓴다. 최종 저장만 압축한다.
+
     stride  : N 번째 스캔마다 하나만 기록 (기본 5 -> 약 2 Hz)
               레이캐스팅에 조밀한 시간해상도는 필요 없다. 0.5 s 간격이면
               같은 공간을 여러 번 훑게 되므로 충분하다.
@@ -54,6 +65,7 @@
 기본값에서 10 분 매핑 = 약 1200 스캔 x 수천 점 -> 수십 MB 수준.
 """
 import os
+import threading
 import time
 
 import numpy as np
@@ -107,6 +119,9 @@ class ScanRecorder(Node):
         self._dropped = 0      # odom 이 낡아 버린 스캔 수
         self._odom = None      # (t, x, y, z)
         self._last_save = time.monotonic()
+        # 중간 저장은 별도 스레드. 콜백을 막지 않는 것이 목적이다(위 docstring).
+        self._save_thread = None
+        self._save_lock = threading.Lock()
 
         # FAST-LIO 는 둘 다 depth 20 의 기본(신뢰성) QoS 로 발행한다.
         qos = QoSProfile(
@@ -169,36 +184,70 @@ class ScanRecorder(Node):
                 f"스캔 {len(self._chunks)}개 / 점 {n:,}개 기록됨")
 
         if self.autosave_sec > 0.0 and (time.monotonic() - self._last_save) >= self.autosave_sec:
-            self.save(quiet=True)
+            self._autosave()
             self._last_save = time.monotonic()
 
     # ------------------------------------------------------------------ 저장
+    def _autosave(self):
+        """중간 저장. **콜백을 막지 않는다** (모듈 docstring 참고).
+
+        리스트만 얕게 복사해 스레드에 넘긴다 — 담긴 ndarray 는 append 뒤로
+        수정되지 않으므로 복사 없이 안전하다. 앞선 저장이 아직 돌고 있으면
+        이번 차례는 건너뛴다(밀린 저장을 쌓아봐야 디스크만 때린다).
+        """
+        if self._save_thread is not None and self._save_thread.is_alive():
+            return
+        if not self._chunks:
+            return
+        snap = (list(self._chunks), list(self._origins), list(self._stamps))
+        self._save_thread = threading.Thread(
+            target=self._write, args=snap, kwargs={"compress": False}, daemon=True)
+        self._save_thread.start()
+
+    def _write(self, chunks, origins, stamps, compress):
+        counts = [c.shape[0] for c in chunks]
+        offsets = np.zeros(len(counts) + 1, dtype=np.int64)
+        np.cumsum(counts, out=offsets[1:])
+        writer = np.savez_compressed if compress else np.savez
+        # 저장 중 죽어도 기존 파일이 남도록 임시파일에 쓰고 교체한다.
+        # 락은 tmp 파일 이름이 겹치는 것과 replace 순서 역전을 막는다.
+        with self._save_lock:
+            tmp = self.out + ".tmp.npz"
+            try:
+                writer(tmp,
+                       points=np.concatenate(chunks, axis=0),
+                       offsets=offsets,
+                       origins=np.asarray(origins, dtype=np.float32),
+                       stamps=np.asarray(stamps, dtype=np.float64))
+                os.replace(tmp, self.out)
+            except Exception as exc:                              # noqa: BLE001
+                self.get_logger().error(f"scans 저장 실패: {exc}")
+                return None
+        return int(offsets[-1])
+
     def save(self, quiet=False):
+        """최종 저장. 중간 저장 스레드가 끝나기를 기다린 뒤 **압축해서** 쓴다."""
+        if self._save_thread is not None and self._save_thread.is_alive():
+            self._save_thread.join(timeout=60.0)
         if not self._chunks:
             if not quiet:
                 self.get_logger().warn(
                     "기록된 스캔이 없습니다 — 저장하지 않습니다. "
                     "/cloud_registered 와 /Odometry 가 나오고 있는지 확인하세요.")
             return
-        counts = [c.shape[0] for c in self._chunks]
-        offsets = np.zeros(len(counts) + 1, dtype=np.int64)
-        np.cumsum(counts, out=offsets[1:])
-        # 중간 저장이 죽어도 기존 파일이 남도록 임시파일에 쓰고 교체한다.
-        tmp = self.out + ".tmp.npz"
-        np.savez_compressed(
-            tmp,
-            points=np.concatenate(self._chunks, axis=0),
-            offsets=offsets,
-            origins=np.asarray(self._origins, dtype=np.float32),
-            stamps=np.asarray(self._stamps, dtype=np.float64))
-        os.replace(tmp, self.out)
-        if not quiet:
-            mb = os.path.getsize(self.out) / 1e6
-            self.get_logger().info(
-                f"저장: {self.out}  스캔 {len(counts)}개 / 점 {offsets[-1]:,}개 / {mb:.1f} MB")
-            self.get_logger().info(
-                "다음 단계:  ros2 run alm_navigation pcd2pgm.py "
-                f"--pcd <cloud.pcd> --scans {self.out} --out <basename>")
+        total = self._write(self._chunks, self._origins, self._stamps, compress=True)
+        if total is None or quiet:
+            return
+        mb = os.path.getsize(self.out) / 1e6
+        self.get_logger().info(
+            f"저장: {self.out}  스캔 {len(self._chunks)}개 / 점 {total:,}개 / {mb:.1f} MB")
+        if self._dropped:
+            self.get_logger().warn(
+                f"⚠ odom 시각차로 버린 스캔 {self._dropped}개. 그 자리는 "
+                f"레이캐스팅에서 미관측으로 남습니다.")
+        self.get_logger().info(
+            "다음 단계:  ros2 run alm_navigation pcd2pgm.py "
+            f"--pcd <cloud.pcd> --scans {self.out} --out <basename>")
 
 
 def main():

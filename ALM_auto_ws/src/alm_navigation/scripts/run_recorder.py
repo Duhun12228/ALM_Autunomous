@@ -8,7 +8,7 @@
 
 RViz 로는 이 스택에서 정작 중요한 것들이 안 보인다.
 
-  · MPPI 가 요청한 wz 중 **몇 %가 조향 한계로 잘려나갔는지** — 화면에 없다
+  · MPPI 가 요청한 (vx, wz) 중 **몇 %가 R_min 을 어겼는지** — 화면에 없다
   · 전역경로가 **미관측 영역을 얼마나 지나는지** — 회색으로 보일 뿐이다
   · spin 에 몇 초를 썼고 그동안 **위치오차가 줄었는지**
   · dwell 로 정지해 있던 시간이 전체의 몇 %인지
@@ -23,11 +23,11 @@ RViz 로는 이 스택에서 정작 중요한 것들이 안 보인다.
 주행이 끝나면(성공·중단·강제종료 무관) `summary.md` 에 소견이 남는다.
 판정 규칙은 지금까지 실차에서 확인된 실패 모드를 그대로 옮긴 것이다.
 
-    wz 클램프율 > 50%          MPPI 가 못 내는 회전을 계속 요구 (와리가리)
+    실현불가 회전 > 50%        MPPI 가 |vx|/R_min 을 넘는 회전을 요구 (와리가리)
     경로의 미관측 통과 > 20%    맵의 가짜 자유공간 위로 계획됨
     /plan 발행 0회             전역경로 자체가 안 나옴
     spin 체류 > 5 s + 오차 안 줄어듦   spin 탈출 실패
-    저속 정체 > 30%            어딘가 막혀 있음
+    저속 정체 > 30%            어딘가 막혀 있음  (분모는 **목표 수행 시간**)
 
 ## 강제종료 대응
 
@@ -38,10 +38,14 @@ RViz 로는 이 스택에서 정작 중요한 것들이 안 보인다.
 
     <out_dir>/run_<날짜시각>/summary.md    사람이 읽는 판정
     <out_dir>/<...>/metrics.json           숫자 (여러 판 비교·집계용)
+
+오래된 폴더는 `keep_runs`(기본 50) 개만 남기고 기동 시 정리한다.
 """
 import json
 import math
 import os
+import re
+import shutil
 import time
 from datetime import datetime
 
@@ -113,6 +117,15 @@ class RunRecorder(Node):
         super().__init__("run_recorder")
 
         self.declare_parameter("out_dir", "~/ALM_Autunomous/logs")
+        # 보관할 주행 기록 개수. 이보다 오래된 run_* 폴더는 기동 시 지운다.
+        # ##왜 필요한가## navigation.launch.py 가 record 기본 true 이고 웹 UI 로
+        #   자율주행을 띄울 때마다 폴더가 하나씩 생긴다. 지금까지 정리 주체가
+        #   없었다 — 보존 기간도 개수 상한도 없었다.
+        #   기록 자체는 켜 두는 게 맞다. 단일 실행 A/B 는 믿을 수 없고
+        #   (같은 목표가 323 s -> ABORT -> 163 s -> TIMEOUT), 여러 판을 모아야
+        #   판단이 되므로 이 노드의 가치가 거기에 있다. 그래서 끄는 대신 돌린다.
+        #   0 이하면 정리하지 않는다.
+        self.declare_parameter("keep_runs", 50)
         self.declare_parameter("map_yaml", "")        # 비우면 활성 맵 자동
         self.declare_parameter("flush_sec", 1.0)
         # 이 속도 미만이면 '정체' 로 센다 [m/s]. base_control 의
@@ -120,17 +133,22 @@ class RunRecorder(Node):
         self.declare_parameter("stall_vx", 0.03)
         # 경로가 이 값(0~1) 이상 미관측을 지나면 소견을 낸다
         self.declare_parameter("warn_unknown_frac", 0.20)
-        # wz 클램프율이 이 값 이상이면 소견을 낸다
-        self.declare_parameter("warn_clamp_frac", 0.50)
+        # 실현 불가 회전 요청 비율이 이 값 이상이면 소견을 낸다
+        self.declare_parameter("warn_infeasible_frac", 0.50)
+        # 최소 선회반경 [m]. fourwis_encode.min_turn_radius() 와 같아야 한다.
+        # normal 모드의 회전 상한이 |vx|/R_min 이므로 이 값이 판정 기준이 된다.
+        self.declare_parameter("r_min", 1.643)
 
         g = self.get_parameter
         base = os.path.expanduser(str(g("out_dir").value))
         self.dir = os.path.join(base, "run_" + datetime.now().strftime("%Y%m%d_%H%M%S"))
         os.makedirs(self.dir, exist_ok=True)
+        self._prune(base, int(g("keep_runs").value))
         self.flush_sec = float(g("flush_sec").value)
         self.stall_vx = float(g("stall_vx").value)
         self.warn_unknown = float(g("warn_unknown_frac").value)
-        self.warn_clamp = float(g("warn_clamp_frac").value)
+        self.warn_clamp = float(g("warn_infeasible_frac").value)
+        self.r_min = float(g("r_min").value)
 
         # ---- 맵 (미관측 통과 판정용) ----
         self.grid = None
@@ -152,11 +170,23 @@ class RunRecorder(Node):
         self.last_flush = 0.0
 
         self.n_cmd = 0                 # /mcu/command 틱 수
+        # 목표를 실제로 수행 중이던 시간 [s]. 정지/정체 비율의 분모다.
+        # ##왜 노드 수명이 아닌가## 목표를 주기 전 대기시간이 그대로 '정지' 로
+        #   쌓여, 어떤 주행이든 '전체의 30% 를 정지로 보냈다' 소견이 떴다.
+        self.exec_sec = 0.0
         self.wz_req_sum = 0.0          # |요청 wz| 합 (Nav2 -> command_manager 입력)
         self.wz_act_sum = 0.0          # |실제 wz| 합 (McuCommand.cmd_vel)
-        self.wz_clamped_ticks = 0      # 유의미하게 잘린 틱 수
-        self.wz_req_ticks = 0          # 회전을 요청한 틱 수 (분모)
-        self.wz_clamp_max = 0.0
+        # ---- '이 플랫폼이 낼 수 없는 회전을 요구했는가' ----
+        # ##왜 요청-실제 gap 을 안 쓰나 (2026-08-25 교체)## 그 gap 에는 조향
+        #   클램프뿐 아니라 max_accel_theta 램프가 섞인다. 가감속 구간이 전부
+        #   '조향 한계로 잘림' 으로 계수돼 지표가 부풀었다 — 하필 이게 와리가리
+        #   판정의 핵심 지표라 왜곡되면 판이 통째로 못 쓴다.
+        #   대신 Nav2 가 낸 (vx, wz) **쌍 자체**가 R_min 을 지키는지 본다:
+        #       |wz| <= |vx| / R_min
+        #   command_manager 의 클램프 식과 같고, 우리 쪽 램프와 완전히 무관하다.
+        self.wz_infeasible_ticks = 0
+        self.wz_req_ticks = 0          # normal 모드에서 회전을 요청한 틱 (분모)
+        self.wz_excess_max = 0.0
         self.dist = 0.0                # 주행 거리 [m]
         self.stall_sec = 0.0
         self.stop_sec = 0.0            # 완전 정지(속도 0) 시간
@@ -215,6 +245,34 @@ class RunRecorder(Node):
             f"{self.flush_sec:.0f} s 마다 저장합니다. 강제종료(kill -9)해도 남습니다.")
 
     # ---------------------------------------------------------------- 유틸
+    def _prune(self, base, keep):
+        """오래된 run_* 폴더를 지운다 (keep_runs 주석 참고).
+
+        ##안전장치## 이름이 정확히 run_<날짜>_<시각> 인 **디렉터리만** 본다.
+        사람이 같은 곳에 둔 다른 파일/폴더는 건드리지 않는다. 방금 만든
+        자기 폴더도 제외한다.
+        """
+        if keep <= 0:
+            return
+        pattern = re.compile(r"^run_\d{8}_\d{6}$")
+        try:
+            names = sorted(n for n in os.listdir(base)
+                           if pattern.match(n)
+                           and os.path.isdir(os.path.join(base, n)))
+        except OSError:
+            return
+        names = [n for n in names if os.path.join(base, n) != self.dir]
+        drop = names[:max(0, len(names) - (keep - 1))]
+        for name in drop:
+            try:
+                shutil.rmtree(os.path.join(base, name))
+            except OSError as exc:                                # noqa: BLE001
+                self.get_logger().warn(f"오래된 기록 삭제 실패 {name}: {exc}")
+        if drop:
+            self.get_logger().info(
+                f"오래된 주행 기록 {len(drop)}개 삭제 (보관 {keep}개): "
+                f"{drop[0]} ~ {drop[-1]}")
+
     def _active_map_yaml(self):
         from ament_index_python.packages import get_package_share_directory
         import sys
@@ -252,22 +310,29 @@ class RunRecorder(Node):
         dt = 0.0 if self.last_cmd_t is None else min(now - self.last_cmd_t, 0.5)
         self.last_cmd_t = now
         self.n_cmd += 1
+        executing = (self.goal_status == "EXECUTING")
+        if executing:
+            self.exec_sec += dt
 
         req, act = abs(self.nav_wz), abs(msg.cmd_vel.angular.z)
         self.wz_req_sum += req
         self.wz_act_sum += act
-        if req > 0.02:                       # 회전을 실제로 요청한 틱만 분모에 넣는다
+        # normal 모드에서만 판정한다 — spin/crab 은 |wz| <= |vx|/R_min 이
+        # 애초에 적용되지 않는 모드다(제자리 회전/병진).
+        if req > 0.02 and msg.drive_mode == "normal":
             self.wz_req_ticks += 1
-            gap = (req - act) / req
-            if gap > 0.05:
-                self.wz_clamped_ticks += 1
-                self.wz_clamp_max = max(self.wz_clamp_max, gap)
+            lim = (abs(self.nav_vx) / self.r_min) if self.r_min > 0 else float("inf")
+            if req > lim * 1.05:
+                self.wz_infeasible_ticks += 1
+                self.wz_excess_max = max(self.wz_excess_max, (req - lim) / req)
 
         vx = abs(msg.cmd_vel.linear.x)
-        if vx < 1e-4:
-            self.stop_sec += dt
-        elif vx < self.stall_vx:
-            self.stall_sec += dt
+        # 목표 수행 중일 때만 센다 (exec_sec 주석 참고).
+        if executing:
+            if vx < 1e-4:
+                self.stop_sec += dt
+            elif vx < self.stall_vx:
+                self.stall_sec += dt
         if self.cur_mode:
             self.mode_sec[self.cur_mode] = self.mode_sec.get(self.cur_mode, 0.0) + dt
 
@@ -353,7 +418,8 @@ class RunRecorder(Node):
     # ---------------------------------------------------------------- 판정
     def metrics(self):
         el = max(time.monotonic() - self.mono0, 1e-6)
-        clamp_frac = (self.wz_clamped_ticks / self.wz_req_ticks
+        ex = max(self.exec_sec, 1e-6)
+        infeasible = (self.wz_infeasible_ticks / self.wz_req_ticks
                       if self.wz_req_ticks else 0.0)
         unk = (float(np.mean(self.plan_unknown_fracs))
                if self.plan_unknown_fracs else None)
@@ -376,9 +442,12 @@ class RunRecorder(Node):
             "wz": {
                 "requested_mean": round(self.wz_req_sum / self.n_cmd, 4) if self.n_cmd else None,
                 "actual_mean": round(self.wz_act_sum / self.n_cmd, 4) if self.n_cmd else None,
-                "clamp_frac": round(clamp_frac, 4),
-                "clamp_max": round(self.wz_clamp_max, 4),
+                # Nav2 가 낸 (vx, wz) 쌍이 |wz| <= |vx|/R_min 을 어긴 비율.
+                # 예전 clamp_frac 을 대체한다 — 그건 가속 램프까지 세고 있었다.
+                "infeasible_frac": round(infeasible, 4),
+                "excess_max": round(self.wz_excess_max, 4),
                 "ticks_requesting_turn": self.wz_req_ticks,
+                "r_min": self.r_min,
             },
             "mode": {
                 "seconds": {k: round(v, 1) for k, v in sorted(self.mode_sec.items())},
@@ -390,9 +459,11 @@ class RunRecorder(Node):
                     for a, b, c in self.spin_gain],
             },
             "motion": {
+                # 분모는 노드 수명이 아니라 **목표 수행 시간**이다.
+                "executing_sec": round(self.exec_sec, 1),
                 "stopped_sec": round(self.stop_sec, 1),
                 "stalled_sec": round(self.stall_sec, 1),
-                "stopped_frac": round(self.stop_sec / el, 3),
+                "stopped_frac": round(self.stop_sec / ex, 3),
             },
         }
 
@@ -405,14 +476,15 @@ class RunRecorder(Node):
                             f"맵에서 '가본 적 없는 곳'을 통행 가능으로 알고 계획한 것입니다. "
                             f"grid.yaml 의 free_thresh(0.19 이어야 함)와 "
                             f"SmacPlannerHybrid.allow_unknown(false 권장)을 확인하세요."))
-        cf = m["wz"]["clamp_frac"]
+        cf = m["wz"]["infeasible_frac"]
         if cf >= self.warn_clamp and m["wz"]["ticks_requesting_turn"] > 20:
-            out.append((80, f"회전 요청의 **{cf*100:.0f}%** 가 조향 한계로 잘렸습니다 "
-                            f"(요청 평균 {m['wz']['requested_mean']}, "
-                            f"실제 평균 {m['wz']['actual_mean']}). MPPI 가 이 플랫폼이 "
-                            f"낼 수 없는 회전을 계속 요구하고 있습니다 — 좌우 진동의 "
-                            f"주 원인입니다. nav2.yaml 의 motion_model 이 Ackermann 인지, "
-                            f"wz_max/wz_std 가 적절한지 확인하세요."))
+            out.append((80, f"normal 모드 회전 요청의 **{cf*100:.0f}%** 가 "
+                            f"|wz| <= |vx|/R_min({m['wz']['r_min']}) 을 어겼습니다 "
+                            f"(최대 초과 {m['wz']['excess_max']*100:.0f}%). MPPI 가 이 "
+                            f"플랫폼이 낼 수 없는 회전을 요구하고 있습니다 — 좌우 "
+                            f"진동의 주 원인입니다. nav2.yaml 의 motion_model 이 "
+                            f"Ackermann 인지, AckermannConstraints.min_turning_r 가 "
+                            f"{m['wz']['r_min']} 인지 확인하세요."))
         if m["plan"]["publishes"] == 0 and self.goal is not None:
             out.append((95, "**/plan 이 한 번도 발행되지 않았습니다.** 전역경로 자체가 "
                             "안 나온 것입니다. 목표가 미관측/장애물 위에 있거나, "
@@ -439,9 +511,10 @@ class RunRecorder(Node):
                             f"align_cooldown_sec 이 mode_switch_dwell_sec 이상인지 "
                             f"확인하세요."))
         sf = m["motion"]["stopped_frac"]
-        if sf >= 0.30:
-            out.append((60, f"전체 시간의 **{sf*100:.0f}%** 를 정지 상태로 보냈습니다 "
-                            f"({m['motion']['stopped_sec']:.0f} s). 모드 전환 dwell"
+        if sf >= 0.30 and m["motion"]["executing_sec"] >= 10.0:
+            out.append((60, f"목표 수행 시간의 **{sf*100:.0f}%** 를 정지 상태로 "
+                            f"보냈습니다 ({m['motion']['stopped_sec']:.0f} s / "
+                            f"{m['motion']['executing_sec']:.0f} s). 모드 전환 dwell"
                             f"(5 s x {m['mode']['switches']}회)이 주 원인인지 확인하세요."))
         dev = m["plan"]["deviation_max_m"]
         if dev is not None and dev > 1.0:
@@ -489,7 +562,8 @@ class RunRecorder(Node):
             f"| /plan 발행 | {m['plan']['publishes']}회 |",
             f"| 경로의 미관측 통과 | {unk_txt} |",
             f"| 경로 이탈 (평균/최대) | {dev_txt} |",
-            f"| wz 클램프율 | {m['wz']['clamp_frac']*100:.1f}%  (최대 {m['wz']['clamp_max']*100:.0f}%) |",
+            f"| 실현불가 회전 요청 | {m['wz']['infeasible_frac']*100:.1f}%  "
+            f"(최대 초과 {m['wz']['excess_max']*100:.0f}%, R_min {m['wz']['r_min']} m) |",
             f"| wz 요청/실제 평균 | {wz_txt} |",
             f"| 모드별 체류 | {mode_txt} |",
             f"| 모드 전환 | {m['mode']['switches']}회 |",
@@ -497,6 +571,7 @@ class RunRecorder(Node):
                                  ", ".join(
                                      f"{s['sec']:.0f}s/{(s['turned_deg'] or 0):.0f}°"
                                      for s in m["mode"]["spin_segments"])) + " |",
+            f"| 목표 수행 시간 | {m['motion']['executing_sec']:.0f} s |",
             f"| 정지 / 저속정체 | {m['motion']['stopped_sec']:.0f} s / {m['motion']['stalled_sec']:.0f} s |",
             "",
             "> 이 파일은 주행 중 계속 갱신됩니다. 강제종료해도 마지막 갱신까지는 남습니다.",

@@ -42,6 +42,17 @@ import map_layout  # noqa: E402
 # stale 로 오판하지 않기 위함.
 MTIME_TOLERANCE_SEC = 2.0
 
+# ---- 격자 판정 상수 (2026-08-25) ----
+# map_server 판정식: occ = (255 - 픽셀값) / 255.
+#   0=점유(occ 1.000) · 254=자유(occ 0.004) · 205=미관측(occ 0.19608)
+# free_thresh 가 이 값보다 크면 미관측이 **자유공간으로 읽힌다.**
+UNKNOWN_OCC = (255.0 - 205.0) / 255.0
+# pcd2pgm 이 쓰는 값. 0.196 을 쓰면 실제값과 8e-5 차이라 경계에 걸린다.
+GRID_FREE_THRESH = 0.19
+# 미관측이 이 비율을 넘으면 '투영 방식으로 구운 격자' 로 본다.
+# 실측: 레이캐스팅 없이 구운 cschool 87.9% · alm_lab 81.3%.
+UNKNOWN_WARN_SHARE = 0.50
+
 # ⚠ 교과서의 FNV-1a 64 오프셋(14695981039346656037 = 0xCBF29CE484222325)이 **아니다.**
 # icp_relocalization/fpfh_pipeline.hpp:232 의 값은 1469598103934665603 — 표준값에서
 # 한 자리가 빠진 오타다. 하지만 fpfh_map_builder 와 teaser_fpfh_localizer 가 둘 다
@@ -106,6 +117,68 @@ def read_pgm_size(path):
         return int(tokens[1]), int(tokens[2])
     except ValueError:
         return None
+
+
+# 파일이 안 바뀌면 다시 안 읽는다. poll_sec(기본 5 s)마다 맵마다 격자 전체를
+# 읽으면 Orin Nano 에서 헛일이 된다 — 1014x671 격자 하나가 680 KB 다.
+_PGM_SHARES_CACHE = {}
+
+
+def read_pgm_shares(path, stat=None):
+    """P5 PGM 의 점유/자유/미관측 비율. 실패하면 None.
+
+    ##왜 재는가## '이 격자가 레이캐스팅으로 구워졌는가' 를 mtime 으로 추측하지
+    않고 **직접 측정**한다. 투영 방식으로 구운 격자는 점이 찍힌 셀만 자유공간이
+    되어 미관측이 8할을 넘는다(실측 cschool 87.9% / alm_lab 81.3%). 플래너가
+    allow_unknown:false 이므로 그런 맵에서는 대부분의 목표에서 계획이 실패한다.
+
+    격자는 어느 쪽으로 구웠든 똑같이 열리고 로그도 깨끗하다. 목표를 찍어봐야
+    드러나므로, 여기서 미리 재서 사람에게 보여준다.
+
+    numpy 를 쓰지 않는다 — bytes.count 가 C 속도라 100만 셀도 수 ms 다.
+    ``stat`` 을 주면 (mtime, size)로 캐시해 안 바뀐 파일은 다시 읽지 않는다.
+    """
+    sig = None
+    if stat is not None:
+        sig = (stat.st_mtime_ns, stat.st_size)
+        hit = _PGM_SHARES_CACHE.get(path)
+        if hit and hit[0] == sig:
+            return hit[1]
+    try:
+        with open(path, "rb") as handle:
+            blob = handle.read()
+    except OSError:
+        return None
+    # 헤더 3개 토큰(P5, w, h) + maxval 을 건너뛴다. 주석 줄은 무시.
+    idx, tokens = 0, []
+    while len(tokens) < 4 and idx < len(blob):
+        while idx < len(blob) and blob[idx] in b" \t\r\n":
+            idx += 1
+        if blob[idx:idx + 1] == b"#":
+            while idx < len(blob) and blob[idx] not in b"\r\n":
+                idx += 1
+            continue
+        end = idx
+        while end < len(blob) and blob[end] not in b" \t\r\n":
+            end += 1
+        tokens.append(blob[idx:end])
+        idx = end
+    if len(tokens) < 4 or tokens[0] != b"P5":
+        return None
+    body = blob[idx + 1:]
+    total = len(body)
+    if total <= 0:
+        return None
+    # pcd2pgm 규약: 0=점유 · 254=자유 · 205=미관측
+    shares = {
+        "total": total,
+        "occupied": body.count(b"\x00") / total,
+        "free": body.count(b"\xfe") / total,
+        "unknown": body.count(b"\xcd") / total,
+    }
+    if sig is not None:
+        _PGM_SHARES_CACHE[path] = (sig, shares)
+    return shares
 
 
 def read_yaml_scalars(path, keys):
@@ -295,10 +368,28 @@ class MapManager(Node):
         asset.modified_epoch = float(pgm_stat.st_mtime)
 
         size = read_pgm_size(paths.grid_pgm)
-        meta = read_yaml_scalars(paths.grid_yaml, {"resolution", "image"})
+        meta = read_yaml_scalars(paths.grid_yaml, {"resolution", "image", "free_thresh"})
         resolution = meta.get("resolution", "?")
         asset.detail = (f"{size[0]} x {size[1]} @{resolution} m"
                         if size else f"@{resolution} m")
+
+        # 미관측 비율을 직접 잰다 (read_pgm_shares docstring 참고).
+        shares = read_pgm_shares(paths.grid_pgm, pgm_stat)
+        if shares:
+            asset.detail += f" · 자유 {100 * shares['free']:.0f}% / 미관측 {100 * shares['unknown']:.0f}%"
+
+        # free_thresh 오설정 — 205(occ 0.196)가 free 로 읽히면 미관측이 통행
+        # 가능이 된다. 이건 격자가 아니라 yaml 한 줄의 문제라 재굽지 않아도 된다.
+        try:
+            free_thresh = float(meta.get("free_thresh", GRID_FREE_THRESH))
+        except (TypeError, ValueError):
+            free_thresh = GRID_FREE_THRESH
+        if free_thresh > UNKNOWN_OCC:
+            asset.stale = True
+            asset.issue = (f"grid.yaml 의 free_thresh({free_thresh})가 "
+                           f"{UNKNOWN_OCC:.3f} 보다 큽니다 — 미관측(205)이 "
+                           f"자유공간으로 읽힙니다. {GRID_FREE_THRESH} 로 고치세요")
+            return asset
 
         # grid.yaml 의 image 는 폴더 안 상대경로여야 한다 (마이그레이션 누락 탐지)
         image = meta.get("image", "")
@@ -310,6 +401,37 @@ class MapManager(Node):
         if cloud_stat and cloud_stat.st_mtime > pgm_stat.st_mtime + MTIME_TOLERANCE_SEC:
             asset.stale = True
             asset.issue = "cloud.pcd 가 2D 맵보다 최신입니다 — pcd2pgm 재실행 필요"
+            return asset
+
+        # ---- scans.npz 와의 짝 (2026-08-25 추가) ----
+        # scans 는 자산 목록에 따로 넣지 않는다(MapAsset.KIND_* 는 메시지 상수라
+        # 늘리면 웹 UI 까지 번진다). 대신 **격자의 속성**으로 다룬다 — 어차피
+        # scans 의 존재 이유가 '이 격자를 레이캐스팅으로 굽는 것' 하나뿐이다.
+        scans_stat = stat_or_none(paths.scans)
+        if scans_stat is None:
+            if shares and shares["unknown"] > UNKNOWN_WARN_SHARE:
+                asset.stale = True
+                asset.issue = (
+                    f"격자의 {100 * shares['unknown']:.0f}% 가 미관측이고 "
+                    f"scans.npz 도 없습니다 — 투영 방식으로 구운 격자입니다. "
+                    f"플래너가 allow_unknown:false 라 대부분의 목표에서 계획이 "
+                    f"실패합니다. scan_recorder 를 켠 채 재매핑하세요")
+            elif shares is None or shares["unknown"] > 0.0:
+                asset.issue = ("scans.npz 가 없습니다 — 레이캐스팅으로 다시 구우면 "
+                               "자유공간이 넓어집니다 (scan_recorder 필요)")
+            return asset
+
+        if scans_stat.st_mtime > pgm_stat.st_mtime + MTIME_TOLERANCE_SEC:
+            asset.stale = True
+            asset.issue = ("scans.npz 가 2D 맵보다 최신입니다 — "
+                           "pcd2pgm --scans 재실행 필요")
+            return asset
+
+        if shares and shares["unknown"] > UNKNOWN_WARN_SHARE:
+            asset.stale = True
+            asset.issue = (
+                f"scans.npz 가 있는데도 격자의 {100 * shares['unknown']:.0f}% 가 "
+                f"미관측입니다 — --scans 없이 구웠거나 스캔 커버리지가 부족합니다")
         return asset
 
     def scan_fpfh(self, paths, cloud_stat, cloud_points):

@@ -919,8 +919,14 @@ velocity_smoother:
     #   여기가 안 내려가면 BT 리커버리 Spin 이 예전 속도로 나갑니다.
     max_velocity: [0.20, 0.0, 0.25]
     min_velocity: [-0.07, 0.0, -0.25]
-    max_accel: [1.0, 0.0, 1.5]
-    max_decel: [-1.5, 0.0, -1.5]
+    # ★ wz 각가속 ±1.5 -> ±0.8 (2026-08-25). base_control 의 max_accel_theta 와
+    #   behavior_server 의 rotational_acc_lim 은 0.8 로 내렸는데 **여기만 1.5 로
+    #   남아 있었습니다.** 더 빡빡한 0.8 이 뒤에서 이기므로 거동은 같았지만,
+    #   세 곳이 같은 값이라는 위 주석의 전제가 깨져 있었습니다.
+    #   nav2_kinematic_check.py 가 이제 각가속도 검사합니다.
+    #   (vx 는 그대로 — 선가속은 base_control max_accel_x 1.0 / soft_decel 1.5 와 짝입니다.)
+    max_accel: [1.0, 0.0, 0.8]
+    max_decel: [-1.5, 0.0, -0.8]
     odom_topic: "/Odometry"
     odom_duration: 0.1
 

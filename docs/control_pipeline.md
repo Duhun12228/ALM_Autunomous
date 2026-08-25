@@ -408,7 +408,7 @@ Command:  <ffBB = steer_deg(f32), speed_rpm(f32), mode_id(u8), flags(u8)
 | `align_lookahead_m` | 1.0 | 짧으면 노이즈에 민감, 길면 코너를 미리 보고 과하게 돎. **주행 중 값은 늘리지 말 것** — 아래 실측 분포가 전부 이 값 기준 |
 | `align_lookahead_m_stopped` | **3.0** | 출발 구간 전용. 경로가 내 헤딩에 접해서 출발하므로 오차 상한이 `lookahead/R_min` 이다. 1.0 m 면 34.9° 라 `align_enter_deg`(60°)에 **닿지도 못한다** (§6.11) |
 | `align_enter_deg` | **60.0** | **실측 분포로 결정.** alm_lab 264 s 주행에서 \|헤딩오차\| p50 8.8° · p90 39.8° · p99 67.2° · max 129.9°. 60° + 0.6 s 지속 조건에서 진입 **2회**뿐 |
-| `align_exit_deg` | 15.0 | ★ 반드시 `< align_enter_deg`. 같거나 크면 매 틱 왕복 (기동기가 생성 시점에 거부함) |
+| `align_exit_deg` | **10.0** | ★ 반드시 `< align_enter_deg` (기동기가 생성 시점에 거부함). ★★ **`yaw_goal_tolerance`(0.20 rad = 11.5°) 이하여야 한다.** 15° 였을 때는 ALIGN 이 목표 체커 허용치 **밖에서** 손을 떼서, 그 사이 3.5° 를 맞출 주체가 없었다 — MPPI 는 Ackermann 이라 제자리 회전을 못 낸다. `nav2_kinematic_check.py` §7 이 검사한다 |
 | `align_enter_hold_sec` | 0.6 | 재계획 순간의 튐을 거름. 실측에서 45° 초과 연속구간 6개 중 0.6 s 이상은 3개 |
 | `align_max_sec` | 25.0 | 0.25 rad/s 로 180° 가 12.6 s. 여유 2배. 재래치가 켜져 있으면 이 값이 **1회전(358°) 상한**도 겸한다 |
 | `align_cooldown_sec` | 3.0 | 왕복 방지 마지막 방벽 |

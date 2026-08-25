@@ -83,9 +83,18 @@ WebUI의 모든 조작 요소가 연동 후 **Jetson에서 실제로 무엇을 �
 | UI 입력 필드 | 값 | CLI 인자 | 스크립트 기본값 | 일치 |
 |---|---|---|---|---|
 | Resolution `#pgmResolution` | 0.05 | `--resolution` | 0.05 | ✅ |
-| Min points `#pgmMinPoints` | 1 | `--min-points` | 1 | ✅ |
-| Z min `#pgmZMin` | −0.3 | `--z-min` | −0.3 | ✅ |
-| Z max `#pgmZMax` | 1.0 | `--z-max` | **1.5** | ⚠ 불일치 |
+| Min points `#pgmMinPoints` | 2 | `--min-points` | 2 | ✅ |
+| 장애물 하한 `#pgmObsMinH` | 0.15 | `--obstacle-min-h` | 0.15 | ✅ 지면 기준 |
+| 장애물 상한 `#pgmObsMaxH` | 1.80 | `--obstacle-max-h` | 1.80 | ✅ 지면 기준 |
+| Z min `#pgmZMin` | (비움) | `--z-min` | 미전달 | ✅ 비우면 안 보냄 |
+| Z max `#pgmZMax` | (비움) | `--z-max` | 미전달 | ✅ 비우면 안 보냄 |
+
+> **2026-08-25 변경**: 예전에는 UI 가 `z_min=-0.3` / `z_max=1.5` 를 **항상**
+> 보냈고, `pcd2pgm` 은 이 인자가 하나라도 오면 **절대 z(호환) 모드로 떨어진다.**
+> 즉 지면 자동추정이 웹 경로에서 한 번도 쓰인 적이 없었다. 절대 z 는 라이다
+> 마운트 높이에 그대로 의존하는데 그 TF 는 아직 추정값이라, 마운트가 가정보다
+> 높으면 밴드 하한이 지면에서 멀어져 그보다 낮은 턱·박스가 전부 자유공간으로
+> 찍힌다. 이제 비어 있으면 보내지 않고, 기본은 **지면 기준** 밴드다.
 | SC 로그 `ring=20 sector=60 radius=10.0m` | — | `--num-ring`/`--num-sector`/`--max-radius` | 20 / 60 / 10.0 | ✅ |
 
 `pcd2pgm.py`의 z 밴드는 라이다 마운트 높이에 따라 조정이 필요합니다(스크립트 docstring 참조). UI 도움말에 "실행 후 출력되는 z 분포를 보고 지면 위 0.2~1.5 m로 맞출 것"을 넣어야 합니다.

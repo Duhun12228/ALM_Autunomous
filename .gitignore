@@ -21,8 +21,17 @@ ALM_auto_ws/src/alm_navigation/maps/*/*.pcd
 ALM_auto_ws/src/alm_navigation/maps/*/fpfh_map.meta
 # map_manager 의 지문 캐시
 ALM_auto_ws/src/alm_navigation/maps/*/.fingerprint
-# Scan Context DB. 이 브랜치는 SC 를 쓰지 않지만(FPFH+TEASER++ 로 교체) 로컬에
-# 남은 sc_db_*.npz 가 실수로 커밋되지 않도록 규칙은 유지한다.
+# 맵 폴더의 .npz 두 종류를 모두 제외한다.
+#   scans.npz  : scan_recorder 산출물. pcd2pgm 레이캐스팅 입력이다.
+#                수십~수백 MB 라 커밋하지 않는다.
+#   sc_db_*.npz: Scan Context DB. 이 브랜치는 SC 를 안 쓰지만(FPFH+TEASER++ 로
+#                교체) 로컬에 남은 것이 실수로 커밋되지 않도록 규칙은 유지한다.
+#
+# ⚠⚠ 맵 폴더를 다른 장비로 **옮길 때는 scans.npz 를 반드시 같이 가져가라.**
+#    빠뜨리면 받는 쪽에서 pcd2pgm 이 투영 방식으로 떨어지고, 격자의 8할이
+#    미관측으로 남아 대부분의 목표에서 계획이 실패한다(실측 cschool 87.9%).
+#    cloud.pcd 만으로는 소급 생성이 안 된다 — 재매핑밖에 없다.
+#    git 이 안 옮겨 주므로 rsync/scp 로 직접 옮길 것.
 ALM_auto_ws/src/alm_navigation/maps/**/*.npz
 # 방식 C(SC-LIO-SAM) 매핑 산출물 — 157MB 바이너리, dev/sc-lio-sam 에서 재생성
 ALM_auto_ws/src/alm_navigation/maps/sc_lio_sam_mid360_test/

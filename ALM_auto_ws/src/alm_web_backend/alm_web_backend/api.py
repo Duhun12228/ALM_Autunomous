@@ -25,6 +25,15 @@ CLAMPS = {
     "resolution": (0.01, 1.0),
     "z_min": (-10.0, 10.0),
     "z_max": (-10.0, 20.0),
+    # 지면 기준 장애물 밴드 (pcd2pgm 의 권장 경로). 절대 z 가 아니라 '지면 위
+    # 몇 m' 이므로 라이다 마운트 높이에 영향받지 않는다.
+    "obstacle_min_h": (0.0, 3.0),
+    "obstacle_max_h": (0.1, 10.0),
+    "ground_z": (-10.0, 10.0),
+    # ★ 1 -> 2 (2026-08-25). 밴드가 지면 위 0.15~1.80 m 로 넓어져 밴드에 드는
+    #   점이 크게 늘었는데 1점이면 점유 셀이 된다. 레이캐스팅은
+    #   free &= ~occupied 라 광선이 지나가도 안 지워진다 — 노이즈 한 점이
+    #   영구 장애물로 남는다.
     "min_points": (1, 1000),
     "voxel": (0.05, 5.0),
     "normal_radius": (0.1, 10.0),
@@ -779,20 +788,46 @@ class Api:
         if not os.path.isfile(paths.cloud):
             raise ApiError(409, f"'{name}' 에 cloud.pcd 가 없습니다. 먼저 3D 맵을 저장하세요.")
 
-        z_min = _clamp("z_min", request.float_field("z_min", -0.3))
-        z_max = _clamp("z_max", request.float_field("z_max", 1.5))
-        if z_max <= z_min:
-            raise ApiError(400, "z_max 는 z_min 보다 커야 합니다.")
-
         argv = [
             self.exe["pcd2pgm"],
             "--pcd", paths.cloud,
             "--out", os.path.join(paths.path, "grid"),
             "--resolution", str(_clamp("resolution", request.float_field("resolution", 0.05))),
-            "--z-min", str(z_min),
-            "--z-max", str(z_max),
-            "--min-points", str(_clamp("min_points", request.int_field("min_points", 1))),
+            "--min-points", str(_clamp("min_points", request.int_field("min_points", 2))),
         ]
+
+        # ---- 높이 밴드 (2026-08-25 수정) ----
+        # ##왜 이렇게 바뀌었나## 예전에는 --z-min/--z-max 를 **무조건** 넘겼다.
+        #   그런데 pcd2pgm 은 이 인자가 하나라도 오면 절대 z 를 쓰는 **호환
+        #   모드로 떨어진다.** 즉 지면 자동추정이 웹 경로에서 통째로 죽어 있었다.
+        #   기본값 -0.3 의 정당성은 '라이다 마운트 0.5 m' 가정에 전부 걸려
+        #   있는데 그 TF 는 아직 추정값이다(docs/TODO.md). 마운트가 0.7 m 면
+        #   밴드 하한이 지면 위 0.4 m 가 되어 그보다 낮은 턱·박스가 전부
+        #   자유공간으로 찍힌다. 미관측이 아니라 **가짜 자유공간**이라 더 나쁘다.
+        #
+        # 이제 절대 z 는 **요청에 명시적으로 있을 때만** 넘긴다. 없으면
+        # pcd2pgm 이 지면을 자동 추정하고 지면 기준 밴드를 쓴다.
+        has_abs = ("z_min" in request.body) or ("z_max" in request.body)
+        if has_abs:
+            z_min = _clamp("z_min", request.float_field("z_min", -0.3))
+            z_max = _clamp("z_max", request.float_field("z_max", 1.5))
+            if z_max <= z_min:
+                raise ApiError(400, "z_max 는 z_min 보다 커야 합니다.")
+            argv += ["--z-min", str(z_min), "--z-max", str(z_max)]
+            self._log("warn",
+                      f"'{name}' 2D 변환에 절대 z 밴드 [{z_min}, {z_max}] 가 지정됐습니다 — "
+                      f"지면 기준이 아니므로 밴드보다 낮은 장애물(턱·박스)이 "
+                      f"자유공간으로 찍힙니다. 라이다 마운트 높이가 확정되기 "
+                      f"전에는 비워 두고 자동 추정을 쓰세요.")
+        else:
+            lo = _clamp("obstacle_min_h", request.float_field("obstacle_min_h", 0.15))
+            hi = _clamp("obstacle_max_h", request.float_field("obstacle_max_h", 1.80))
+            if hi <= lo:
+                raise ApiError(400, "obstacle_max_h 는 obstacle_min_h 보다 커야 합니다.")
+            argv += ["--obstacle-min-h", str(lo), "--obstacle-max-h", str(hi)]
+            if "ground_z" in request.body:
+                argv += ["--ground-z",
+                         str(_clamp("ground_z", request.float_field("ground_z", 0.0)))]
         # 레이캐스팅 입력. scan_recorder 가 매핑 중에 남긴 것이며, 있으면 반드시
         # 넘겨야 한다 — 빼면 '점이 찍힌 셀만 자유공간' 인 옛 투영 방식으로
         # 조용히 떨어지고, 격자의 8할 이상이 미관측으로 남는다(실측 cschool

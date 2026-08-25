@@ -18,7 +18,12 @@
 - [ ] `localization.launch.py` 의 `map_voxel_leaf_size` **0.5 → 0.2** (현재 76만점→517점 과다축소).
       cloud_voxel도 0.3→0.2 검토. 정합 정확도/안정성 개선.
 - [ ] `fitness_score_thre`(0.2)·`converged_count_thre`(40) 실측 튜닝.
-- [ ] pcd2pgm 생성 yaml 의 `free_thresh`(0.25) → 0.196 검토 (205=unknown 오독 방지).
+- [x] ~~pcd2pgm 생성 yaml 의 `free_thresh`(0.25) → 0.196 검토~~ (2026-08-25 완료).
+      **다만 이 항목이 적어둔 목표값 0.196 자체가 틀렸다.** 205 의 실제 occ 가
+      (255-205)/255 = 0.19608 이라 0.196 은 8e-5 차이로 경계에 걸린다. 채택값은
+      **0.19** 이고 `pcd2pgm.py` 의 `FREE_THRESH` 상수로 고정했다.
+      `map_manager` 가 이제 grid.yaml 의 free_thresh 를 검사해 0.196 보다 크면
+      stale 로 표시한다.
 
 ### 2. Nav2 실주행 검증
 - [ ] `alm_bringup navigation.launch.py` 로 측위+Nav2 통합 구동 (map/map_pcd 인자).
@@ -165,11 +170,18 @@
       실효 wz 상한이 `|vx|/R_min = 0.122` 라 **MPPI 가 스스로 문턱(0.20)을 넘어
       빠져나오는 경로는 이제 없다.** spin 을 거는 주체는 ALIGN 과 BT 리커버리
       Spin(0.25) 둘뿐이고, 그게 의도한 구조다 (`docs/nav2_planning.md` §3 갱신 참고).
-- [ ] ⚠ **URDF vs STM32 CONS 지오메트리 불일치**. (2026-08-19: nav2_kinematic_check.py §6 이 이제 이걸 검출한다. 실측 확정만 남음.) URDF 는 휠베이스 0.9116 m /
-      윤거 1.0 m (front_x 0.6106, rear_x -0.3010, half_track 0.5), CONS 는
-      B=1.0 m / T=0.919 m 로 **사실상 뒤바뀌어 있다.** 둘 다 '실측'이라 주장하므로
-      어느 쪽이 맞는지 확인해야 한다. 현재 nav2/조향 제한은 CONS 를 따르고
-      footprint 만 URDF 를 따른다 — R_min 과 footprint 가 서로 다른 출처인 셈이다.
+- [ ] ⚠ **URDF vs STM32 CONS 지오메트리 — 아직 열려 있다 (줄자 필요).**
+      ★ **검사기가 초록불이라고 닫지 말 것.** `nav2_kinematic_check.py` §6 이
+      전부 OK 를 내는 이유는 **URDF 를 CONS 에 맞춰 고쳤기 때문**이지 실측으로
+      확인했기 때문이 아니다. 즉 답은 "CONS 를 골랐다" 이지 "재봤다" 가 아니다.
+        · 예전 URDF : 휠베이스 0.9116 m · 윤거 1.0 m
+                      (front_x 0.6106, rear_x -0.3010, half_track 0.500)
+        · CONS      : B = 1.000 m · T = 0.919 m   ← 이쪽을 채택
+        · 현재 URDF : rear_x -0.3894, half_track 0.4595 로 CONS 에 맞춤
+      `alm_robot.urdf.xacro` 에 `##CONFIRM## front_x / rear_x 배분은 CAD 확인이
+      필요하다` 가 그대로 남아 있다 — 휠베이스 **합**만 맞췄고 앞뒤 배분은
+      미확인이다. 배분이 틀리면 ICR 위치가 틀리고, 그건 R_min 이 아니라
+      **선회 중 차체 궤적**에 들어간다.
 
 ### 3.97 제어 파이프라인 보강 (2026-08-19) — docs/control_pipeline.md
 - [x] **조향 슬루 제한 + cmd_vel 재정합**. 출발 선회에서 조향 명령이 1500 deg/s 로

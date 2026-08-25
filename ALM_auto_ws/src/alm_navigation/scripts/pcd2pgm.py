@@ -152,6 +152,35 @@ def estimate_ground_z(z, bin_h=0.05, rel_thresh=0.05):
     return float(0.5 * (edges[k] + edges[k + 1]))
 
 
+def ground_variation(xyz, tiles=4, min_pts=2000):
+    """구역을 나눠 각각 지면을 추정한다. 전역 단일 평면 가정의 검증용.
+
+    ##왜 필요한가## estimate_ground_z 는 맵 전체에서 지면 하나를 찾는다. 경사로,
+    단차, 여러 층이 있으면 그 하나가 어디에도 안 맞는다 — 낮은 쪽에서는 밴드가
+    떠서 장애물을 놓치고, 높은 쪽에서는 밴드가 지면을 물어 바닥이 벽이 된다.
+    둘 다 조용히 일어나고 격자를 열어봐도 정상으로 보인다.
+
+    구역별 추정값의 폭을 재서 '이 가정이 성립하는가' 를 사람에게 보여준다.
+    판정하지 않고 보고만 한다 — 지면 모델을 고치는 것은 별개의 작업이다.
+
+    반환: 구역별 지면 z 목록 (점이 충분한 구역만).
+    """
+    x, y, z = xyz[:, 0], xyz[:, 1], xyz[:, 2]
+    xe = np.linspace(float(x.min()), float(x.max()), tiles + 1)
+    ye = np.linspace(float(y.min()), float(y.max()), tiles + 1)
+    out = []
+    for i in range(tiles):
+        in_x = (x >= xe[i]) & (x <= xe[i + 1])
+        if not in_x.any():
+            continue
+        for j in range(tiles):
+            m = in_x & (y >= ye[j]) & (y <= ye[j + 1])
+            if int(m.sum()) < min_pts:
+                continue
+            out.append(estimate_ground_z(z[m]))
+    return out
+
+
 def raycast_free(shape, res, min_x, min_y, points, offsets, origins,
                  blocked, max_range, n_bins, progress=True):
     """스캔별 레이캐스팅으로 '광선이 지나간 셀' 마스크를 만든다.
@@ -243,11 +272,18 @@ def main():
                     help="[호환] 장애물 밴드 하한을 pcd 절대 z 로 지정. 주면 지면 기준 대신 이걸 쓴다")
     ap.add_argument("--z-max", type=float, default=None, help="[호환] 장애물 밴드 상한 (절대 z)")
 
-    ap.add_argument("--min-points", type=int, default=1, help="점유 판정 셀당 최소 점 수")
+    # ★ 1 -> 2 (2026-08-25). 밴드가 지면 위 0.15~1.80 m 로 넓어져 밴드에 드는
+    #   점이 크게 늘었는데 1 이면 **반사 노이즈 한 점이 점유 셀**이 된다.
+    #   레이캐스팅은 free &= ~occupied 라 광선이 그 셀을 지나가도 안 지워진다
+    #   — 노이즈가 영구 장애물로 남고, 좁은 통로에서 계획을 막는다.
+    ap.add_argument("--min-points", type=int, default=2, help="점유 판정 셀당 최소 점 수")
     ap.add_argument("--ray-max-range", type=float, default=15.0,
                     help="레이캐스팅 최대 거리 [m]. 멀수록 입사각이 스쳐 신뢰도가 떨어진다")
     ap.add_argument("--ray-bins", type=int, default=1080,
                     help="스캔당 방위각 빈 수 (기본 1080 = 0.33도)")
+    ap.add_argument("--ground-spread-warn", type=float, default=0.20,
+                    help="구역별 지면 편차가 이보다 크면 경고 [m]. "
+                         "전역 단일 평면 가정이 깨졌다는 뜻이다")
     args = ap.parse_args()
 
     if not os.path.isfile(args.pcd):
@@ -290,6 +326,19 @@ def main():
         print(f"  지면 z = {ground:.3f} ({how})")
         print(f"  장애물 밴드 = 지면 위 [{args.obstacle_min_h:.2f}, {args.obstacle_max_h:.2f}] m"
               f"  -> 절대 z [{zlo:.2f}, {zhi:.2f}]")
+        # 전역 단일 평면 가정이 성립하는지 보고한다 (ground_variation docstring).
+        tiles = ground_variation(xyz)
+        if len(tiles) >= 4:
+            spread = float(max(tiles) - min(tiles))
+            print(f"  구역별 지면 편차 = {spread:.2f} m "
+                  f"({len(tiles)}구역, {min(tiles):.2f} ~ {max(tiles):.2f})")
+            if spread > args.ground_spread_warn:
+                print(f"  ⚠ 지면이 평평하지 않습니다 (편차 {spread:.2f} m > "
+                      f"{args.ground_spread_warn:.2f} m). 지면 하나로는 맞출 수 없습니다:")
+                print(f"    · 낮은 쪽에서는 밴드가 떠서 장애물을 놓칩니다")
+                print(f"    · 높은 쪽에서는 밴드가 지면을 물어 바닥이 벽이 됩니다")
+                print(f"    구역을 나눠 따로 굽거나, --ground-z 로 주행 영역의 "
+                      f"지면을 직접 지정하세요.")
 
     # ---------------------------------------------------------------- 격자 범위
     res = args.resolution
