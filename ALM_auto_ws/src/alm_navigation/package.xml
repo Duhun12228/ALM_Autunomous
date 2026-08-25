@@ -27,6 +27,20 @@
   <exec_depend>nav2_mppi_controller</exec_depend>
   <exec_depend>nav2_smoother</exec_depend>
   <exec_depend>tf2_ros</exec_depend>
+  <!-- scripts/ 의 파이썬 노드들이 직접 import 한다.
+       run_recorder.py  : rclpy, nav_msgs, geometry_msgs, action_msgs,
+                          std_msgs, alm_msgs(McuCommand), numpy
+       scan_recorder.py : sensor_msgs / sensor_msgs_py, numpy
+       pcd2pgm.py       : numpy -->
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>action_msgs</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>sensor_msgs_py</exec_depend>
+  <exec_depend>alm_msgs</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
 

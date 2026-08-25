@@ -301,18 +301,38 @@ controller_server:
       batch_size: 1600
       iteration_count: 1
 
-      # ---- 왜 DiffDrive 인가 (Ackermann 이 아니라) ----
-      # 이 플랫폼은 4륜 독립조향이라 spin 모드에서 제자리 회전이 됩니다.
-      # MPPI 를 Ackermann(min_turning_r=1.643)으로 묶으면 제자리 회전을 아예
-      # 계획하지 못해, 출발 시 자세 정렬과 목표 자세 맞춤을 전부 Nav2 Spin
-      # 리커버리에 떠넘기게 됩니다.
-      # 경로의 R_min 준수는 이미 Hybrid-A* 가 보장하므로 MPPI 는 자유롭게 둡니다.
-      # normal 모드로 못 내는 곡률은 command_manager 가 |wz| <= |vx|/R_min 으로
-      # 접고(steer_limit_enabled), 진짜 제자리 회전 요청(vx≈0, wz 큼)은 auto 모드가
-      # spin 으로 보냅니다 (auto_spin_angular_threshold, base_control.yaml).
-      # → normal 모드의 30° 보장은 command_manager 가 최종 책임집니다.
-      #   설계 근거 → docs/nav2_planning.md §3
-      motion_model: "DiffDrive"
+      # ---- 왜 Ackermann 인가 (2026-08-23, DiffDrive 에서 전환) ----
+      # ★ 실차 증상: "직진해도 되는 길인데 좌우로 계속 와리가리 한다."
+      #
+      # 원인은 **MPPI 의 모델과 실제 기구가 다른 것**이었습니다.
+      #   MPPI(DiffDrive) 가 낼 수 있다고 믿는 wz : wz_max
+      #   normal 모드가 실제로 내는 wz          : |vx| / R_min = 0.122 @vx=0.20
+      #   -> 예전 설정(wz_max 0.45)에서 **3.7배** 차이
+      # command_manager 가 조용히 클램프하는데 MPPI 는 그 사실을 모릅니다.
+      # 그래서 "wz=0.35 를 6.3 s 주면 경로에 붙는다" 고 롤아웃해 놓고 실제로는
+      # 1/3.7 만 돌아, 다음 틱에 더 큰 wz 를 내고, 결국 경로를 넘겨서 반대로
+      # 꺾는 **진동**이 됩니다. PathAlignCritic 가중치 14(최대)가 이를 증폭합니다.
+      #
+      # Ackermann 은 롤아웃 단계에서 |wz| <= |vx| / min_turning_r 를 그대로
+      # 적용합니다 — command_manager 의 클램프와 **동일한 식**입니다. 즉 모델과
+      # 기구가 일치하고, 클램프로 잘려나가는 명령이 사라집니다.
+      #
+      # ── 예전에 DiffDrive 를 고른 이유와, 그것이 왜 더는 유효하지 않은가 ──
+      # 예전 주석: "Ackermann 으로 묶으면 제자리 회전을 계획하지 못해 출발 시
+      #   자세 정렬과 목표 자세 맞춤을 전부 Spin 리커버리에 떠넘기게 된다."
+      # 그런데 그 뒤(2026-08-20)에 **ALIGN** 이 들어왔습니다. ALIGN 은 /plan 을
+      # 직접 보고 헤딩이 어긋나면 스스로 spin 을 겁니다:
+      #     · 출발 시 정렬  -> align_enter_deg_stopped (정지 상태 전용 문턱)
+      #     · 목표 자세 정렬 -> align_min_remaining_m: 0.0 이라 최종 접근도 담당
+      #   즉 DiffDrive 가 맡던 두 가지를 ALIGN 이 **명시적으로** 가져갔습니다.
+      #   MPPI 가 우연히 내는 회전에 기대던 구조에서 벗어난 것이라 오히려 낫습니다
+      #   (base_control.yaml 의 auto_mode_min_hold_sec 주석 참고 —
+      #    'MPPI 가 우연히 내는 회전에도 spin 이 걸리면 시간예산만 태운다').
+      #
+      # ⚠ 되돌리려면 이 값을 "DiffDrive" 로 바꾸고 wz_std 를 0.20 으로 되돌리세요.
+      #   그 경우 위의 3.7배 간극이 다시 생깁니다.
+      # 설계 근거 → docs/nav2_planning.md §3
+      motion_model: "Ackermann"
 
       # 전진 = +x. vy 는 crab 전용이라 Nav2 경로에서는 쓰지 않습니다
       # (command_manager 가 crab 모드로 별도 처리).
@@ -325,25 +345,27 @@ controller_server:
       vx_max: 0.20          # base_control.yaml max_linear_x
       vx_min: -0.07         # base_control.yaml min_linear_x
       vy_max: 0.0
-      # spin 모드 상한(auto_spin_max_angular_speed 0.45)에 맞춥니다.
-      # ★ 여기는 낮추지 않았습니다. spin 은 STM32 고정 자세(47°)로 도는 모드라
-      #   우리가 조향각을 연속 제어하지 않습니다 — 이번에 derisk 한 대상이 아닙니다.
-      #   normal 에서 실제로 낼 수 있는 값은 vx/R_min = 0.122 @vx=0.20 이며,
-      #   그 사이 구간은 command_manager 가 조향각 한계로 클램프합니다.
-      wz_max: 0.45
+      # spin 모드 상한(auto_spin_max_angular_speed)에 맞춥니다.
+      # ★ 0.45 -> 0.25 (2026-08-23). base_control.yaml 에서 spin 속도를 내린 것과
+      #   세트입니다(제자리 회전 시 바퀴가 전진 최대속도의 1.53배였음).
+      #   nav2_kinematic_check.py 가 셋의 일치를 검사합니다.
+      # ※ Ackermann 모델에서는 이 값이 **바깥 울타리**일 뿐이고, 실제 상한은
+      #   |vx| / min_turning_r = 0.122 @vx=0.20 로 모델이 스스로 조입니다.
+      wz_max: 0.25
 
       # 탐색 노이즈 표준편차 (제어 범위의 1/3 정도가 무난)
       # ★ vx_std 0.15 -> 0.09. 제어 범위가 0.60 -> 0.27 로 줄었으므로 함께 줄입니다.
       #   안 줄이면 표본 상당수가 vx_max 밖으로 나가 낭비됩니다 (0.27/3 = 0.09).
-      #   wz_std 는 유지합니다 — spin 상한(0.45)이 그대로라 탐색 범위가 필요합니다.
-      #   ⚠ 다만 normal 에서 실제 가능한 wz 는 0.122 뿐인데 MPPI 는
-      #     DiffDrive 모델이라 그걸 모릅니다. 초과분은 command_manager 클램프가
-      #     받아내고, 그 오차는 MPPI 가 위치 피드백으로 메웁니다(설계 의도).
-      #     이 간극이 vx 를 낮추면서 1.64배 -> 3.7배로 커졌다는 점은 기록해 둡니다
-      #     — 실차에서 선회 추종이 나쁘면 여기부터 의심하세요.
+      # ★ wz_std 0.20 -> 0.07 (2026-08-23). Ackermann 전환과 세트입니다.
+      #   실제 가능한 wz 범위가 ±0.122 인데 표준편차가 0.20 이면 표본의 **54%가
+      #   실행 불가능한 회전율**이었습니다 (wz~N(0,0.20) 에서 |wz|<=0.122 확률
+      #   = 45.7%). Ackermann 이 그 표본을 잘라내 주지만, 애초에 안 뽑는 편이
+      #   같은 batch_size 로 더 촘촘히 탐색합니다.
+      #   0.07 ~= 0.122 x (2/3) 로, vx_std 가 vx 범위에 대해 갖는 비율과 맞춥니다.
+      #   ⚠ 선회 추종이 굼뜨면 0.10 까지 올려보세요. 진동이 돌아오면 되돌리세요.
       vx_std: 0.09
       vy_std: 0.0
-      wz_std: 0.20
+      wz_std: 0.07
 
       temperature: 0.3
       gamma: 0.015
@@ -358,8 +380,13 @@ controller_server:
       TrajectoryVisualizer:
         trajectory_step: 5
         time_step: 3
-      # DiffDrive 에선 미사용이나 플러그인이 파라미터를 선언하므로 남겨둡니다.
-      # 값은 혼동 방지를 위해 실제 R_min 을 넣어둡니다.
+      # ★ motion_model: Ackermann 이므로 **이제 실제로 동작하는 값**입니다
+      #   (예전 DiffDrive 시절에는 선언만 되고 미사용이었습니다).
+      #   MPPI 롤아웃이 |vx|/|wz| < min_turning_r 인 표본의 wz 를
+      #   sign(wz) * vx / min_turning_r 로 접습니다 — command_manager 의
+      #   steer_limit 과 같은 식입니다.
+      #   ##중요## fourwis_encode.min_turn_radius() 및 SmacPlannerHybrid 의
+      #   minimum_turning_radius 와 **셋이 같아야** 합니다.
       AckermannConstraints:
         min_turning_r: 1.643
 
@@ -642,7 +669,26 @@ planner_server:
     GridBased:
       plugin: "nav2_smac_planner/SmacPlannerHybrid"
       tolerance: 0.50            # 목표에 정확히 못 붙을 때 허용 반경 (m)
-      allow_unknown: true        # 미탐사 영역 통과 허용 (track_unknown_space 와 세트)
+      # ★ true -> false (2026-08-23). **이게 가짜 free 수정의 마지막 조각입니다.**
+      #
+      # 배경: pcd2pgm 이 미관측을 205 로 채우는데 grid.yaml 의 free_thresh 가
+      #   0.25 라 205(occ 0.196)가 **free 로 읽히고 있었습니다**. 실측 cschool 은
+      #   격자의 87.9% 가 205 였으니, 플래너는 한 번도 본 적 없는 748 m2 를
+      #   통행 가능으로 알고 경로를 그렸습니다. 실차에서 "전역경로가 엉뚱한
+      #   데로 확 튄다" 로 나타난 증상이 이것입니다.
+      #
+      # free_thresh 를 0.19 로 고치면 205 는 이제 진짜 unknown 이 됩니다.
+      # 그런데 여기가 true 로 남아 있으면 플래너는 그 unknown 을 여전히
+      # 통과하므로 **고친 효과가 계획 단계에 하나도 반영되지 않습니다.**
+      #
+      # ⚠ 대가: 매핑하지 않은 곳으로 목표를 찍으면 계획이 실패합니다.
+      #   그건 버그가 아니라 정상입니다 — 예전엔 엉뚱한 경로를 내고 벽으로
+      #   갔을 뿐입니다. 측위가 로봇을 맵 가장자리(unknown)에 놓으면 출발부터
+      #   실패할 수 있으니, 그럴 땐 맵 커버리지부터 확인하세요.
+      # ⚠ 되돌리려면 true 로. 단 그러면 위 증상이 그대로 돌아옵니다.
+      # ⚠ 레이캐스팅(scan_recorder + pcd2pgm --scans)으로 다시 구운 맵은
+      #   자유공간이 훨씬 넓으므로 이 제약이 덜 답답합니다.
+      allow_unknown: false
       max_iterations: 1000000
       max_on_approach_iterations: 1000
       # 재계획 주기 안에 끝나야 합니다. 넘으면 tolerance 내 최선해 반환.
@@ -728,7 +774,7 @@ planner_server:
       #   생성법과 검증은 alm_navigation/lattice_primitives/README.md
       #   ⚠ 기구 상수를 바꾸면 이 파일도 다시 구워야 한다.
       lattice_filepath: "$(find-pkg-share alm_navigation)/lattice_primitives/alm_1.643m_diff.json"
-      allow_unknown: true
+      allow_unknown: false       # GridBased 와 동일 (위 주석 참고)
       tolerance: 0.50
       max_iterations: 1000000
       max_on_approach_iterations: 1000
@@ -818,9 +864,14 @@ behavior_server:
     simulate_ahead_time: 2.0
     # spin 모드 상한(base_control.yaml auto_spin_max_angular_speed)과 맞춥니다.
     # 여기만 크게 두면 velocity_smoother 와 command_manager 가 이중으로 깎습니다.
-    max_rotational_vel: 0.45
-    min_rotational_vel: 0.2
-    rotational_acc_lim: 1.5
+    # ★ 0.45 -> 0.25 (2026-08-23). BT 리커버리 Spin 의 회전 속도.
+    #   여기만 안 내리면 velocity_smoother(0.25)가 잘라내는데, 그러면 명령과
+    #   실제가 또 어긋납니다(같은 부류의 버그). 셋 다 같은 값으로 둡니다.
+    max_rotational_vel: 0.25
+    # 0.2 -> 0.10. max 가 0.25 인데 min 이 0.2 면 사실상 정속 회전이 됩니다.
+    min_rotational_vel: 0.10
+    # 1.5 -> 0.8. base_control.yaml 의 max_accel_theta 와 같은 값으로 맞춥니다.
+    rotational_acc_lim: 0.8
     behavior_plugins: ["spin", "backup", "drive_on_heading", "wait"]
     spin:
       plugin: "nav2_behaviors/Spin"
@@ -864,8 +915,10 @@ velocity_smoother:
     # [vx, vy, wz]. wz 는 MPPI wz_max / spin 상한과 동일하게 0.45.
     # ★ vx 0.45 -> 0.20, 후진 -0.15 -> -0.07 (2026-08-19).
     #   base_control.yaml · MPPI 와 셋이 같아야 합니다 (nav2_kinematic_check.py 검사).
-    max_velocity: [0.20, 0.0, 0.45]
-    min_velocity: [-0.07, 0.0, -0.45]
+    # ★ wz ±0.45 -> ±0.25 (2026-08-23). spin 속도 하향 세트.
+    #   여기가 안 내려가면 BT 리커버리 Spin 이 예전 속도로 나갑니다.
+    max_velocity: [0.20, 0.0, 0.25]
+    min_velocity: [-0.07, 0.0, -0.25]
     max_accel: [1.0, 0.0, 1.5]
     max_decel: [-1.5, 0.0, -1.5]
     odom_topic: "/Odometry"

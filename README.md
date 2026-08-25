@@ -64,6 +64,16 @@ Nav2가 만든 경로는 최소 선회반경을 지키고, `command_manager`가 
 조향 한계를 다시 적용합니다. 전역 경로가 표현하지 못하는 큰 시작 헤딩 오차는
 제어단의 `ALIGN` 기동이 spin 모드로 보정합니다.
 
+**출발 시점은 따로 다룹니다.** Hybrid-A\* 경로는 탐색 시작 상태의 θ가 현재 헤딩이라
+항상 **현재 로봇 헤딩에 접해서** 출발합니다. 그래서 벽을 보고 선 채 뒤쪽 목표를 받아도
+경로는 "벽 쪽으로 나가서 크게 감아 돌아라"라고만 말하고, 경로 헤딩오차로는 이 상황을
+볼 수 없습니다(오차 상한이 `lookahead / R_min`으로 묶입니다). 목표를 받고 **아직
+0.30 m 미만 이동한 동안**에는 경로 대신 **목표까지의 직선 방위각**을 보고 목표당 1회
+제자리 회전으로 돌아섭니다(`align_goal_bearing_*`).
+
+설계 근거는 [`path_align.py`](ALM_auto_ws/src/alm_base_control/scripts/path_align.py)
+docstring, 검증은 [`docs/control_pipeline.md`](docs/control_pipeline.md) §6.8 · §6.11 · §7.3.
+
 ## 저장소 구조
 
 | 경로 | 역할 |
@@ -308,11 +318,20 @@ ros2 launch alm_navigation slam.launch.py rviz:=true
 ros2 service call /map_save std_srvs/srv/Trigger
 ```
 
+`slam.launch.py`는 `scan_recorder`를 함께 띄웁니다(`record:=false`로 끔).
+정합된 스캔과 그때의 센서 위치를 활성 맵 폴더의 `scans.npz`로 남기며, 이것이
+다음 단계 레이캐스팅의 입력입니다. `Ctrl+C`로 종료할 때 최종 저장됩니다.
+
+> **`scans.npz`는 소급 생성되지 않습니다.** 이미 있는 `cloud.pcd`만으로는 만들 수
+> 없으므로, 스캔을 남기지 않고 매핑하면 격자를 다시 구우려 할 때 매핑부터 다시
+> 해야 합니다.
+
 ### 3. 2D 격자와 초기측위 DB 생성
 
 ```bash
 ros2 run alm_navigation pcd2pgm.py \
   --pcd $MAP/cloud.pcd \
+  --scans $MAP/scans.npz \
   --out $MAP/grid \
   --resolution 0.05 \
   --z-min 0.3 \
@@ -325,6 +344,12 @@ ros2 run icp_relocalization fpfh_map_builder \
 
 `pcd2pgm`의 z 범위는 실제 맵의 벽과 바닥 높이에 맞게 조정합니다. 그다음
 `maps/active.yaml`의 `active:`를 `MAP_NAME`과 맞춥니다.
+
+> **`--scans`를 빼면 예전 '투영' 방식으로 떨어집니다.** 그러면 점이 찍힌 셀만
+> 자유공간이 되고 나머지는 전부 미관측으로 남습니다 — 실측으로 `cschool` 격자의
+> **87.9%**가 그랬습니다. 플래너가 `allow_unknown: false`이므로 그런 맵에서는
+> 대부분의 목표에서 경로 계획이 실패합니다. `--scans`를 주면 광선이 지나간 셀을
+> 자유공간으로 채웁니다.
 
 ### 4. 자동 초기측위 확인
 
@@ -458,6 +483,24 @@ ros2 launch alm_bringup webui_dev.launch.py use_pcd_replay:=true
 | `/emergency_stop` | `std_msgs/Bool` | E-STOP 래치 설정 |
 | `/emergency_stop/release` | `alm_msgs/srv/ReleaseEstop` | E-STOP 해제 요청 |
 | `/map_save` | `std_srvs/srv/Trigger` | FAST-LIO 3D 맵 저장 |
+
+## 주행 기록·자동 진단
+
+`navigation.launch.py`는 `run_recorder`를 함께 띄웁니다(`record:=false`로 끔).
+주행이 끝나면 — 성공이든 abort든 강제종료든 — 다음이 남습니다.
+
+```
+~/ALM_Autunomous/logs/run_<날짜시각>/summary.md    사람이 읽는 판정
+                                    metrics.json   숫자 (여러 판 비교용)
+```
+
+RViz로는 안 보이는 것을 잡습니다: MPPI 요청 대비 **wz 클램프율**(좌우 진동의 지표),
+전역경로의 **미관측 영역 통과 비율**, spin 체류시간 대비 위치오차 감소, dwell 정지
+시간 비율, 경로 이탈. 1초마다 파일을 다시 쓰므로 `kill -9`로 죽어도 남습니다.
+
+> 단일 실행은 믿을 수 없습니다([`docs/TODO.md`](docs/TODO.md) — 같은 목표가
+> 323 s → ABORT → 163 s → TIMEOUT으로 흔들립니다). `metrics.json`을 여러 판 모아
+> **연속량**으로 비교하세요.
 
 ## 검증 도구
 

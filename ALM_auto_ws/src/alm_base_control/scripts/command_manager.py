@@ -193,6 +193,15 @@ class CommandManager(Node):
                 # 경로 위 어느 지점의 헤딩을 목표로 삼을지 [m]. 짧으면 노이즈에
                 # 민감하고, 길면 코너를 미리 보고 과하게 돈다.
                 ("align_lookahead_m", 1.0),
+                # 정지 상태 전용 lookahead [m]. 0 이하면 위 값을 그대로 쓴다.
+                # Hybrid-A* 경로는 **현재 로봇 헤딩에 접해서** 출발하므로,
+                # 출발 시점 헤딩오차는 호각 lookahead/R_min 으로 상한이 걸린다
+                # (1.0 m -> 34.9°). 즉 lookahead 1.0 m 에서는 align_enter_deg(60°)
+                # 가 출발 시점에 **수학적으로 도달 불가능**하다. 정지 중에만
+                # 늘려서 그 상한을 연다 (3.0 m -> 104.6°).
+                # ⚠ 주행 중 값은 늘리지 말 것 — 실측 헤딩오차 분포가 전부
+                #   lookahead 1.0 m 기준이라 정상 선회 오인이 늘어난다.
+                ("align_lookahead_m_stopped", 0.0),
                 # 진입/이탈 문턱 [deg]. 반드시 exit < enter (히스테리시스).
                 ("align_enter_deg", 60.0),
                 ("align_exit_deg", 15.0),
@@ -208,6 +217,46 @@ class CommandManager(Node):
                 # 경로 남은 길이가 이보다 짧으면 진입하지 않는다 [m].
                 # 0 이면 목표 직전의 최종 자세 정렬도 ALIGN 이 담당한다.
                 ("align_min_remaining_m", 0.0),
+                # ---- 정지 상태 전용 진입 조건 ----
+                # align_enter_deg(60°)가 높은 이유는 **주행 중** 정상 선회를
+                # 오인하지 않기 위해서다(실측 헤딩오차 p90 39.8°, 30° 초과가
+                # 틱의 35%). 정지 상태에는 그 위험이 없으므로 더 민감하게
+                # 잡아, 잘못된 방향으로 굴러가기 전에 헤딩을 맞춘다.
+                # 0 이하면 주행 중 값과 같게 두어 예전 거동을 유지한다.
+                ("align_enter_deg_stopped", 0.0),
+                ("align_enter_hold_sec_stopped", 0.0),
+                # |명령 vx| 가 이보다 작으면 '정지' 로 본다 [m/s].
+                # /Odometry.twist 는 FAST-LIO 가 안 채우므로(항상 0) 쓸 수 없다.
+                # 직전 틱에 **실제로 내보낸** vx 를 쓴다 — 슬루 제한 덕에
+                # 명령과 실제가 거의 같다는 것이 이 스택의 전제다.
+                ("align_stopped_vx", 0.05),
+                # ---- 정지 중 목표 헤딩 재래치 ----
+                # ALIGN 1회가 도는 각도는 '래치각 - exit_deg' 뿐이다. 정지 중에는
+                # 왕복 위험이 없으므로(제자리에서 돌기만 한다) 목표를 갱신해
+                # 한 번의 spin 으로 끝까지 돈다. 근거: path_align.py __init__ 주석.
+                ("align_relatch_stopped", True),
+                # ---- 출발 전 목표 방위각 정렬 (pre-align) ----
+                # 경로 헤딩만 보면 '벽을 보고 선 채 뒤쪽 목표' 를 못 고친다.
+                # 경로가 내 헤딩에 접해서 출발하기 때문이다. 그래서 목표를 받고
+                # **아직 한 번도 안 굴러간** 정지 상태에서는, 경로 대신
+                # **목표까지의 직선 방위각**을 보고 한 번에 돌아선다.
+                # 목표 좌표는 /plan 의 끝점에서 뽑는다 — 목표가 RViz 토픽으로
+                # 오든 NavigateToPose 액션으로 오든 항상 유효하다.
+                ("align_goal_bearing_enabled", True),
+                ("align_goal_bearing_deg", 40.0),
+                # 목표가 이보다 가까우면 방위각이 노이즈에 민감해 쓰지 않는다 [m].
+                ("align_goal_bearing_min_dist_m", 1.5),
+                # /plan 끝점이 이보다 많이 움직이면 '새 목표' 로 본다 [m].
+                # tolerance(0.50 m) 안에서 끝점이 흔들리므로 넉넉히 잡는다.
+                ("align_goal_jump_m", 1.0),
+                # ★ '출발 구간' 의 정의: 목표를 받은 뒤 이동거리가 이보다 작은 동안 [m].
+                #   **속도로 정의하면 안 된다.** 목표를 받으면 Nav2 가 즉시
+                #   cmd_vel 을 내고, 가속 1.0 m/s² 라 0.15 s 만에 vx=0.15 가 된다.
+                #   그런데 진입 지속시간이 0.15 s 이므로, '|vx| < 0.05' 로 정의하면
+                #   **지속시간이 차기 전에 조건이 거짓이 되어 창이 사실상 0** 이다.
+                #   (통합 시험에서 실제로 한 번도 안 걸렸다.)
+                #   이동거리로 정의하면 0.30 m / 0.15 m/s = 2.0 s 의 실효 창이 생긴다.
+                ("align_start_travel_m", 0.30),
                 # /plan 이 이 시간 넘게 안 오면 '경로 없음'으로 본다 [s]
                 ("align_plan_stale_sec", 2.0),
                 # ---- 4WIS 변환 (STM32 CONS 와 반드시 일치시킬 것) ----
@@ -352,6 +401,27 @@ class CommandManager(Node):
         self.have_plan = False
         self.warned_no_orient = False
         self.align_active_prev = False
+
+        def _pos_or_none(v):
+            """0 이하면 '미설정' 으로 본다 — 그러면 주행 중 값이 그대로 쓰인다."""
+            v = float(v)
+            return v if v > 0.0 else None
+
+        self.align_stopped_vx = abs(float(g("align_stopped_vx").value))
+        self.align_look_stopped = float(g("align_lookahead_m_stopped").value)
+        self.align_relatch = bool(g("align_relatch_stopped").value)
+        # ---- 출발 전 목표 방위각 정렬 상태 ----
+        self.bearing_on = bool(g("align_goal_bearing_enabled").value)
+        self.bearing_rad = math.radians(abs(float(g("align_goal_bearing_deg").value)))
+        self.bearing_min_dist = abs(float(g("align_goal_bearing_min_dist_m").value))
+        self.goal_jump_m = abs(float(g("align_goal_jump_m").value))
+        self.start_travel_m = abs(float(g("align_start_travel_m").value))
+        self.goal_xy = None          # 직전 /plan 끝점
+        # 목표 수락 후 이동거리 [m]. 이 값이 start_travel_m 미만인 동안을
+        # '출발 구간' 으로 본다. 목표가 없으면 창을 닫아 둔다(inf).
+        self.goal_travel = float("inf")
+        self.goal_prealigned = True  # 이 목표를 이미 pre-align 했는가
+        self.align_bearing_run = False   # 지금 기동이 방위각으로 진입했는가
         try:
             self.align = path_align.AlignManeuver(
                 enter_deg=float(g("align_enter_deg").value),
@@ -363,6 +433,9 @@ class CommandManager(Node):
                 wz_min=float(g("align_wz_min").value),
                 wz_max=float(self.spin_max_wz),
                 min_remaining_m=float(g("align_min_remaining_m").value),
+                enter_deg_stopped=_pos_or_none(g("align_enter_deg_stopped").value),
+                enter_dur_stopped=_pos_or_none(g("align_enter_hold_sec_stopped").value),
+                relatch_stopped=self.align_relatch,
             )
         except ValueError as exc:
             self.get_logger().error(
@@ -489,6 +562,44 @@ class CommandManager(Node):
                 f"이탈 {math.degrees(self.align.exit_rad):.0f}°, "
                 f"최대 {self.align.max_sec:.0f} s, 쿨다운 {self.align.cooldown_sec:.0f} s. "
                 f"헤딩오차가 이보다 크면 제자리 회전으로 고칩니다.")
+            # ---- 출발 시 도달 가능한 헤딩오차 상한 점검 ----
+            # Hybrid-A* 경로는 현재 로봇 헤딩에 **접해서** 출발하고 R_min 원호만
+            # 이어 붙이므로, 출발 시점에 경로 헤딩오차가 낼 수 있는 최대치는
+            # 호각 lookahead/R_min 이다. 진입 문턱이 그보다 크면 출발 시점에는
+            # **수학적으로 절대 안 걸린다** — 조용히 안 걸리는 부류의 함정이라
+            # 기동 시 한 번 대조해 둔다.
+            look_run = self.path_err.lookahead_m
+            look_stop = (self.align_look_stopped
+                         if self.align_look_stopped > 0.0 else look_run)
+            cap_run = math.degrees(look_run / self.r_min)
+            cap_stop = math.degrees(look_stop / self.r_min)
+            self.get_logger().info(
+                f"  출발 시 헤딩오차 상한(= lookahead/R_min): "
+                f"주행 중 {cap_run:.1f}° (lookahead {look_run:.2f} m) / "
+                f"정지 중 {cap_stop:.1f}° (lookahead {look_stop:.2f} m)")
+            enter_stop_deg = math.degrees(self.align.enter_rad_stopped)
+            if enter_stop_deg > cap_stop:
+                need = math.radians(enter_stop_deg) * self.r_min
+                self.get_logger().warn(
+                    f"정지 진입 문턱 {enter_stop_deg:.0f}° 가 출발 시 상한 "
+                    f"{cap_stop:.1f}° 를 넘습니다 — 출발 시점에는 경로 헤딩만으로 "
+                    f"ALIGN 이 걸리지 않습니다. align_lookahead_m_stopped 를 "
+                    f"{need:.2f} m 이상으로 올리거나 문턱을 낮추세요.")
+            if self.bearing_on:
+                self.get_logger().info(
+                    f"  출발 전 방위각 정렬 ON: 목표까지 "
+                    f"{self.bearing_min_dist:.1f} m 이상이고 방위각오차가 "
+                    f"{math.degrees(self.bearing_rad):.0f}° 를 넘으면, 아직 안 굴러간 "
+                    f"동안 **목표당 1회** 제자리 회전으로 돌아섭니다. "
+                    f"경로가 내 헤딩에 접해서 출발하는 한계를 이걸로 뚫습니다.")
+            else:
+                self.get_logger().warn(
+                    "출발 전 방위각 정렬 OFF — 벽을 보고 선 채 뒤쪽 목표를 받으면 "
+                    "R_min 으로 크게 감아 도는 경로가 그대로 나옵니다.")
+            self.get_logger().info(
+                f"  정지 중 목표 재래치 {'ON' if self.align_relatch else 'OFF'}"
+                + ("" if self.align_relatch else
+                   " — 한 기동이 도는 각도가 '래치각 - 이탈각' 으로 묶입니다."))
         else:
             self.get_logger().info(
                 "ALIGN OFF — 전역 경로는 R_min 원호/직선만 담으므로, 제자리 회전이 "
@@ -619,6 +730,21 @@ class CommandManager(Node):
         self.path_err.set_path(pts)
         self.last_plan_sec = self._now()
         self.have_plan = len(pts) >= 2
+        # ---- 새 목표 감지 (출발 전 방위각 정렬용) ----
+        # /goal_pose 를 구독하지 않는다. 목표는 RViz 토픽으로도, NavigateToPose
+        # 액션으로도 들어올 수 있는데 /plan 의 끝점은 어느 쪽이든 항상 그 목표다.
+        # 재계획해도 끝점은 그대로이므로, 크게 튀면 새 목표로 본다.
+        end = self.path_err.endpoint()
+        if end is not None:
+            if (self.goal_xy is None
+                    or math.hypot(end[0] - self.goal_xy[0],
+                                  end[1] - self.goal_xy[1]) > self.goal_jump_m):
+                self.goal_travel = 0.0
+                self.goal_prealigned = False
+                self.get_logger().info(
+                    f"새 목표 감지 ({end[0]:+.2f}, {end[1]:+.2f}) "
+                    f"— 출발 전 방위각 정렬 대기")
+            self.goal_xy = end
         if (self.have_plan and not self.path_err.has_orientation()
                 and not self.warned_no_orient):
             self.warned_no_orient = True
@@ -665,11 +791,50 @@ class CommandManager(Node):
                       and (now - self.last_plan_sec) <= self.align_stale)
         pose = self._robot_pose() if plan_fresh else None
 
+        # ---- '정지' 를 두 가지로 나눈다 ----
+        #   starting    : **출발 구간인가.** 목표를 받고 아직 start_travel_m
+        #     (0.30 m)만큼 안 굴러갔다. 진입 문턱·lookahead 선택에 쓴다.
+        #     ##왜 속도가 아니라 이동거리인가## 목표를 받으면 Nav2 가 즉시
+        #     cmd_vel 을 내고 가속 1.0 m/s² 라 0.15 s 만에 vx=0.15 가 된다.
+        #     '|vx| < 0.05' 로 정의하면 진입 지속시간(0.15 s)이 차기 전에 조건이
+        #     거짓이 되어 **창이 사실상 0** 이다. 통합 시험에서 실제로 한 번도
+        #     안 걸렸다. 이동거리로 보면 0.30/0.15 = 2.0 s 의 실효 창이 생긴다.
+        #     동시에 이 정의가 '복귀 dwell 중 재진입 루프' 도 막는다 — 창은
+        #     목표당 한 번만 열리고, 굴러가면 영영 닫힌다.
+        #   stopped_raw : 실제로 안 움직이는가. **재래치에만** 쓴다.
+        stopped_raw = abs(self.out_vx) < self.align_stopped_vx
+        starting = (self.goal_travel < self.start_travel_m) and not gated
+
+        # ---- 경로 헤딩오차 ----
+        # 출발 구간에는 lookahead 를 늘려 오차 상한을 연다.
+        # 근거는 path_align.PathHeadingError.evaluate docstring.
+        la = (self.align_look_stopped
+              if (starting and self.align_look_stopped > 0.0) else None)
         err = remaining = None
         if pose is not None:
-            ev = self.path_err.evaluate(*pose)
+            ev = self.path_err.evaluate(*pose, lookahead_m=la)
             if ev is not None:
                 err, remaining = ev[0], ev[1]
+
+        # ---- 출발 전 목표 방위각 정렬 (pre-align) ----
+        # 경로 헤딩만 보면 '벽을 보고 선 채 뒤쪽 목표' 를 영영 못 고친다.
+        # Hybrid-A* 경로가 **내 헤딩에 접해서** 출발하기 때문이다 — 즉 경로는
+        # "지금 향한 쪽으로 나가서 크게 감아 돌아라" 라고만 말한다.
+        # 그래서 목표를 받고 **아직 한 번도 안 굴러간** 정지 상태에서는,
+        # 경로 대신 **목표까지의 직선 방위각**을 오차로 써서 한 번에 돌아선다.
+        # 그 뒤 재계획하면 Hybrid-A* 가 깨끗한 경로를 낸다.
+        #   ⚠ 목표당 1회뿐이다(goal_prealigned). 주행 중에 다시 서더라도
+        #     쓰지 않는다 — 코너를 도는 중이면 목표 방위각이 경로와 다른 게
+        #     정상이고, 거기서 방위각을 쫓으면 벽으로 향한다.
+        use_bearing = False
+        if (self.bearing_on and pose is not None and starting
+                and not self.goal_prealigned and self.goal_xy is not None):
+            dx = self.goal_xy[0] - pose[0]
+            dy = self.goal_xy[1] - pose[1]
+            dist = math.hypot(dx, dy)
+            berr = path_align.wrap_pi(math.atan2(dy, dx) - pose[2])
+            if dist >= self.bearing_min_dist and abs(berr) >= self.bearing_rad:
+                err, remaining, use_bearing = berr, dist, True
 
         # ALIGN 을 걸어도 되는 상황인가.
         #   · auto 모드에서만. 수동 normal/spin/crab 은 조종자가 주인이다.
@@ -683,17 +848,43 @@ class CommandManager(Node):
             and not self.estop and not (self.stop_on_mcu_fault and self.mcu_fault)
         )
         ryaw = pose[2] if pose is not None else 0.0
-        active, wz, left = self.align.update(now, ryaw, err, remaining, eligible, gated)
+        # 재래치는 dwell 중에도 살아 있어야 한다(그때도 경로는 갱신되므로).
+        # 다만 방위각으로 진입한 기동에는 걸지 않는다 — 목표가 이미 절대
+        # 방위각으로 고정돼 있어 재래치가 무의미하고, 낡은 /plan 이 그 목표를
+        # 흔들 여지만 만든다.
+        relatch = (self.align_relatch and stopped_raw
+                   and not self.align_bearing_run)
+        # 방위각을 err 로 넣을 때는 그 오차에 맞는 문턱도 같이 넘긴다.
+        # 안 넘기면 enter_deg_stopped(60°)가 실효 문턱이 되어 40° 설정이
+        # 조용히 무시된다.
+        active, wz, left = self.align.update(
+            now, ryaw, err, remaining, eligible, gated,
+            stopped=starting, relatch=relatch,
+            enter_rad_override=(self.bearing_rad if use_bearing else None),
+            enter_dur_override=(self.align.enter_dur_stopped if use_bearing else None))
 
         if active and not self.align_active_prev:
-            self.get_logger().info(
-                f"ALIGN 진입: 경로 헤딩오차 {math.degrees(self.align.entry_err):+.1f}° "
-                f"-> 목표 헤딩 {math.degrees(self.align.target_yaw):+.1f}° 로 제자리 회전")
+            self.align_bearing_run = use_bearing
+            if use_bearing:
+                self.goal_prealigned = True      # 이 목표에는 다시 안 쓴다
+                self.get_logger().info(
+                    f"ALIGN 진입(출발 전 방위각 정렬): 목표까지 방위각오차 "
+                    f"{math.degrees(self.align.entry_err):+.1f}° "
+                    f"-> 목표 헤딩 {math.degrees(self.align.target_yaw):+.1f}° 로 "
+                    f"제자리 회전. 다 돌면 전역경로가 다시 그려집니다.")
+            else:
+                self.get_logger().info(
+                    f"ALIGN 진입: 경로 헤딩오차 "
+                    f"{math.degrees(self.align.entry_err):+.1f}° "
+                    f"(lookahead {la if la is not None else self.path_err.lookahead_m:.1f} m, "
+                    f"이동 {self.goal_travel:.2f} m) "
+                    f"-> 목표 헤딩 {math.degrees(self.align.target_yaw):+.1f}° 로 제자리 회전")
         elif (not active) and self.align_active_prev:
+            self.align_bearing_run = False
             self.get_logger().info(
                 f"ALIGN 종료({self.align.last_exit_reason}): 남은 오차 "
                 f"{math.degrees(left) if left is not None else float('nan'):+.1f}° "
-                f"-> normal 복귀")
+                f"-> normal 복귀 (재래치 누적 {self.align.n_relatch}회)")
             # auto 상태머신을 normal 로 되돌려 놓는다. 안 하면 hold_active 가
             # 남아 복귀 직후 한동안 spin 에 붙들린다.
             self.last_auto_mode = "normal"
@@ -803,10 +994,22 @@ class CommandManager(Node):
 
         Returns: (steer_deg, wz_actual_or_None)
 
-        normal 모드에서만 wz 를 재역산한다. crab/spin 은 STM32 가 steer_deg 의
-        **부호만** 쓰고 각도는 고정 자세(CONS(8) 90° / CONS(9) 47°)를 쓰므로,
-        우리가 보내는 각도 크기를 깎아봐야 STM32 거동이 안 바뀐다. 그 대신
-        모드 전환 dwell 이 물리 조향축 스윕 시간을 벌어 준다.
+        ★ crab/spin 에는 슬루를 **걸지 않는다** (2026-08-23 수정).
+        예전에는 모드와 무관하게 slew_limit 을 통과시키고 wz 재역산만
+        normal 로 제한했다. 그런데 crab/zero-turn 에서 STM32 는 steer_deg 의
+        **부호만** 쓴다(uart_protocol.md v2 §mode). 부호 전용 값에 변화율
+        제한을 걸면 크기가 깎이는 게 아니라 **의미가 뒤집힌다**:
+
+            직전 -30° (normal 우선회) -> spin 좌회전 요청(+)
+            20 deg/s 슬루 -> -30 -> -20 -> ... -> 0 -> ... -> +30 (3.0 s)
+            그 앞 1.5 s 동안 부호가 음수 = STM32 는 **반대쪽으로 조준**한다
+
+        조향축이 반대로 갔다가 다시 오면 최악 94°(±47°) 스윕이 되어, 모드
+        전환 dwell 이 벌어 준 시간을 그대로 까먹는다. 부호는 즉시 보내고,
+        물리 스윕 시간은 dwell 이 담당한다 — 그게 dwell 의 존재 이유다.
+
+        normal 모드에서만 슬루를 걸고 wz 를 재역산한다. 거기서는 steer_deg 의
+        크기가 곧 실제 조향각이라 변화율 제한이 물리적으로 의미가 있다.
 
         ⚠ 이 함수의 전제: max_steer_rate_deg_s 가 실제 액추에이터 슬루율보다
           **낮다**. 그래야 out_steer_deg 가 실제 조향각의 좋은 추정치가 된다
@@ -814,10 +1017,14 @@ class CommandManager(Node):
           업링크가 없어 이 전제를 검증할 수단이 지금은 없다 —
           docs/control_pipeline.md §7 참고.
         """
+        if effective != "normal":
+            # 부호 전용 값 — 위 docstring 참고. 즉시 통과시킨다.
+            self.out_steer_deg = float(steer_target_deg)
+            return float(steer_target_deg), None
         limited = fourwis_encode.slew_limit(
             steer_target_deg, self.out_steer_deg, self.steer_rate, dt)
         self.out_steer_deg = limited
-        if effective != "normal" or self.steer_rate <= 0.0:
+        if self.steer_rate <= 0.0:
             return limited, None
         if abs(limited - steer_target_deg) > 1e-6:
             self.get_logger().info(
@@ -953,6 +1160,9 @@ class CommandManager(Node):
         dt = clamp(now - self.last_tick_sec, 1e-3, 0.1)
         self.last_tick_sec = now
         self._check_uplink(now)
+        # 목표 수락 후 이동거리. '출발 구간' 판정의 기준이다 (속도가 아니다 —
+        # align_start_travel_m 주석 참고).
+        self.goal_travel += abs(self.out_vx) * dt
 
         # ---- 직접 구동이 살아 있으면 twist 경로 전체를 건너뛴다 ----
         # 둘을 섞지 않는 이유: twist 경로는 '요청한 속도'를 기구 상수로 rpm 으로
@@ -991,6 +1201,8 @@ class CommandManager(Node):
         # 그 시간이 기동 타임아웃을 잡아먹으면 한 번도 못 돌고 타임아웃이 난다.
         # 여기 값은 '이전 틱까지의' 유효모드 기준이며, ALIGN 이 모드를 바꾸면
         # 아래에서 다시 계산한다.
+        # dwell 중 STM32 에 넘길 조향 방향(부호만 의미 있음). None = 해당 없음.
+        dwell_aim = None
         in_startup = (self.startup_align > 0.0
                       and (now - self.start_sec) < self.startup_align)
         in_mode_dwell = (self.mode_dwell > 0.0
@@ -1026,6 +1238,23 @@ class CommandManager(Node):
                 f"기동 조향 정렬 중 ({self.startup_align - (now - self.start_sec):.1f} s 남음)",
                 throttle_duration_sec=1.0)
         elif in_mode_dwell:
+            # ★ 속도는 전부 0 으로 죽이되, **조향 방향만은 살려서 보낸다.**
+            #   (dwell_aim 에 담아 두었다가 encode 뒤에 steer_deg 부호로 넣는다.
+            #    아래 'dwell 중 조향 조준' 블록 참고.)
+            #
+            #   왜 필요한가: uart_protocol.md v2 는 crab/zero-turn 에서
+            #   "steer_deg 의 **부호만** 사용하고 크기는 무시" 한다. 그런데
+            #   여기서 wz/vy 를 0 으로 만들면 encode 가 steer_deg=0.0 을 내고,
+            #   **0.0 에는 부호가 없다.** spin 은 좌/우에 따라 조향 자세가
+            #   ±47°(CONS(9))로 정반대라, 잘못 조준하면 최악 94° 스윕이
+            #   필요해진다 — dwell 5 s 를 쓰고도 목적을 달성하지 못한다.
+            #   즉 '정지한 채 미리 조준한다' 는 이 dwell 의 설계 의도 자체가
+            #   성립하지 않고 있었다. (시뮬에서 안 잡힌 이유는 fake_mcu 가
+            #   spin/crab 을 명령 그대로 처리하기 때문. 실차 전용 결함이다.)
+            if effective == "spin":
+                dwell_aim = wz
+            elif effective == "crab":
+                dwell_aim = vy
             # ★ 전 성분을 0 으로. 예전에는 normal 일 때만 wz 를 껐는데, 그러면
             #   spin 진입 dwell 중에 **회전이 그대로 나갔다.** spin 의 회전은
             #   바퀴 구동으로 만들어지므로, 조향축이 아직 제로턴 자세(CONS(9) 47°)로
@@ -1117,6 +1346,22 @@ class CommandManager(Node):
         )
         if note:
             self.get_logger().warn(note, throttle_duration_sec=2.0)
+
+        # ---- dwell 중 조향 조준 (부호만 전달) ----
+        # 속도는 0 이지만 STM32 가 고정 자세를 **어느 쪽으로** 잡아야 하는지는
+        # 알려야 한다. crab/zero-turn 은 부호만 보고 크기는 무시하므로
+        # (uart_protocol.md v2 §mode), 여기서 부호를 넣어 주면 dwell 동안
+        # 조향축이 목표 자세로 이동한다. rpm 은 0 이라 바퀴는 돌지 않는다.
+        #   ##주의## normal 모드에는 적용하지 않는다. normal 의 steer_deg 는
+        #   크기가 실제 조향각이라 0(직진)이 맞고, 슬루 제한도 거기 걸려 있다.
+        if (dwell_aim is not None and mode_id in
+                (fourwis_encode.MODE_CRAB, fourwis_encode.MODE_ZERO_TURN)
+                and abs(dwell_aim) > 1e-9 and not (emergency_stop or not motors_on)):
+            sign = (self.wis.spin_steer_sign if mode_id == fourwis_encode.MODE_ZERO_TURN
+                    else self.wis.crab_steer_sign)
+            steer_deg = sign * math.copysign(
+                math.degrees(self.wis.max_steer_rad), dwell_aim)
+            speed_rpm = 0.0
 
         # ---- 조향 슬루 제한 + cmd_vel 재정합 ----
         # encode 가 낸 조향각은 '이 twist 를 내려면 필요한 각도'다. 기구가 그

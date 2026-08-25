@@ -16,7 +16,8 @@
       <맵이름>/
         manifest.yaml        ← 이 파일이 있어야 '맵'으로 인정한다
         cloud.pcd            3D 점군 (FAST-LIO /map_save)
-        grid.pgm  grid.yaml  2D 격자 (pcd2pgm)
+        scans.npz            스캔+센서위치 (scan_recorder) — pcd2pgm 레이캐스팅 입력
+        grid.pgm  grid.yaml  2D 격자 (pcd2pgm --scans)
         fpfh_map.meta  fpfh_map_{points,normals,fpfh}.pcd   측위 DB
 
 manifest.yaml 을 요구하는 이유는 sc_lio_sam_mid360_test/ 같은 실험 잔재 폴더가
@@ -29,6 +30,8 @@ MANIFEST_NAME = "manifest.yaml"
 ACTIVE_NAME = "active.yaml"
 
 CLOUD_NAME = "cloud.pcd"
+# scan_recorder.py 산출물. pcd2pgm 이 --scans 로 받아 레이캐스팅에 쓴다.
+SCANS_NAME = "scans.npz"
 GRID_PGM_NAME = "grid.pgm"
 GRID_YAML_NAME = "grid.yaml"
 # fpfh_map_builder 의 <prefix>_points.pcd / <prefix>.meta 규약을 따른다.
@@ -44,6 +47,7 @@ class MapPaths:
         self.path = os.path.join(root, name)
         self.manifest = os.path.join(self.path, MANIFEST_NAME)
         self.cloud = os.path.join(self.path, CLOUD_NAME)
+        self.scans = os.path.join(self.path, SCANS_NAME)
         self.grid_pgm = os.path.join(self.path, GRID_PGM_NAME)
         self.grid_yaml = os.path.join(self.path, GRID_YAML_NAME)
         self.fpfh_prefix = os.path.join(self.path, FPFH_PREFIX_NAME)

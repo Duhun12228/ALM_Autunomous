@@ -99,6 +99,13 @@ def generate_launch_description():
             # rviz:=true 면 자율주행 관측용 RViz 를 함께 띄운다
             # (경로 /plan · /plan_smoothed · /local_plan, global/local costmap,
             #  footprint, 2D Goal Pose 툴). 측위 확인용 localization.rviz 와 다르다.
+            DeclareLaunchArgument(
+                "record", default_value="true",
+                description="주행 한 판을 기록하고 종료 시 자동 판정 리포트를 남긴다 "
+                            "(run_recorder). logs/run_<시각>/summary.md"),
+            DeclareLaunchArgument(
+                "record_dir", default_value=os.path.expanduser("~/ALM_Autunomous/logs"),
+                description="run_recorder 출력 디렉터리"),
             DeclareLaunchArgument("rviz", default_value="false",
                                   description="자율주행 관측용 RViz 동시 실행"),
 
@@ -133,6 +140,18 @@ def generate_launch_description():
             ),
 
             # ---- 관측용 RViz (선택) ----
+            # 주행 기록 + 자동 판정. RViz 로는 안 보이는 것들을 남긴다 —
+            # wz 클램프율 · 경로의 미관측 통과 비율 · spin 체류 대비 위치오차 감소 등.
+            # 구독만 하므로 주행에 영향이 없다. record:=false 로 끌 수 있다.
+            Node(
+                package="alm_navigation",
+                executable="run_recorder.py",
+                name="run_recorder",
+                output="screen",
+                parameters=[{"out_dir": LaunchConfiguration("record_dir")},
+                            {"map_yaml": LaunchConfiguration("map")}],
+                condition=IfCondition(LaunchConfiguration("record")),
+            ),
             Node(
                 package="rviz2",
                 executable="rviz2",

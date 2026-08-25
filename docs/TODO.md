@@ -1,7 +1,7 @@
 # TODO — 남은 작업
 
 3D LIO 측위 전환(FAST-LIO2 매핑 + FAST-LIO-Localization) 이후 남은 작업 목록.
-최종 업데이트: 2026-08-20 (feat/nav2-hybrid-astar: ALIGN 경로 헤딩 정렬 기동 + dwell 재유도).
+최종 업데이트: 2026-08-25 (출발 헤딩 정렬 — 목표 방위각 pre-align + 정지 전용 lookahead + 재래치).
 
 ## ✅ 완료 (방식 A, 집에서 LiDAR 핸드헬드 검증)
 - 센서 UDP 직접 파싱 (per-point time 포함), 런치 통합
@@ -160,9 +160,11 @@
 - [ ] Orin Nano 계획시간 측정. `max_planning_time: 2.0` 안에 안 끝나면
       `downsample_costmap: true` + `downsampling_factor: 2` 부터 적용
       (`docs/nav2_planning.md` §4 순서표).
-- [ ] ⚠ **저속 사각지대**: `vx < 0.03` 이면서 `|wz| < auto_spin_angular_threshold(0.35)`
-      인 구간은 wz 가 0 으로 접히고 spin 도 안 걸린다. MPPI 가 스스로 wz 를 키워
-      빠져나오는 것에 기대고 있다. 실차에서 이 구간에 머물면 임계값을 0.20 으로 낮출 것.
+- [x] ~~⚠ **저속 사각지대**~~ (2026-08-25 성격이 바뀜). 임계값은 0.20 으로 내렸다.
+      다만 MPPI 를 Ackermann 으로 바꾸면서 이 항목의 전제가 사라졌다 — MPPI 의
+      실효 wz 상한이 `|vx|/R_min = 0.122` 라 **MPPI 가 스스로 문턱(0.20)을 넘어
+      빠져나오는 경로는 이제 없다.** spin 을 거는 주체는 ALIGN 과 BT 리커버리
+      Spin(0.25) 둘뿐이고, 그게 의도한 구조다 (`docs/nav2_planning.md` §3 갱신 참고).
 - [ ] ⚠ **URDF vs STM32 CONS 지오메트리 불일치**. (2026-08-19: nav2_kinematic_check.py §6 이 이제 이걸 검출한다. 실측 확정만 남음.) URDF 는 휠베이스 0.9116 m /
       윤거 1.0 m (front_x 0.6106, rear_x -0.3010, half_track 0.5), CONS 는
       B=1.0 m / T=0.919 m 로 **사실상 뒤바뀌어 있다.** 둘 다 '실측'이라 주장하므로
@@ -238,6 +240,19 @@
       · A/B (개활 2회·협착 1회): 발동 안 하는 목표는 숫자가 소수점까지 동일 = **회귀 0**
       · 문턱 60° 는 실측 분포 근거 (경로 추종 중 헤딩오차 p90 9.7°, 30°로 낮추면 틱의 35%)
       상세 docs/control_pipeline.md §6.8 · §7.3
+- [x] **출발 헤딩 정렬 — ALIGN 이 출발 시점에 작동하지 않던 것 수정** (2026-08-25).
+      ★ 위 항목의 **사각지대**였다. Hybrid-A* 경로는 항상 현재 헤딩에 **접해서**
+      출발하므로 경로 헤딩오차의 상한이 `lookahead/R_min` 이다 — 1.0 m 면 34.9° 라
+      진입 문턱 60° 에 **수학적으로 못 닿았다.** 벽을 보고 선 채 뒤쪽 목표를
+      받으면 ALIGN 이 영영 안 걸렸다.
+      · `align_lookahead_m_stopped: 3.0` — 출발 구간 전용, 상한 104.6° 로 확장
+      · `align_goal_bearing_*` — 경로 대신 **목표 직선 방위각**으로 pre-align
+        (목표당 1회, 이동 0.30 m 미만인 동안만)
+      · `align_relatch_stopped` — 한 기동으로 끝까지 돌게. 방향 고정 + 늘리기만
+      · '정지' 를 속도가 아니라 **이동거리**로 정의 (`align_start_travel_m: 0.30`)
+        — 속도로 두면 가속 때문에 0.15 s 만에 창이 닫혀 사실상 발동 불가였다
+      시뮬 A/B: 뒤쪽 8 m 목표 spin 8회/145.7 s -> 1회/72.3 s, 정면 목표 회귀 0.
+      상세 docs/control_pipeline.md §6.11, docs/CHANGES.md
 - [x] **mode_switch_dwell_sec 3.0 -> 4.0 -> 5.0** (2026-08-20). 기구학 미달이었다:
       최악 스윕 normal 풀락(30°) -> spin(47°) = 77°.
       1차(4.0)는 ÷20 deg/s = 3.85 s 로 잡았는데, **20 은 '주행 중' 슬루율**이고

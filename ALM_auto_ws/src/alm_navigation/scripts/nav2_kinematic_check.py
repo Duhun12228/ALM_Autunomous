@@ -297,7 +297,61 @@ def main():
           hint="command_manager 의 wz 클램프. spin 상한과 같은 값이어야 한다. "
                "이보다 크게 두면 도달 불가능한 값이라 혼동만 만든다.")
     note("normal 모드 실제 상한", f"{wz_normal:.4f} rad/s @ vx={max_lx}",
-         f"MPPI wz_max({fp.get('wz_max')})와의 차이는 조향 클램프 + spin 라우팅이 흡수한다.")
+         f"MPPI wz_max({fp.get('wz_max')})와의 차이가 그대로 클램프된다.")
+
+    # ---- MPPI 운동모델이 이 기구를 반영하는가 (2026-08-23 추가) ----
+    # DiffDrive 로 두면 MPPI 는 제자리 회전이 되는 로봇으로 알고 롤아웃한다.
+    # 그런데 normal 모드가 실제로 내는 wz 는 vx/R_min 뿐이라, 그 간극만큼
+    # 명령이 조용히 잘리고 MPPI 는 그 사실을 모른다 -> 좌우 진동.
+    mm = fp.get("motion_model")
+    if mm == "Ackermann":
+        ack = fp.get("AckermannConstraints", {}) or {}
+        check("MPPI.AckermannConstraints.min_turning_r", ack.get("min_turning_r"), r_min,
+              tol=0.01,
+              hint="Ackermann 모델은 |wz| <= |vx|/min_turning_r 로 롤아웃을 조인다. "
+                   "이 값이 R_min 과 다르면 MPPI 의 모델과 실제 기구가 또 어긋난다.")
+        note("MPPI motion_model", "Ackermann",
+             f"롤아웃이 R_min 을 지키므로 command_manager 클램프로 잘려나가는 "
+             f"명령이 없다. 제자리 회전은 ALIGN 과 BT 리커버리가 담당한다.")
+    else:
+        _problems.append((
+            "MPPI.motion_model", str(mm), "Ackermann",
+            f"DiffDrive 면 MPPI 가 wz 를 최대 {fp.get('wz_max')}까지 낼 수 있다고 "
+            f"믿지만 normal 모드 실제 상한은 {wz_normal:.3f} 이다 "
+            f"({(float(fp.get('wz_max') or 0) / max(wz_normal, 1e-9)):.1f}배). "
+            f"그 차이가 조용히 클램프되어 좌우 진동이 된다."))
+
+    # ---- spin 진입 문턱이 도달 가능한가 (2026-08-23 추가) ----
+    # ##함정## spin 상한을 낮추면서 이 문턱을 안 내리면, 문턱이 상한보다 커져
+    #   auto 라우팅이 spin 에 **영영 진입하지 못한다.** 그러면 BT 리커버리
+    #   Spin 이 normal 모드로 실행돼 조향 선회가 나간다 — 조용히 망가진다.
+    spin_thr = bc.get("auto_spin_angular_threshold")
+    if spin_thr is not None:
+        if float(spin_thr) >= float(spin_max_wz):
+            _problems.append((
+                "auto_spin_angular_threshold", str(spin_thr),
+                f"< {spin_max_wz} (spin 상한)",
+                "문턱이 상한 이상이면 도달할 수 없어 spin 이 영영 안 걸린다. "
+                "BT 리커버리 Spin 이 normal 모드로 실행된다."))
+        else:
+            note("spin 진입 문턱 / 상한",
+                 f"{spin_thr} / {spin_max_wz} (비 {float(spin_thr)/float(spin_max_wz):.2f})",
+                 "상한을 바꾸면 이 비를 유지한 채 문턱도 같이 옮길 것.")
+
+    # ---- BT 리커버리 Spin 속도 (2026-08-23 추가) ----
+    bs = _params(nav_doc, "behavior_server")
+    if bs:
+        check("behavior_server.max_rotational_vel", bs.get("max_rotational_vel"),
+              spin_max_wz,
+              hint="BT 리커버리 Spin 의 회전 속도. 여기만 안 내리면 "
+                   "velocity_smoother 가 잘라내어 명령과 실제가 또 어긋난다.")
+        mrv = bs.get("min_rotational_vel")
+        if mrv is not None and float(mrv) >= 0.5 * float(spin_max_wz):
+            _problems.append((
+                "behavior_server.min_rotational_vel", str(mrv),
+                f"<= {0.5 * float(spin_max_wz):.2f}",
+                "최소가 최대의 절반을 넘으면 사실상 정속 회전이 되어 "
+                "감속 없이 멈춘다."))
 
     vs = _params(nav_doc, "velocity_smoother")
     mv, mnv = vs.get("max_velocity") or [], vs.get("min_velocity") or []
@@ -551,6 +605,90 @@ def main():
         note("진입 문턱 근거", f"{enter:.0f}° / {bc.get('align_enter_hold_sec')} s 지속",
              "alm_lab 실측 |경로 헤딩오차| p50 8.8° p90 39.8° p99 67.2°. "
              "30° 로 낮추면 정상 주행 틱의 35% 가 걸려 vx 가 무너진다.")
+
+        # ---- 출발 시 헤딩오차 상한 (2026-08-25 추가) ----
+        # ##함정## Hybrid-A* 는 시작 상태 theta 를 **현재 로봇 헤딩**으로 두고
+        #   R_min 원호만 이어 붙인다. 즉 경로는 항상 내 헤딩에 **접해서**
+        #   출발하므로, 출발 시점에 경로 헤딩오차가 낼 수 있는 최대값은
+        #       |err|_max = lookahead / R_min      (호각)
+        #   으로 묶인다. 진입 문턱이 그보다 크면 출발 시점에는 **수학적으로
+        #   절대 안 걸린다** — 값은 멀쩡해 보이는데 기능이 죽어 있는 부류다.
+        #   (lookahead 1.0 m + 문턱 60° 조합이 정확히 그 상태였다.)
+        look_run = float(bc.get("align_lookahead_m") or 1.0)
+        look_stp = float(bc.get("align_lookahead_m_stopped") or 0.0) or look_run
+        cap_run = math.degrees(look_run / r_min)
+        cap_stp = math.degrees(look_stp / r_min)
+        note("출발 시 헤딩오차 상한 (lookahead / R_min)",
+             f"주행 중 {cap_run:.1f}° / 정지 중 {cap_stp:.1f}°",
+             f"lookahead {look_run:.2f} m / {look_stp:.2f} m, R_min {r_min:.3f} m. "
+             f"경로가 내 헤딩에 접해서 출발하므로 이 값을 못 넘는다.")
+
+        # ---- 정지 상태 진입 조건 ----
+        esd = bc.get("align_enter_deg_stopped")
+        ehs = bc.get("align_enter_hold_sec_stopped")
+        exit_deg = float(bc.get("align_exit_deg") or 0.0)
+        if esd is not None and float(esd) > 0.0:
+            if float(esd) <= exit_deg:
+                _problems.append((
+                    "align_enter_deg_stopped", str(esd), f"> align_exit_deg({exit_deg})",
+                    "정지 진입 문턱이 이탈 문턱 이하면 진입 즉시 이탈해 왕복한다."))
+            elif float(esd) > cap_stp:
+                need = math.radians(float(esd)) * r_min
+                _problems.append((
+                    "align_enter_deg_stopped", f"{esd}° (상한 {cap_stp:.1f}°)",
+                    f"<= {cap_stp:.1f}° 또는 lookahead >= {need:.2f} m",
+                    "출발 시점에 도달 불가능한 문턱이라 경로 헤딩만으로는 "
+                    "ALIGN 이 안 걸린다. align_lookahead_m_stopped 를 올리거나 "
+                    "문턱을 낮출 것."))
+            else:
+                note("정지 상태 진입 문턱",
+                     f"{esd}° / {ehs} s 지속  (주행 중은 {bc.get('align_enter_deg')}° / "
+                     f"{bc.get('align_enter_hold_sec')} s)",
+                     f"정지 중 상한 {cap_stp:.1f}° 안이라 실제로 도달 가능하다. "
+                     f"정지 전용 조건의 실체는 '문턱' 보다 **짧은 지속시간과 "
+                     f"긴 lookahead** 다.")
+            note("정지 판정 기준", f"|vx| < {bc.get('align_stopped_vx')} m/s",
+                 "직전 틱에 내보낸 vx 로 판단한다 (/Odometry.twist 는 FAST-LIO 가 "
+                 "안 채운다). dwell/기동정렬 구간은 진입 판정에서 제외된다 — "
+                 "안 그러면 로봇이 안 굴러간 채 재진입하는 루프가 된다.")
+        else:
+            note("정지 상태 진입 문턱", "미설정",
+                 "align_enter_deg_stopped 를 두면 출발 전에 헤딩을 맞출 수 있다.")
+
+        # ---- 출발 전 목표 방위각 정렬 (2026-08-25 추가) ----
+        # 위 lookahead 확장으로도 못 뚫는 경우가 있다. 경로가 내 헤딩에 접해서
+        # 출발한다는 사실 자체는 안 바뀌기 때문이다(벽을 보고 선 채 뒤쪽 목표).
+        # 그때는 경로가 아니라 **목표까지의 직선 방위각**을 봐야 한다.
+        if bc.get("align_goal_bearing_enabled") is True:
+            bdeg = float(bc.get("align_goal_bearing_deg") or 0.0)
+            if bdeg <= exit_deg:
+                _problems.append((
+                    "align_goal_bearing_deg", str(bdeg), f"> align_exit_deg({exit_deg})",
+                    "방위각 진입 문턱이 이탈 문턱 이하면 진입 즉시 이탈한다."))
+            else:
+                note("출발 전 목표 방위각 정렬",
+                     f"{bdeg}° 초과 + 목표까지 "
+                     f"{bc.get('align_goal_bearing_min_dist_m')} m 이상, 목표당 1회",
+                     "'벽을 보고 선 채 뒤쪽 목표' 를 뚫는 유일한 경로다. "
+                     "아직 안 굴러간 정지 상태에서만 쓴다 — 주행 중에는 목표 "
+                     "방위각이 경로와 다른 게 정상이라 쫓으면 벽으로 간다.")
+        else:
+            _problems.append((
+                "align_goal_bearing_enabled", str(bc.get("align_goal_bearing_enabled")),
+                "true",
+                "OFF 면 '벽을 보고 선 채 뒤쪽 목표' 에서 R_min 으로 크게 감아 도는 "
+                "경로가 그대로 나간다. 경로 헤딩만으로는 못 고치는 상황이다."))
+
+        # ---- 정지 중 재래치 ----
+        if bc.get("align_relatch_stopped") is True:
+            per = max(cap_stp, float(esd or 0.0)) - exit_deg
+            note("정지 중 목표 재래치", "ON",
+                 f"OFF 면 한 기동이 도는 각도가 최대 {per:.0f}° 로 묶인다 "
+                 f"(래치각 - 이탈각). 왕복 1회 비용이 dwell {2*dwell:.0f} s 라 "
+                 f"큰 각도를 돌리면 시간예산이 통째로 날아간다.")
+        else:
+            note("정지 중 목표 재래치", "OFF",
+                 "한 기동이 도는 각도가 '래치각 - 이탈각' 으로 묶인다.")
 
     # ---- 결과 ----
     print("\n" + "=" * 78)
