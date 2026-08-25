@@ -26,6 +26,8 @@ install(
     scripts/nav2_kinematic_check.py
     scripts/virtual_pose_publisher.py
     scripts/plan_probe.py
+    scripts/scan_recorder.py
+    scripts/run_recorder.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

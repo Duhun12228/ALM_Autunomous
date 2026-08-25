@@ -191,11 +191,17 @@ ros2 launch alm_sensors lidar.launch.py mask_debug:=/livox/lidar_masked
 # 2) 매핑 (FAST-LIO2 3D SLAM)
 ros2 launch alm_sensors lidar.launch.py          # 터미널1: 센서(/livox/lidar,/livox/imu)
 ros2 launch alm_navigation slam.launch.py rviz:=true   # 터미널2: FAST-LIO2 (RViz Fixed Frame=odom)
+#    ↑ scan_recorder 가 함께 뜬다(record:=false 로 끔). '정합된 스캔 + 그때의
+#      센서 위치'를 활성 맵 폴더의 scans.npz 로 남긴다 — 아래 레이캐스팅 입력.
 #    LiDAR/로봇으로 천천히 한 바퀴(루프 닫기) 후 3D 맵 저장:
-ros2 service call /map_save std_srvs/srv/Trigger       # → $MAPS/alm_3d_map.pcd
-#    3D pcd → 2D occupancy 맵 (벽만 잡히게 z밴드 튜닝):
-ros2 run alm_navigation pcd2pgm.py --pcd $MAPS/alm_3d_map.pcd --out $MAPS/alm_map \
-  --resolution 0.05 --z-min 0.3 --z-max 0.8            # → $MAPS/alm_map.pgm/yaml
+ros2 service call /map_save std_srvs/srv/Trigger       # → $MAPS/<맵>/cloud.pcd
+#    Ctrl+C 로 slam.launch.py 종료 → scans.npz 최종 저장
+#    3D pcd → 2D occupancy 맵 (**레이캐스팅**: 광선이 지나간 셀 = 자유공간):
+ros2 run alm_navigation pcd2pgm.py --pcd $MAPS/<맵>/cloud.pcd \
+  --scans $MAPS/<맵>/scans.npz --out $MAPS/<맵>/grid --resolution 0.05
+#    지면은 자동 추정되고, 장애물 밴드는 **지면 기준**(기본 0.15~1.80 m)이다.
+#    ##중요## --scans 를 빼면 예전 '투영' 방식으로 떨어진다. 그러면 점이 찍힌
+#      셀만 자유공간이 되어 격자의 8할 이상이 미관측으로 남는다(실측 cschool 87.9%).
 
 # 2.5) [방식 B] FPFH 맵 DB 생성 (맵 갱신 때마다 1회, 오프라인)
 ros2 run icp_relocalization fpfh_map_builder \
@@ -250,8 +256,17 @@ auto 는 Nav2 의 `/cmd_vel`(vx+wz)을 보고 normal↔spin 을 자동 전환합
 헤딩이 60° 넘게(0.6 s 지속) 벌어지면 스스로 `spin` 을 걸어 헤딩을 고칩니다(`ALIGN`).
 전역 플래너는 `R_min` 원호/직선만 이어 붙여 **제자리 회전을 표현하지 못하므로**, 4륜
 독립조향의 제자리 회전을 실제로 쓰는 경로는 이것뿐입니다.
+
+**출발 시점은 따로 다룹니다.** Hybrid-A\* 경로는 항상 **현재 로봇 헤딩에 접해서**
+출발하므로(시작 상태 θ 가 현재 헤딩), 벽을 보고 선 채 뒤쪽 목표를 받아도 경로는
+"벽 쪽으로 나가서 크게 감아 돌아라" 라고만 말합니다 — 경로 헤딩오차로는 이걸 볼 수
+없습니다. 그래서 목표를 받고 **아직 0.30 m 미만 이동한 동안**에는 경로 대신
+**목표까지의 직선 방위각**을 보고 목표당 1회 제자리 회전으로 돌아섭니다
+(`align_goal_bearing_*`). 시뮬레이션에서 '뒤쪽 8 m 목표' 가 spin 8회/145.7 s →
+1회/72.3 s 가 됐습니다.
+
 설계 근거는 `alm_base_control/scripts/path_align.py` docstring,
-검증 결과는 `docs/control_pipeline.md` §6.8 · §7.3.
+검증 결과는 `docs/control_pipeline.md` §6.8 · §6.11 · §7.3.
 
 `normal` 모드는 자동차형이라 **최소 선회반경 1.643 m**(내측 전륜 30°, 후륜 50% 역조향
 포함) 아래로는 못 돕니다. 그보다 급한 요청은 `command_manager` 가
@@ -270,6 +285,24 @@ auto 는 Nav2 의 `/cmd_vel`(vx+wz)을 보고 normal↔spin 을 자동 전환합
 - 실차 전 확인/수정할 값 → `SETUP_CHECKLIST.md`
 - 작업 내역 → `docs/CHANGES.md`
 - **남은 작업(TODO) → `docs/TODO.md`**
+
+## 주행 기록·자동 진단
+
+`navigation.launch.py` 는 `run_recorder` 를 함께 띄운다(`record:=false` 로 끔).
+주행이 끝나면 — 성공이든 abort 든 **강제종료든** — 다음이 남는다.
+
+```
+~/ALM_Autunomous/logs/run_<날짜시각>/summary.md    사람이 읽는 판정
+                                    metrics.json   숫자 (여러 판 비교용)
+```
+
+RViz 로는 안 보이는 것들을 잡는다: MPPI 요청 대비 **wz 클램프율**(좌우 진동의
+지표), 전역경로의 **미관측 영역 통과 비율**, spin 체류시간 대비 위치오차 감소,
+dwell 정지 시간 비율, 경로 이탈. 1 초마다 파일을 다시 쓰므로 `kill -9` 로 죽어도
+남는다.
+
+> 단일 실행은 믿을 수 없다(`docs/TODO.md` — 같은 목표가 323 s → ABORT → 163 s
+> → TIMEOUT 로 흔들린다). `metrics.json` 을 여러 판 모아 **연속량**으로 비교할 것.
 
 ## Architecture 상세
 
