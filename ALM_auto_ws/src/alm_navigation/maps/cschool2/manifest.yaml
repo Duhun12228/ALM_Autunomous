@@ -1,0 +1,8 @@
+format_version: 1
+name: cschool2
+label: "씨스쿨더정교하게"
+created: "2026-08-25 11:51"
+sensor: livox_mid360
+# 자산의 '사실'(점 개수·해상도·feature 수)은 여기에 적지 않는다.
+# map_manager 가 파일 헤더에서 직접 읽는다 — 단일 진실 공급원.
+notes: "웹 UI 에서 생성 — 아직 매핑 전"
