@@ -64,6 +64,12 @@ from alm_msgs.msg import McuCommand
 GOAL_STATUS = {0: "UNKNOWN", 1: "ACCEPTED", 2: "EXECUTING", 3: "CANCELING",
                4: "SUCCEEDED", 5: "CANCELED", 6: "ABORTED"}
 
+# ---- 실현불가 회전 판정 상수 (2026-08-29) ----
+# 두 값이 판정 하한(infeasible_min_vx)의 유도식에 함께 들어간다. 한쪽만
+# 바꾸면 하한이 어긋나므로 반드시 여기 한 곳에서만 정의한다.
+WZ_REQ_EPS = 0.02          # 회전을 '요청했다' 고 볼 최소 |wz| [rad/s] — 분모 게이트
+INFEASIBLE_MARGIN = 1.05   # |wz| > (|vx|/R_min) * 이 값 이어야 위반으로 센다
+
 
 # --------------------------------------------------------------------- 맵 읽기
 def load_grid(yaml_path):
@@ -138,6 +144,23 @@ class RunRecorder(Node):
         # 최소 선회반경 [m]. fourwis_encode.min_turn_radius() 와 같아야 한다.
         # normal 모드의 회전 상한이 |vx|/R_min 이므로 이 값이 판정 기준이 된다.
         self.declare_parameter("r_min", 1.643)
+        # 실현불가 판정의 속도 하한 [m/s]. 이보다 느린 틱은 분모에도 안 넣는다.
+        # ##왜 필요한가 (2026-08-29)## 판정식이 |wz| > |vx|/R_min * 1.05,
+        #   즉 |wz| > |vx| * 0.639 다. 분모 게이트가 |wz| > 0.02 이므로 두 조건이
+        #   |vx| = 0.02 / 0.639 = **0.031 m/s** 에서 만난다. 그 아래에서는 분자
+        #   조건이 분모 조건보다 느슨해져 **분모에 든 틱이 100% 위반으로 계수된다.**
+        #   재는 것이 '못 낼 회전을 요구했는가' 가 아니라 '거의 멈춘 채 뭐라도
+        #   회전을 요청했는가' 가 되어, 지표가 항상 1 이 된다.
+        #   하필 vx 가 여기까지 떨어지는 순간(목표 접근 감속·좁은 통로·재계획
+        #   직후)이 진단이 가장 필요한 구간이라, 헤맬 때마다 와리가리 소견이
+        #   자동으로 떴다.
+        #   0.03 근거: base_control 의 steer_limit_min_vx 와 같은 값이다. 그
+        #   아래는 normal 모드가 조향으로 회전을 못 만들어 wz=0 으로 접히므로,
+        #   R_min 판정이 의미를 갖는 하한과 정확히 일치한다.
+        #   ⚠ 실제 적용값은 이 값과 아래 유도식(WZ_REQ_EPS * R_min /
+        #     INFEASIBLE_MARGIN) 중 **큰 쪽**이다. R_min 1.643 에서는 유도값
+        #     0.0313 이 이겨서 0.03 은 사실상 바닥 역할만 한다.
+        self.declare_parameter("infeasible_min_vx", 0.03)
 
         g = self.get_parameter
         base = os.path.expanduser(str(g("out_dir").value))
@@ -149,6 +172,16 @@ class RunRecorder(Node):
         self.warn_unknown = float(g("warn_unknown_frac").value)
         self.warn_clamp = float(g("warn_infeasible_frac").value)
         self.r_min = float(g("r_min").value)
+        # ★ 실제로 쓰는 하한은 **파라미터와 유도값 중 큰 쪽**이다.
+        #   유도값: 분자 조건이 분모 게이트보다 빡빡하려면
+        #       (vx / R_min) * INFEASIBLE_MARGIN >= WZ_REQ_EPS
+        #       -> vx >= WZ_REQ_EPS * R_min / INFEASIBLE_MARGIN
+        #   R_min 1.643 에서 0.0313 m/s 다. 파라미터 기본값 0.03 만 쓰면
+        #   [0.0300, 0.0313) 구간이 그대로 자동 계수로 남는다 — 좁지만 고치려던
+        #   결함과 같은 종류다. R_min 이 바뀌면 이 하한도 함께 따라간다.
+        self.infeasible_min_vx = max(
+            float(g("infeasible_min_vx").value),
+            (WZ_REQ_EPS * self.r_min / INFEASIBLE_MARGIN) if self.r_min > 0 else 0.0)
 
         # ---- 맵 (미관측 통과 판정용) ----
         self.grid = None
@@ -187,6 +220,11 @@ class RunRecorder(Node):
         self.wz_infeasible_ticks = 0
         self.wz_req_ticks = 0          # normal 모드에서 회전을 요청한 틱 (분모)
         self.wz_excess_max = 0.0
+        # 너무 느려서 판정을 건너뛴 틱 (infeasible_min_vx 주석 참고).
+        # ##왜 세는가## 안 세면 '실현불가 0%' 가 '깨끗했다' 인지 '한 번도 재지
+        #   않았다' 인지 구분이 안 된다. 지표를 조용하게 만드는 대신 얼마나
+        #   조용하게 만들었는지를 같이 남긴다.
+        self.wz_lowvx_ticks = 0
         self.dist = 0.0                # 주행 거리 [m]
         self.stall_sec = 0.0
         self.stop_sec = 0.0            # 완전 정지(속도 0) 시간
@@ -319,12 +357,19 @@ class RunRecorder(Node):
         self.wz_act_sum += act
         # normal 모드에서만 판정한다 — spin/crab 은 |wz| <= |vx|/R_min 이
         # 애초에 적용되지 않는 모드다(제자리 회전/병진).
-        if req > 0.02 and msg.drive_mode == "normal":
-            self.wz_req_ticks += 1
-            lim = (abs(self.nav_vx) / self.r_min) if self.r_min > 0 else float("inf")
-            if req > lim * 1.05:
-                self.wz_infeasible_ticks += 1
-                self.wz_excess_max = max(self.wz_excess_max, (req - lim) / req)
+        if req > WZ_REQ_EPS and msg.drive_mode == "normal":
+            # ★ 속도 하한 (2026-08-29). vx 가 이 아래면 판정식이 분모 게이트보다
+            #   느슨해져 세는 족족 위반이 된다 — infeasible_min_vx 주석 참고.
+            #   분자뿐 아니라 **분모에서도 뺀다.** 분모에만 남기면 '요구는 했는데
+            #   위반은 아니다' 로 계수돼 이번엔 지표가 반대로 눌린다.
+            if abs(self.nav_vx) < self.infeasible_min_vx:
+                self.wz_lowvx_ticks += 1
+            else:
+                self.wz_req_ticks += 1
+                lim = (abs(self.nav_vx) / self.r_min) if self.r_min > 0 else float("inf")
+                if req > lim * INFEASIBLE_MARGIN:
+                    self.wz_infeasible_ticks += 1
+                    self.wz_excess_max = max(self.wz_excess_max, (req - lim) / req)
 
         vx = abs(msg.cmd_vel.linear.x)
         # 목표 수행 중일 때만 센다 (exec_sec 주석 참고).
@@ -447,7 +492,11 @@ class RunRecorder(Node):
                 "infeasible_frac": round(infeasible, 4),
                 "excess_max": round(self.wz_excess_max, 4),
                 "ticks_requesting_turn": self.wz_req_ticks,
+                # vx < infeasible_min_vx 라 판정을 건너뛴 틱. 위 비율의 분모에
+                # 들어 있지 **않다.** 이 값이 크면 지표의 표본 자체가 적다.
+                "ticks_skipped_lowvx": self.wz_lowvx_ticks,
                 "r_min": self.r_min,
+                "min_vx": round(self.infeasible_min_vx, 4),
             },
             "mode": {
                 "seconds": {k: round(v, 1) for k, v in sorted(self.mode_sec.items())},
@@ -564,6 +613,8 @@ class RunRecorder(Node):
             f"| 경로 이탈 (평균/최대) | {dev_txt} |",
             f"| 실현불가 회전 요청 | {m['wz']['infeasible_frac']*100:.1f}%  "
             f"(최대 초과 {m['wz']['excess_max']*100:.0f}%, R_min {m['wz']['r_min']} m) |",
+            f"| └ 판정 표본 | {m['wz']['ticks_requesting_turn']}틱  "
+            f"(vx < {m['wz']['min_vx']} 라 건너뜀 {m['wz']['ticks_skipped_lowvx']}틱) |",
             f"| wz 요청/실제 평균 | {wz_txt} |",
             f"| 모드별 체류 | {mode_txt} |",
             f"| 모드 전환 | {m['mode']['switches']}회 |",
